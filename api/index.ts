@@ -107,7 +107,18 @@ function getGeminiClient() {
       'Chave GEMINI_API_KEY não configurada na Vercel! Vá em Settings > Environment Variables na Vercel e adicione GEMINI_API_KEY.'
     );
   }
-  return new GoogleGenAI({ apiKey });
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+    },
+  });
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function readHistoryDb(): unknown[] {
@@ -167,31 +178,34 @@ async function callGeminiFast(
   thinkingLevel: ThinkingLevel = ThinkingLevel.LOW
 ): Promise<{ text: string; modelUsed: string }> {
   const candidateModels = [
-    { name: 'gemini-2.5-flash', thinking: undefined },
+    { name: 'gemini-3.8-flash', thinking: thinkingLevel },
     { name: 'gemini-3-flash-preview', thinking: thinkingLevel },
     { name: 'gemini-flash-latest', thinking: undefined },
-    { name: 'gemini-2.0-flash', thinking: undefined },
+    { name: 'gemini-3.1-flash-lite', thinking: undefined },
   ];
 
   let lastError: unknown = null;
-  for (const candidate of candidateModels) {
-    try {
-      const config: Record<string, unknown> = { temperature: 0.2 };
-      if (systemPrompt) config.systemInstruction = systemPrompt;
-      if (candidate.thinking) {
-        config.thinkingConfig = { thinkingLevel: candidate.thinking };
+  for (let round = 0; round < 3; round++) {
+    for (const candidate of candidateModels) {
+      try {
+        const config: Record<string, unknown> = { temperature: 0.2 };
+        if (systemPrompt) config.systemInstruction = systemPrompt;
+        if (candidate.thinking) {
+          config.thinkingConfig = { thinkingLevel: candidate.thinking };
+        }
+        const response = await ai.models.generateContent({
+          model: candidate.name,
+          contents: { parts: parts as never[] },
+          config,
+        });
+        if (response && response.text) {
+          return { text: response.text, modelUsed: candidate.name };
+        }
+      } catch (err) {
+        lastError = err;
       }
-      const response = await ai.models.generateContent({
-        model: candidate.name,
-        contents: { parts: parts as never[] },
-        config,
-      });
-      if (response && response.text) {
-        return { text: response.text, modelUsed: candidate.name };
-      }
-    } catch (err) {
-      lastError = err;
     }
+    await sleep(1000 * (round + 1));
   }
   throw lastError || new Error('Serviço Gemini temporariamente indisponível.');
 }
