@@ -5,6 +5,8 @@ import {
   MessageSquare,
   Send,
   Camera,
+  Paperclip,
+  FileText,
   Sparkles,
   FileSearch,
   Copy,
@@ -13,14 +15,18 @@ import {
   User,
   Bot,
 } from 'lucide-react';
-import { FaultChatMessage } from '../types';
+import {
+  ChatAttachmentPayload,
+  DiagramCategoryTag,
+  FaultChatMessage,
+} from '../types';
 
 interface FaultChatPanelProps {
   alarmTitle: string;
   messages: FaultChatMessage[];
   onSendMessage: (
     text: string,
-    inlineImage?: { base64: string; mimeType: string; name: string }
+    attachment?: ChatAttachmentPayload
   ) => Promise<void>;
   isSending: boolean;
   chatProgressStep?: string;
@@ -33,6 +39,27 @@ const TACTICAL_CHAT_SUGGESTIONS = [
   'Detalhe os terminais da bobina (A1-A2) e contatos NA/NF deste circuito na folha funcional',
   'Gere um resumo executivo desta falha e da solução para registro na Ordem de Serviço (OS)',
 ];
+
+function inferCategoryFromFilename(filename: string): DiagramCategoryTag {
+  const upper = filename.toUpperCase();
+  if (upper.includes('RB') || upper.includes('BORNE')) return '/RB';
+  if (upper.includes('ME') || upper.includes('MECANIC')) return '/ME';
+  if (
+    upper.includes('RM') ||
+    upper.includes('MATERIA') ||
+    upper.includes('LISTA')
+  )
+    return '/RM';
+  if (
+    upper.endsWith('.JPG') ||
+    upper.endsWith('.JPEG') ||
+    upper.endsWith('.PNG') ||
+    upper.endsWith('.WEBP')
+  ) {
+    return 'FOTO CAMPO';
+  }
+  return '/EL';
+}
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -55,25 +82,31 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
   chatProgressStep,
 }) => {
   const [inputText, setInputText] = useState('');
-  const [attachedPhoto, setAttachedPhoto] = useState<{
-    base64: string;
-    mimeType: string;
-    name: string;
-  } | null>(null);
+  const [attachedFile, setAttachedFile] =
+    useState<ChatAttachmentPayload | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
 
-  const handlePhotoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
       const base64 = await fileToBase64(file);
-      setAttachedPhoto({
+      const isPdf =
+        file.type === 'application/pdf' ||
+        file.name.toLowerCase().endsWith('.pdf');
+      const mimeType = isPdf ? 'application/pdf' : file.type || 'image/jpeg';
+      const defaultCategory = inferCategoryFromFilename(file.name);
+
+      setAttachedFile({
         base64,
-        mimeType: file.type || 'image/jpeg',
+        mimeType,
         name: file.name,
+        sizeBytes: file.size,
+        categoryTag: defaultCategory,
+        panelName: '',
       });
     } catch {
       // Ignore file error
@@ -83,17 +116,22 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSending || (!inputText.trim() && !attachedPhoto)) return;
+    if (isSending || (!inputText.trim() && !attachedFile)) return;
 
-    const textToSend =
-      inputText.trim() ||
-      'Analise esta foto de medição/campo em relação à falha atual.';
-    const photoToSend = attachedPhoto || undefined;
+    const isPdf = attachedFile?.mimeType === 'application/pdf';
+    const defaultPrompt = isPdf
+      ? `Anexei o novo caderno PDF "${attachedFile?.name}"${
+          attachedFile?.panelName ? ` (Painel ${attachedFile.panelName})` : ''
+        } para continuarmos a investigação desta falha. Analise este diagrama em conjunto com o contexto atual.`
+      : 'Analise esta foto de medição/campo em relação à falha atual.';
+
+    const textToSend = inputText.trim() || defaultPrompt;
+    const fileToSend = attachedFile || undefined;
 
     setInputText('');
-    setAttachedPhoto(null);
+    setAttachedFile(null);
 
-    await onSendMessage(textToSend, photoToSend);
+    await onSendMessage(textToSend, fileToSend);
     setTimeout(() => {
       chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     }, 100);
@@ -133,15 +171,29 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
             </h3>
             <p className="text-xs text-slate-400">
               Continue perguntando sobre{' '}
-              <span className="text-sky-300 font-medium">"{alarmTitle}"</span> —
-              a IA consulta automaticamente qualquer folha do PDF anexado
+              <span className="text-sky-300 font-medium">"{alarmTitle}"</span>{' '}
+              ou anexe um novo PDF de outro painel (ex: <code>CLP-SASE</code>,{' '}
+              <code>QDCC</code>) direto aqui no chat
             </p>
           </div>
         </div>
 
-        <span className="text-xs font-mono tabular-nums text-slate-400">
-          {messages.length} {messages.length === 1 ? 'interação' : 'interações'}
-        </span>
+        <div className="flex items-center gap-2.5">
+          <button
+            type="button"
+            disabled={isSending}
+            onClick={() => fileInputRef.current?.click()}
+            className="px-3 py-1.5 text-xs font-medium text-sky-200 bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/40 rounded-md flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+          >
+            <Paperclip className="w-3.5 h-3.5 text-sky-400" />
+            <span>+ Anexar Novo PDF ou Foto no Chat</span>
+          </button>
+
+          <span className="text-xs font-mono tabular-nums text-slate-400">
+            {messages.length}{' '}
+            {messages.length === 1 ? 'interação' : 'interações'}
+          </span>
+        </div>
       </div>
 
       {/* Tactical 1-Click Field Suggestions */}
@@ -241,8 +293,23 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
                   </div>
 
                   {msg.attachedImageName && (
-                    <div className="mb-2 text-xs font-mono text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded px-2.5 py-1 inline-block">
-                      Foto anexada: {msg.attachedImageName}
+                    <div className="mb-2.5 flex flex-wrap items-center gap-2 text-xs font-mono text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded-md px-2.5 py-1.5">
+                      {msg.attachedImageName.toLowerCase().endsWith('.pdf') ? (
+                        <FileText className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                      ) : (
+                        <Camera className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                      )}
+                      <span>Arquivo anexado no chat: {msg.attachedImageName}</span>
+                      {msg.attachedFileCategory && (
+                        <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px]">
+                          {msg.attachedFileCategory}
+                        </span>
+                      )}
+                      {msg.attachedPanelName && (
+                        <span className="px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 text-[10px]">
+                          Painel: {msg.attachedPanelName}
+                        </span>
+                      )}
                     </div>
                   )}
 
@@ -326,29 +393,85 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
       {/* Chat Input Form */}
       <form
         onSubmit={handleSubmit}
-        className="p-4 bg-slate-900/90 border-t border-slate-800 flex flex-col gap-2.5"
+        className="p-4 bg-slate-900/90 border-t border-slate-800 flex flex-col gap-3"
       >
-        {attachedPhoto && (
-          <div className="flex items-center justify-between bg-amber-500/10 border border-amber-500/30 rounded-md px-3 py-1.5 text-xs text-amber-200">
-            <span className="font-mono truncate">
-              Foto de campo anexada: {attachedPhoto.name}
-            </span>
-            <button
-              type="button"
-              onClick={() => setAttachedPhoto(null)}
-              className="text-amber-300 hover:text-white p-0.5 cursor-pointer"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
+        {attachedFile && (
+          <div className="flex flex-col gap-2.5 bg-sky-950/30 border border-sky-500/40 rounded-lg p-3 text-xs">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                {attachedFile.mimeType === 'application/pdf' ? (
+                  <FileText className="w-4 h-4 text-sky-400 shrink-0" />
+                ) : (
+                  <Camera className="w-4 h-4 text-amber-400 shrink-0" />
+                )}
+                <span className="font-mono font-semibold text-slate-100 truncate">
+                  {attachedFile.name}
+                </span>
+                {attachedFile.sizeBytes && (
+                  <span className="text-[11px] font-mono text-slate-400 shrink-0">
+                    ({(attachedFile.sizeBytes / (1024 * 1024)).toFixed(2)} MB)
+                  </span>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setAttachedFile(null)}
+                className="text-slate-400 hover:text-white p-1 rounded hover:bg-slate-800 cursor-pointer shrink-0"
+                title="Remover arquivo"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {attachedFile.mimeType === 'application/pdf' && (
+              <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-800/80">
+                <span className="text-[11px] text-sky-300 font-medium">
+                  Novo PDF para a sequência:
+                </span>
+                <select
+                  aria-label="Categoria do PDF anexado no chat"
+                  value={attachedFile.categoryTag || '/EL'}
+                  onChange={(e) =>
+                    setAttachedFile((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            categoryTag: e.target.value as DiagramCategoryTag,
+                          }
+                        : null
+                    )
+                  }
+                  className="bg-[#0B111E] border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-sky-500"
+                >
+                  <option value="/EL">/EL (Esquema Elétrico)</option>
+                  <option value="/RB">/RB (Régua de Bornes)</option>
+                  <option value="/ME">/ME (Desenho Mecânico)</option>
+                  <option value="/RM">/RM (Relação de Materiais)</option>
+                </select>
+
+                <input
+                  type="text"
+                  value={attachedFile.panelName || ''}
+                  onChange={(e) =>
+                    setAttachedFile((prev) =>
+                      prev ? { ...prev, panelName: e.target.value } : null
+                    )
+                  }
+                  placeholder="Painel (ex: CLP-SASE, QDCC, PCPG1)"
+                  className="bg-[#0B111E] border border-slate-700 rounded px-2.5 py-1 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-sky-500 w-56"
+                />
+              </div>
+            )}
           </div>
         )}
 
-        <div className="flex items-end gap-2">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-end gap-2">
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/jpeg,image/png,image/webp"
-            onChange={handlePhotoChange}
+            accept=".pdf,application/pdf,image/jpeg,image/png,image/webp"
+            onChange={handleFileChange}
             className="hidden"
           />
 
@@ -356,10 +479,11 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
             type="button"
             disabled={isSending}
             onClick={() => fileInputRef.current?.click()}
-            title="Anexar foto do multímetro ou painel no chat"
-            className="p-2.5 text-slate-300 hover:text-sky-300 bg-[#0B111E] hover:bg-slate-800 border border-slate-700 rounded-md transition-colors cursor-pointer shrink-0 disabled:opacity-50"
+            title="Anexar novo PDF (ex: painel CLP-SASE, QDCC) ou foto de campo direto no chat"
+            className="px-3 py-2.5 text-xs font-medium text-sky-300 hover:text-white bg-[#0B111E] hover:bg-sky-500/20 border border-sky-500/40 rounded-md transition-colors cursor-pointer shrink-0 disabled:opacity-50 flex items-center justify-center gap-1.5"
           >
-            <Camera className="w-4 h-4" />
+            <Paperclip className="w-4 h-4 text-sky-400" />
+            <span>Anexar PDF / Foto</span>
           </button>
 
           <textarea
@@ -372,14 +496,14 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
                 handleSubmit(e);
               }
             }}
-            placeholder='Pergunte ao Gemini sobre a falha (ex: "Analise a Folha 27 e a Folha 31", "Medi 0Vcc no borne XED:217, onde testo agora?")...'
+            placeholder='Pergunte ao Gemini ou anexe outro PDF ao lado (ex: "Anexei o PDF do painel CLP-SASE, localize o switch desta falha")...'
             className="flex-1 bg-[#0B111E] border border-slate-700 focus:border-sky-500 rounded-md px-3 py-2 text-xs sm:text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none resize-none"
           />
 
           <button
             type="submit"
-            disabled={isSending || (!inputText.trim() && !attachedPhoto)}
-            className="px-4 py-2.5 bg-sky-600 hover:bg-sky-500 disabled:bg-slate-800 disabled:text-slate-500 text-white text-xs font-medium rounded-md transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+            disabled={isSending || (!inputText.trim() && !attachedFile)}
+            className="px-4 py-2.5 bg-sky-600 hover:bg-sky-500 disabled:bg-slate-800 disabled:text-slate-500 text-white text-xs font-medium rounded-md transition-colors flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
           >
             <Send className="w-3.5 h-3.5" />
             <span>Enviar no Chat</span>
