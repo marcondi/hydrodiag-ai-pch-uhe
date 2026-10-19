@@ -232,53 +232,57 @@ async function callGeminiFast(
   ai: GoogleGenAI,
   parts: unknown[],
   systemPrompt: string | null,
-  thinkingLevel: ThinkingLevel = ThinkingLevel.LOW
+  _thinkingLevel: ThinkingLevel = ThinkingLevel.MINIMAL,
+  preferUltraFastLite = false
 ): Promise<{ text: string; modelUsed: string }> {
-  const candidateModels = [
-    { name: 'gemini-3.8-flash', thinking: thinkingLevel },
-    { name: 'gemini-3-flash-preview', thinking: thinkingLevel },
-    { name: 'gemini-flash-latest', thinking: undefined },
-    { name: 'gemini-3.1-flash-lite', thinking: undefined },
-  ];
+  const candidateModels = preferUltraFastLite
+    ? [
+        'gemini-3.5-flash-lite',
+        'gemini-3.6-flash',
+        'gemini-3.5-flash',
+        'gemini-3-flash-preview',
+        'gemini-flash-lite-latest',
+        'gemini-3.8-flash',
+      ]
+    : [
+        'gemini-3.6-flash',
+        'gemini-3.5-flash-lite',
+        'gemini-3.5-flash',
+        'gemini-3-flash-preview',
+        'gemini-3.8-flash',
+        'gemini-flash-lite-latest',
+      ];
 
   let lastError: unknown = null;
 
-  for (let round = 0; round < 2; round++) {
-    for (const candidate of candidateModels) {
-      try {
-        const config: Record<string, unknown> = {
-          temperature: 0.2,
-        };
-        if (systemPrompt) {
-          config.systemInstruction = systemPrompt;
-        }
-        if (candidate.thinking) {
-          config.thinkingConfig = {
-            thinkingLevel: candidate.thinking,
-          };
-        }
-
-        const response = await ai.models.generateContent({
-          model: candidate.name,
-          contents: { parts: parts as never[] },
-          config,
-        });
-
-        if (response && response.text) {
-          return {
-            text: response.text,
-            modelUsed: candidate.name,
-          };
-        }
-      } catch (err) {
-        lastError = err;
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(
-          `[HydroDiag AI] Modelo ${candidate.name} (rodada ${round + 1}) retornou: ${msg.slice(0, 140)}`
-        );
+  for (const modelName of candidateModels) {
+    try {
+      const config: Record<string, unknown> = {
+        temperature: 0.2,
+      };
+      if (systemPrompt) {
+        config.systemInstruction = systemPrompt;
       }
+
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents: { parts: parts as never[] },
+        config,
+      });
+
+      if (response && response.text) {
+        return {
+          text: response.text,
+          modelUsed: modelName,
+        };
+      }
+    } catch (err) {
+      lastError = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[HydroDiag AI] Modelo ${modelName} retornou: ${msg.slice(0, 140)}`
+      );
     }
-    await sleep(900 * (round + 1));
   }
 
   throw lastError || new Error('Serviço de IA temporariamente indisponível.');
@@ -544,6 +548,25 @@ export function createApiApp() {
   // 0. STATELESS VERCEL SERVERLESS ENDPOINT (/api/serverless-step)
   // ============================================================================
   app.post('/api/serverless-step', async (req, res) => {
+    res.status(200);
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Transfer-Encoding', 'chunked');
+    res.write(' ');
+
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(' ');
+      } catch {
+        // Ignore
+      }
+    }, 1500);
+
+    const sendChunkedJson = (payload: Record<string, unknown>) => {
+      clearInterval(heartbeat);
+      res.end(JSON.stringify(payload));
+    };
+
     try {
       const { action } = req.body || {};
       const ai = getGeminiClient();
@@ -564,9 +587,10 @@ export function createApiApp() {
             },
           ],
           null,
-          ThinkingLevel.MINIMAL
+          ThinkingLevel.MINIMAL,
+          true
         );
-        return res.json({ summary: result.text });
+        return sendChunkedJson({ summary: result.text });
       }
 
       if (action === 'select_pages') {
@@ -590,7 +614,8 @@ Retorne APENAS os números das páginas do PDF separados por vírgula (exemplo: 
           ai,
           [{ text: selectorPrompt }],
           null,
-          ThinkingLevel.MINIMAL
+          ThinkingLevel.MINIMAL,
+          true
         );
         const matches = selRes.text.match(/\b\d+\b/g);
         let selectedPages: number[] = [1, 2];
@@ -602,7 +627,7 @@ Retorne APENAS os números das páginas do PDF separados por vírgula (exemplo: 
             selectedPages = Array.from(new Set([1, ...parsed])).slice(0, 9);
           }
         }
-        return res.json({ selectedPages });
+        return sendChunkedJson({ selectedPages });
       }
 
       if (action === 'diagnose') {
@@ -645,7 +670,8 @@ Retorne APENAS os números das páginas do PDF separados por vírgula (exemplo: 
           ai,
           parts,
           SYSTEM_INSTRUCTION,
-          ThinkingLevel.LOW
+          ThinkingLevel.MINIMAL,
+          false
         );
         const markdownText =
           result.text ||
@@ -661,7 +687,7 @@ Retorne APENAS os números das páginas do PDF separados por vírgula (exemplo: 
           lowerText.includes('não pertence') ||
           lowerText.includes('sequência');
 
-        return res.json({
+        return sendChunkedJson({
           status: 'completed',
           markdown: markdownText,
           requiresNextDrawing,
@@ -721,10 +747,11 @@ Responda em Markdown técnico claro, objetivo e direto para auxiliar o operador 
           ai,
           parts,
           CHAT_SYSTEM_INSTRUCTION,
-          ThinkingLevel.LOW
+          ThinkingLevel.MINIMAL,
+          false
         );
 
-        return res.json({
+        return sendChunkedJson({
           status: 'completed',
           markdown:
             result.text || 'Não foi possível processar a resposta do chat.',
@@ -733,10 +760,14 @@ Responda em Markdown técnico claro, objetivo e direto para auxiliar o operador 
         });
       }
 
-      return res.status(400).json({ error: 'Ação serverless desconhecida.' });
+      return sendChunkedJson({
+        ok: false,
+        error: 'Ação serverless desconhecida.',
+      });
     } catch (err) {
       console.error('Erro em /api/serverless-step:', err);
-      return res.status(500).json({
+      return sendChunkedJson({
+        ok: false,
         error:
           err instanceof Error
             ? err.message
