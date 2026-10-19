@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import {
-  Github,
+  GitBranch,
   CheckCircle2,
   ExternalLink,
   Copy,
@@ -59,7 +59,13 @@ function downloadTextFile(filename: string, content: string) {
 export const GitHubDeployPanel: React.FC = () => {
   const [githubUsername, setGithubUsername] = useState('marcondi');
   const [repoName, setRepoName] = useState('hydrodiag-ai-pch-uhe');
-  const [githubToken, setGithubToken] = useState('');
+  const [githubToken, setGithubToken] = useState(() => {
+    try {
+      return localStorage.getItem('hydrodiag_github_pat') || '';
+    } catch {
+      return '';
+    }
+  });
   const [isPrivate, setIsPrivate] = useState(false);
 
   const [isPublishing, setIsPublishing] = useState(false);
@@ -73,9 +79,24 @@ export const GitHubDeployPanel: React.FC = () => {
   const [copiedVercelJson, setCopiedVercelJson] = useState(false);
   const [copiedApiIndex, setCopiedApiIndex] = useState(false);
 
+  const handleTokenChange = (val: string) => {
+    setGithubToken(val);
+    try {
+      localStorage.setItem('hydrodiag_github_pat', val.trim());
+    } catch {
+      // Ignore storage error
+    }
+  };
+
   const handlePublishToGitHub = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!githubToken.trim()) return;
+
+    try {
+      localStorage.setItem('hydrodiag_github_pat', githubToken.trim());
+    } catch {
+      // Ignore
+    }
 
     setIsPublishing(true);
     setPublishError(null);
@@ -102,7 +123,6 @@ export const GitHubDeployPanel: React.FC = () => {
         repoUrl: data.repoUrl,
         uploadedCount: data.uploadedCount,
       });
-      setGithubToken('');
     } catch (err) {
       setPublishError(
         err instanceof Error
@@ -163,7 +183,7 @@ git push -u origin main`;
             rel="noreferrer"
             className="px-3.5 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-md flex items-center gap-1.5 transition-colors"
           >
-            <Github className="w-3.5 h-3.5 text-slate-300" />
+            <GitBranch className="w-3.5 h-3.5 text-slate-300" />
             <span>GitHub @marcondi</span>
             <ExternalLink className="w-3 h-3 text-sky-400" />
           </a>
@@ -460,7 +480,7 @@ git push -u origin main`;
             <input
               type="password"
               value={githubToken}
-              onChange={(e) => setGithubToken(e.target.value)}
+              onChange={(e) => handleTokenChange(e.target.value)}
               placeholder="ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
               className="bg-[#111827] border border-slate-700 rounded-md px-3 py-2 text-xs text-slate-100 font-mono focus:outline-none focus:border-sky-500"
             />
@@ -525,7 +545,7 @@ git push -u origin main`;
             disabled={isPublishing || !githubToken.trim()}
             className="mt-auto py-2.5 px-4 bg-sky-600 hover:bg-sky-500 disabled:bg-slate-800 disabled:text-slate-500 text-white text-xs font-medium rounded-md transition-colors flex items-center justify-center gap-2 cursor-pointer"
           >
-            <Github className="w-4 h-4" />
+            <GitBranch className="w-4 h-4" />
             <span>
               {isPublishing
                 ? 'Sincronizando Arquivos da Vercel no GitHub...'
