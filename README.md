@@ -8,10 +8,9 @@ Sistema especialista multimodal desenvolvido para engenharia de manutenção, pr
 - **Chat Técnico Contínuo com o Especialista Gemini:** Converse em tempo real sobre a falha, envie fotos de medições em campo e peça análise de folhas complementares sem perder o contexto.
 - **Banco de Dados Persistente de Histórico de Falhas:** Busque rapidamente diagnósticos anteriores, registre a solução confirmada em campo e exporte Ordens de Serviço.
 
-## 🛠️ Como Executar Localmente
-```bash
-npm install
-cp .env.example .env
-# Adicione sua GEMINI_API_KEY no arquivo .env
-npm run dev
-```
+## ☁️ Como Publicar na Vercel (Acesso em Qualquer PC)
+1. Acesse [https://vercel.com/new](https://vercel.com/new) e importe este repositório (`hydrodiag-ai-pch-uhe`).
+2. Em **Environment Variables**, adicione:
+   - Nome: `GEMINI_API_KEY`
+   - Valor: Sua chave da API do Google Gemini (obtenha gratuitamente em [https://aistudio.google.com/apikey](https://aistudio.google.com/apikey)).
+3. Clique em **Deploy**. O arquivo `vercel.json` e a função serverless `api/index.ts` já configuram automaticamente o backend e o frontend!
