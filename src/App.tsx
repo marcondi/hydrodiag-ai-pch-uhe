@@ -128,8 +128,9 @@ async function safeParseJsonResponse(response: Response): Promise<{
   const rawText = await response.text();
   try {
     const parsed = JSON.parse(rawText);
+    const isOk = response.ok && parsed?.ok !== false;
     return {
-      ok: response.ok,
+      ok: isOk,
       status: response.status,
       isHtml: false,
       data: parsed,
