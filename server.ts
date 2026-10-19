@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import crypto from 'crypto';
 import express from 'express';
 import fs from 'fs';
 import os from 'os';
@@ -234,9 +235,8 @@ async function callGeminiFast(
   thinkingLevel: ThinkingLevel = ThinkingLevel.LOW
 ): Promise<{ text: string; modelUsed: string }> {
   const candidateModels = [
-    { name: 'gemini-3-flash-preview', thinking: thinkingLevel },
-    { name: 'gemini-2.5-flash', thinking: undefined },
     { name: 'gemini-3.8-flash', thinking: thinkingLevel },
+    { name: 'gemini-3-flash-preview', thinking: thinkingLevel },
     { name: 'gemini-flash-latest', thinking: undefined },
     { name: 'gemini-3.1-flash-lite', thinking: undefined },
   ];
@@ -1337,6 +1337,13 @@ Sistema especialista multimodal desenvolvido para engenharia de manutenção, pr
       const uploadedFiles: string[] = [];
 
       const pushSingleFile = async (relPath: string, contentBase64: string) => {
+        const rawBuf = Buffer.from(contentBase64, 'base64');
+        const localBlobSha = crypto
+          .createHash('sha1')
+          .update(`blob ${rawBuf.length}\0`)
+          .update(rawBuf)
+          .digest('hex');
+
         let existingSha: string | undefined;
         const getFileRes = await fetch(
           `https://api.github.com/repos/${owner}/${cleanRepo}/contents/${relPath}`,
@@ -1347,13 +1354,19 @@ Sistema especialista multimodal desenvolvido para engenharia de manutenção, pr
           existingSha = fileInfo.sha;
         }
 
+        // Skip PUT if the file on GitHub is already byte-for-byte identical
+        if (existingSha && existingSha === localBlobSha) {
+          uploadedFiles.push(relPath);
+          return;
+        }
+
         const putRes = await fetch(
           `https://api.github.com/repos/${owner}/${cleanRepo}/contents/${relPath}`,
           {
             method: 'PUT',
             headers,
             body: JSON.stringify({
-              message: `feat: update ${relPath} for Vercel Serverless deploy`,
+              message: `feat: update ${relPath} for Gemini 3.8 Flash & Vercel`,
               content: contentBase64,
               ...(existingSha ? { sha: existingSha } : {}),
             }),
