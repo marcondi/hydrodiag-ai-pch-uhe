@@ -38,6 +38,7 @@ import {
 import { FaultQueryPanel } from './components/FaultQueryPanel';
 import { DiagnosticReportView } from './components/DiagnosticReportView';
 import { GitHubDeployPanel } from './components/GitHubDeployModal';
+import { prepareClientSmartAttachmentParts } from './utils/pdfClientEngine';
 
 const STORAGE_KEY = 'hydrodiag_saved_investigations_v2';
 const BASE64_CHUNK_SIZE = 1500 * 1024;
@@ -370,7 +371,7 @@ export default function App() {
     focusToUse: string
   ) => {
     setIsAnalyzing(true);
-    setProgressStep('Verificando sincronização dos diagramas no servidor...');
+    setProgressStep('Iniciando leitura eletromecânica dos diagramas...');
     setError(null);
     setActiveNavTab('bancada');
 
@@ -382,6 +383,76 @@ export default function App() {
     }, 100);
 
     try {
+      const canUseStatelessServerless =
+        attachmentsToUse.length === 0 ||
+        attachmentsToUse.every((a) => Boolean(a.base64Data));
+
+      if (canUseStatelessServerless) {
+        const preparedParts: unknown[] = [];
+
+        for (const att of attachmentsToUse) {
+          preparedParts.push({
+            text: `[ARQUIVO ANEXADO NA SEQUÊNCIA #${att.sequenceIndex} | Categoria: ${att.categoryTag} | Painel: ${att.panelName || 'Não informado'} | Nome: "${att.name}"]`,
+          });
+          const { parts } = await prepareClientSmartAttachmentParts(
+            att,
+            queryToUse,
+            focusToUse,
+            (msg) => setProgressStep(msg)
+          );
+          preparedParts.push(...parts);
+        }
+
+        setProgressStep(
+          'Elaborando diagnóstico detalhado (Guia de Multímetro, Procedimento de Campo, /ME e /RM)...'
+        );
+
+        const stepResp = await fetch('/api/serverless-step', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'diagnose',
+            preparedParts,
+            query: queryToUse,
+            focusTopic: focusToUse,
+            hasAttachments: attachmentsToUse.length > 0,
+            history: turns.map((t) => ({
+              userQuery: t.userQuery,
+              markdownResponse: t.markdownResponse,
+            })),
+          }),
+        });
+
+        const parsedStep = await safeParseJsonResponse(stepResp);
+        if (!parsedStep.ok) {
+          throw new Error(
+            String(
+              parsedStep.data.error ||
+                'Não foi possível concluir o diagnóstico no servidor.'
+            )
+          );
+        }
+
+        const newTurn: DiagnosticTurn = {
+          id: `turn_${Date.now()}`,
+          timestamp:
+            (parsedStep.data.timestamp as string) || new Date().toISOString(),
+          userQuery: queryToUse,
+          focusTopic: focusToUse || undefined,
+          attachedFileNames: attachmentsToUse.map(
+            (a) => `#${a.sequenceIndex} ${a.name} (${a.categoryTag})`
+          ),
+          sequenceCountAtTurn: attachmentsToUse.length,
+          markdownResponse: String(parsedStep.data.markdown || ''),
+          requiresNextDrawing: Boolean(parsedStep.data.requiresNextDrawing),
+          chatMessages: [],
+        };
+
+        setTurns((prev) => [...prev, newTurn]);
+        return;
+      }
+
+      // Fallback when attachments were restored from history metadata without local base64Data
       for (const att of attachmentsToUse) {
         if (att.serverUploadStatus !== 'synced' && att.base64Data) {
           await uploadAttachmentInChunks(att, (pct) => {
@@ -543,6 +614,86 @@ export default function App() {
     setError(null);
 
     try {
+      const canUseStatelessServerless =
+        attachments.length === 0 ||
+        attachments.some((a) => Boolean(a.base64Data));
+
+      if (canUseStatelessServerless) {
+        const preparedParts: unknown[] = [];
+        const allSelectedPages: number[] = [];
+
+        for (const att of attachments) {
+          if (att.base64Data) {
+            const { parts, selectedPages } =
+              await prepareClientSmartAttachmentParts(
+                att,
+                `${targetTurn.userQuery || ''} - ${messageText}`,
+                targetTurn.markdownResponse
+                  ? targetTurn.markdownResponse.slice(0, 600)
+                  : '',
+                (msg) => setChatProgressStep(msg)
+              );
+            preparedParts.push(...parts);
+            allSelectedPages.push(...selectedPages);
+          }
+        }
+
+        setChatProgressStep(
+          'Analisando circuito e formulando resposta técnica do especialista...'
+        );
+
+        const stepResp = await fetch('/api/serverless-step', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'chat',
+            preparedParts,
+            message: messageText,
+            alarmTitle: targetTurn.userQuery,
+            diagnosticMarkdown: targetTurn.markdownResponse,
+            chatHistory: (targetTurn.chatMessages || []).map((m) => ({
+              role: m.role,
+              content: m.content,
+            })),
+            inlineImageBase64: inlineImage?.base64,
+            inlineImageMimeType: inlineImage?.mimeType,
+          }),
+        });
+
+        const parsedStep = await safeParseJsonResponse(stepResp);
+        if (!parsedStep.ok) {
+          throw new Error(
+            String(
+              parsedStep.data.error ||
+                'Não foi possível processar a resposta no chat.'
+            )
+          );
+        }
+
+        const assistantMsg: FaultChatMessage = {
+          id: `cmsg_${Date.now()}_a`,
+          role: 'assistant',
+          content: String(parsedStep.data.markdown || ''),
+          timestamp:
+            (parsedStep.data.timestamp as string) || new Date().toISOString(),
+          inspectedPages:
+            allSelectedPages.length > 0 ? allSelectedPages : undefined,
+        };
+
+        setTurns((prev) =>
+          prev.map((t) =>
+            t.id === turnId
+              ? {
+                  ...t,
+                  chatMessages: [...(t.chatMessages || []), assistantMsg],
+                }
+              : t
+          )
+        );
+        return;
+      }
+
+      // Fallback when session was reopened from history without local base64Data
       const startResp = await fetch('/api/chat-fault', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -680,33 +831,20 @@ export default function App() {
           categoryTag,
           panelName: panelHint,
           addedAtTimestamp: new Date().toISOString(),
-          serverUploadStatus: 'uploading',
-          uploadProgress: 0,
+          serverUploadStatus: 'synced',
+          uploadProgress: 100,
         });
       }
 
       const combinedAttachments = [...attachments, ...newItems];
       setAttachments(combinedAttachments);
 
+      // Background sync to local/server disk cache if available (non-blocking for Vercel Serverless)
       for (const item of newItems) {
-        await uploadAttachmentInChunks(item, (pct) => {
-          if (isSequentialNext) {
-            setProgressStep(
-              `Sincronizando desenho na sequência #${item.sequenceIndex} (${item.name}): ${pct}%...`
-            );
-          }
-        });
+        uploadAttachmentInChunks(item).catch(() => {});
       }
 
-      const syncedCombined = combinedAttachments.map((att) =>
-        newItems.some((n) => n.id === att.id)
-          ? {
-              ...att,
-              serverUploadStatus: 'synced' as const,
-              uploadProgress: 100,
-            }
-          : att
-      );
+      const syncedCombined = combinedAttachments;
 
       if (isSequentialNext && newItems.length > 0) {
         const namesJoined = newItems.map((n) => n.name).join(', ');
@@ -1007,7 +1145,7 @@ export default function App() {
                 : ''
             }`}
           >
-            GitHub (@marcondi)
+            Vercel & GitHub
           </a>
         </nav>
 
@@ -1078,7 +1216,7 @@ export default function App() {
               : 'text-slate-400'
           }`}
         >
-          GitHub
+          Vercel & GitHub
         </button>
       </div>
 
