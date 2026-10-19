@@ -90,7 +90,8 @@ export async function prepareClientSmartAttachmentParts(
   att: DiagramAttachment,
   userQuery: string,
   focusTopic: string,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  maxPages = 8
 ): Promise<{
   parts: unknown[];
   selectedPages: number[];
@@ -220,10 +221,13 @@ export async function prepareClientSmartAttachmentParts(
     if (Array.isArray(selRes.selectedPages) && selRes.selectedPages.length > 0) {
       selectedPagesOneBased = (selRes.selectedPages as number[])
         .filter((n) => typeof n === 'number' && n >= 1 && n <= totalPages)
-        .slice(0, 9);
+        .slice(0, maxPages);
     }
   } catch {
-    selectedPagesOneBased = [1, 2, Math.min(30, totalPages), Math.min(50, totalPages)];
+    selectedPagesOneBased = [1, 2, Math.min(30, totalPages), Math.min(50, totalPages)].slice(
+      0,
+      maxPages
+    );
   }
 
   if (onProgress) {
