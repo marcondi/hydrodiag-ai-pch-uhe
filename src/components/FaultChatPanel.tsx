@@ -1,9 +1,8 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   MessageSquare,
-  Send,
   Camera,
   Paperclip,
   FileText,
@@ -14,6 +13,11 @@ import {
   X,
   User,
   Bot,
+  Plus,
+  Library,
+  Compass,
+  Telescope,
+  ArrowUp,
 } from 'lucide-react';
 import {
   ChatAttachmentPayload,
@@ -30,6 +34,7 @@ interface FaultChatPanelProps {
   ) => Promise<void>;
   isSending: boolean;
   chatProgressStep?: string;
+  onOpenSequenceUpload?: () => void;
 }
 
 const TACTICAL_CHAT_SUGGESTIONS = [
@@ -80,14 +85,46 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
   onSendMessage,
   isSending,
   chatProgressStep,
+  onOpenSequenceUpload,
 }) => {
   const [inputText, setInputText] = useState('');
   const [attachedFile, setAttachedFile] =
     useState<ChatAttachmentPayload | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [isPlusMenuOpen, setIsPlusMenuOpen] = useState(false);
+  const [fileAcceptMode, setFileAcceptMode] = useState<string>(
+    '.pdf,application/pdf,image/jpeg,image/png,image/webp'
+  );
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const plusMenuRef = useRef<HTMLDivElement | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        plusMenuRef.current &&
+        !plusMenuRef.current.contains(event.target as Node)
+      ) {
+        setIsPlusMenuOpen(false);
+      }
+    };
+    if (isPlusMenuOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [isPlusMenuOpen]);
+
+  const triggerFilePicker = (accept: string) => {
+    setFileAcceptMode(accept);
+    setIsPlusMenuOpen(false);
+    setTimeout(() => {
+      fileInputRef.current?.click();
+    }, 20);
+  };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -108,6 +145,9 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
         categoryTag: defaultCategory,
         panelName: '',
       });
+      setTimeout(() => {
+        textareaRef.current?.focus();
+      }, 50);
     } catch {
       // Ignore file error
     }
@@ -130,6 +170,7 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
 
     setInputText('');
     setAttachedFile(null);
+    setIsPlusMenuOpen(false);
 
     await onSendMessage(textToSend, fileToSend);
     setTimeout(() => {
@@ -156,9 +197,9 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
   };
 
   return (
-    <div className="mt-6 border border-sky-500/30 rounded-lg bg-[#0B111E] overflow-hidden flex flex-col no-print">
+    <div className="mt-6 border border-sky-500/30 rounded-lg bg-[#0B111E] flex flex-col no-print">
       {/* Header */}
-      <div className="px-5 py-3.5 bg-slate-900/90 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
+      <div className="px-5 py-3.5 bg-slate-900/90 border-b border-slate-800 rounded-t-lg flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
           <div className="w-8 h-8 rounded-md bg-sky-500/15 border border-sky-500/30 flex items-center justify-center text-sky-400">
             <MessageSquare className="w-4 h-4" />
@@ -172,23 +213,13 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
             <p className="text-xs text-slate-400">
               Continue perguntando sobre{' '}
               <span className="text-sky-300 font-medium">"{alarmTitle}"</span>{' '}
-              ou anexe um novo PDF de outro painel (ex: <code>CLP-SASE</code>,{' '}
-              <code>QDCC</code>) direto aqui no chat
+              ou clique no botão <strong>+</strong> abaixo para adicionar fotos e
+              novos PDFs (ex: <code>CLP-SASE</code>, <code>QDCC</code>)
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-2.5">
-          <button
-            type="button"
-            disabled={isSending}
-            onClick={() => fileInputRef.current?.click()}
-            className="px-3 py-1.5 text-xs font-medium text-sky-200 bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/40 rounded-md flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-          >
-            <Paperclip className="w-3.5 h-3.5 text-sky-400" />
-            <span>+ Anexar Novo PDF ou Foto no Chat</span>
-          </button>
-
           <span className="text-xs font-mono tabular-nums text-slate-400">
             {messages.length}{' '}
             {messages.length === 1 ? 'interação' : 'interações'}
@@ -227,9 +258,9 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
               Tem alguma dúvida específica sobre um borne, relé, folha complementar ou resultado do multímetro?
             </p>
             <p className="text-xs text-slate-400 max-w-xl mx-auto">
-              Digite sua pergunta abaixo ou envie uma foto tirada em campo (ex:
-              leitura do multímetro, estado dos LEDs do CLP ou régua de bornes)
-              para continuar a investigação passo a passo.
+              Use o botão <strong>+</strong> na barra abaixo para anexar um novo
+              PDF elétrico ou foto tirada em campo, ou digite sua pergunta
+              diretamente.
             </p>
           </div>
         ) : (
@@ -390,126 +421,285 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
         <div ref={chatEndRef} />
       </div>
 
-      {/* Chat Input Form */}
+      {/* GPT-Style Composer Form */}
       <form
         onSubmit={handleSubmit}
-        className="p-4 bg-slate-900/90 border-t border-slate-800 flex flex-col gap-3"
+        className="p-4 bg-slate-900/90 border-t border-slate-800 rounded-b-lg"
       >
-        {attachedFile && (
-          <div className="flex flex-col gap-2.5 bg-sky-950/30 border border-sky-500/40 rounded-lg p-3 text-xs">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 min-w-0">
-                {attachedFile.mimeType === 'application/pdf' ? (
-                  <FileText className="w-4 h-4 text-sky-400 shrink-0" />
-                ) : (
-                  <Camera className="w-4 h-4 text-amber-400 shrink-0" />
-                )}
-                <span className="font-mono font-semibold text-slate-100 truncate">
-                  {attachedFile.name}
-                </span>
-                {attachedFile.sizeBytes && (
-                  <span className="text-[11px] font-mono text-slate-400 shrink-0">
-                    ({(attachedFile.sizeBytes / (1024 * 1024)).toFixed(2)} MB)
-                  </span>
-                )}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept={fileAcceptMode}
+          onChange={handleFileChange}
+          className="hidden"
+        />
+
+        {/* Unified Pill/Rounded Container */}
+        <div className="relative bg-[#161F30] border border-slate-700/90 focus-within:border-sky-500/80 rounded-3xl px-3.5 py-2.5 shadow-inner transition-colors flex flex-col gap-2.5">
+          {/* Attached File Preview Chip inside Composer */}
+          {attachedFile && (
+            <div className="flex flex-col gap-2 bg-[#0B111E]/90 border border-sky-500/40 rounded-2xl p-3 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="w-8 h-8 rounded-xl bg-sky-500/15 border border-sky-500/30 flex items-center justify-center shrink-0">
+                    {attachedFile.mimeType === 'application/pdf' ? (
+                      <FileText className="w-4 h-4 text-sky-400" />
+                    ) : (
+                      <Camera className="w-4 h-4 text-amber-400" />
+                    )}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="font-mono font-semibold text-slate-100 truncate">
+                      {attachedFile.name}
+                    </div>
+                    <div className="text-[11px] text-slate-400 flex items-center gap-2">
+                      <span>
+                        {attachedFile.mimeType === 'application/pdf'
+                          ? 'Documento PDF Técnico'
+                          : 'Imagem / Foto de Campo'}
+                      </span>
+                      {attachedFile.sizeBytes && (
+                        <span className="font-mono">
+                          • {(attachedFile.sizeBytes / (1024 * 1024)).toFixed(2)}{' '}
+                          MB
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setAttachedFile(null)}
+                  className="text-slate-400 hover:text-white p-1.5 rounded-full hover:bg-slate-800 cursor-pointer shrink-0"
+                  title="Remover arquivo"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
 
+              {attachedFile.mimeType === 'application/pdf' && (
+                <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-800/80">
+                  <span className="text-[11px] text-sky-300 font-medium">
+                    Classificação na sequência:
+                  </span>
+                  <select
+                    aria-label="Categoria do PDF anexado no chat"
+                    value={attachedFile.categoryTag || '/EL'}
+                    onChange={(e) =>
+                      setAttachedFile((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              categoryTag: e.target.value as DiagramCategoryTag,
+                            }
+                          : null
+                      )
+                    }
+                    className="bg-[#161F30] border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-200 focus:outline-none focus:border-sky-500"
+                  >
+                    <option value="/EL">/EL (Esquema Elétrico)</option>
+                    <option value="/RB">/RB (Régua de Bornes)</option>
+                    <option value="/ME">/ME (Desenho Mecânico)</option>
+                    <option value="/RM">/RM (Relação de Materiais)</option>
+                  </select>
+
+                  <input
+                    type="text"
+                    value={attachedFile.panelName || ''}
+                    onChange={(e) =>
+                      setAttachedFile((prev) =>
+                        prev ? { ...prev, panelName: e.target.value } : null
+                      )
+                    }
+                    placeholder="Painel (ex: CLP-SASE, QDCC, PCPG1)"
+                    className="bg-[#161F30] border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-sky-500 flex-1 min-w-[200px]"
+                  />
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Main Row: (+) Button + Input + Send Button */}
+          <div className="flex items-center gap-2.5">
+            {/* Plus Button & Popover Container */}
+            <div ref={plusMenuRef} className="relative shrink-0">
               <button
                 type="button"
-                onClick={() => setAttachedFile(null)}
-                className="text-slate-400 hover:text-white p-1 rounded hover:bg-slate-800 cursor-pointer shrink-0"
-                title="Remover arquivo"
+                disabled={isSending}
+                onClick={() => setIsPlusMenuOpen((prev) => !prev)}
+                title="Adicionar fotos, PDFs ou ferramentas"
+                aria-label="Abrir menu de anexos e ferramentas"
+                className={`w-9 h-9 rounded-full flex items-center justify-center transition-all cursor-pointer disabled:opacity-50 ${
+                  isPlusMenuOpen
+                    ? 'bg-slate-700 text-white ring-2 ring-sky-500/50'
+                    : 'bg-slate-800/90 hover:bg-slate-700 text-slate-200 border border-slate-700'
+                }`}
               >
-                <X className="w-4 h-4" />
+                <Plus
+                  className={`w-5 h-5 transition-transform duration-200 ${
+                    isPlusMenuOpen ? 'rotate-45' : ''
+                  }`}
+                />
               </button>
+
+              {/* Floating GPT-Style Popover Menu */}
+              {isPlusMenuOpen && (
+                <div className="absolute bottom-full left-0 mb-3 w-80 sm:w-96 rounded-2xl bg-[#1A2234] border border-slate-700/90 shadow-2xl p-2 z-50 flex flex-col gap-0.5 animate-in fade-in slide-in-from-bottom-2 duration-150">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      triggerFilePicker(
+                        '.pdf,application/pdf,image/jpeg,image/png,image/webp'
+                      )
+                    }
+                    className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl hover:bg-slate-800/90 text-left transition-colors cursor-pointer group"
+                  >
+                    <Paperclip className="w-4 h-4 text-slate-200 group-hover:text-sky-400 shrink-0" />
+                    <div className="flex flex-wrap items-baseline gap-x-2 min-w-0">
+                      <span className="text-xs sm:text-sm font-semibold text-slate-100">
+                        Adicionar fotos e arquivos
+                      </span>
+                      <span className="text-xs text-slate-400">
+                        Enviar do computador
+                      </span>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => triggerFilePicker('.pdf,application/pdf')}
+                    className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl hover:bg-slate-800/90 text-left transition-colors cursor-pointer group"
+                  >
+                    <FileText className="w-4 h-4 text-sky-400 shrink-0" />
+                    <div className="flex flex-wrap items-baseline gap-x-2 min-w-0">
+                      <span className="text-xs sm:text-sm font-semibold text-slate-100">
+                        Anexar caderno PDF
+                      </span>
+                      <span className="text-xs text-slate-400">
+                        Painel CLP-SASE, QDCC, /EL, /RB
+                      </span>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      triggerFilePicker('image/jpeg,image/png,image/webp')
+                    }
+                    className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl hover:bg-slate-800/90 text-left transition-colors cursor-pointer group"
+                  >
+                    <Camera className="w-4 h-4 text-amber-400 shrink-0" />
+                    <div className="flex flex-wrap items-baseline gap-x-2 min-w-0">
+                      <span className="text-xs sm:text-sm font-semibold text-slate-100">
+                        Foto de medição / painel
+                      </span>
+                      <span className="text-xs text-slate-400">
+                        Multímetro, bornes ou cartão CLP
+                      </span>
+                    </div>
+                  </button>
+
+                  {onOpenSequenceUpload && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsPlusMenuOpen(false);
+                        onOpenSequenceUpload();
+                      }}
+                      className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl hover:bg-slate-800/90 text-left transition-colors cursor-pointer group"
+                    >
+                      <Library className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <div className="flex flex-wrap items-baseline gap-x-2 min-w-0">
+                        <span className="text-xs sm:text-sm font-semibold text-slate-100">
+                          Adicionar da biblioteca
+                        </span>
+                        <span className="text-xs text-slate-400">
+                          Gerenciar sequência de desenhos
+                        </span>
+                      </div>
+                    </button>
+                  )}
+
+                  <div className="my-1 border-t border-slate-800" />
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsPlusMenuOpen(false);
+                      setInputText(
+                        'Rastreie a interligação de bornes e folhas complementares entre os painéis para localizar o componente exato: '
+                      );
+                      setTimeout(() => textareaRef.current?.focus(), 40);
+                    }}
+                    className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl hover:bg-slate-800/90 text-left transition-colors cursor-pointer group"
+                  >
+                    <Compass className="w-4 h-4 text-sky-400 shrink-0" />
+                    <div className="flex flex-wrap items-baseline gap-x-2 min-w-0">
+                      <span className="text-xs sm:text-sm font-semibold text-slate-100">
+                        Rastreamento cruzado
+                      </span>
+                      <span className="text-xs text-slate-400">
+                        Seguir bornes entre painéis
+                      </span>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsPlusMenuOpen(false);
+                      setInputText(
+                        'Faça uma pesquisa aprofundada em todas as páginas inspecionadas e monte um relatório detalhado de causa raiz e testes: '
+                      );
+                      setTimeout(() => textareaRef.current?.focus(), 40);
+                    }}
+                    className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl hover:bg-slate-800/90 text-left transition-colors cursor-pointer group"
+                  >
+                    <Telescope className="w-4 h-4 text-indigo-400 shrink-0" />
+                    <div className="flex flex-wrap items-baseline gap-x-2 min-w-0">
+                      <span className="text-xs sm:text-sm font-semibold text-slate-100">
+                        Pesquisa aprofundada
+                      </span>
+                      <span className="text-xs text-slate-400">
+                        Obtenha um relatório detalhado
+                      </span>
+                    </div>
+                  </button>
+                </div>
+              )}
             </div>
 
-            {attachedFile.mimeType === 'application/pdf' && (
-              <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-800/80">
-                <span className="text-[11px] text-sky-300 font-medium">
-                  Novo PDF para a sequência:
-                </span>
-                <select
-                  aria-label="Categoria do PDF anexado no chat"
-                  value={attachedFile.categoryTag || '/EL'}
-                  onChange={(e) =>
-                    setAttachedFile((prev) =>
-                      prev
-                        ? {
-                            ...prev,
-                            categoryTag: e.target.value as DiagramCategoryTag,
-                          }
-                        : null
-                    )
-                  }
-                  className="bg-[#0B111E] border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-sky-500"
-                >
-                  <option value="/EL">/EL (Esquema Elétrico)</option>
-                  <option value="/RB">/RB (Régua de Bornes)</option>
-                  <option value="/ME">/ME (Desenho Mecânico)</option>
-                  <option value="/RM">/RM (Relação de Materiais)</option>
-                </select>
+            {/* Auto-growing / Clean Textarea */}
+            <textarea
+              ref={textareaRef}
+              rows={1}
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSubmit(e);
+                }
+              }}
+              placeholder="Pergunte qualquer coisa ou clique no + para anexar PDFs e fotos..."
+              className="flex-1 bg-transparent border-0 px-1 py-1.5 text-sm text-slate-100 placeholder:text-slate-400 focus:outline-none resize-none max-h-32 overflow-y-auto leading-relaxed"
+            />
 
-                <input
-                  type="text"
-                  value={attachedFile.panelName || ''}
-                  onChange={(e) =>
-                    setAttachedFile((prev) =>
-                      prev ? { ...prev, panelName: e.target.value } : null
-                    )
-                  }
-                  placeholder="Painel (ex: CLP-SASE, QDCC, PCPG1)"
-                  className="bg-[#0B111E] border border-slate-700 rounded px-2.5 py-1 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-sky-500 w-56"
-                />
-              </div>
-            )}
+            {/* Circular Send Button */}
+            <button
+              type="submit"
+              disabled={isSending || (!inputText.trim() && !attachedFile)}
+              title="Enviar mensagem"
+              aria-label="Enviar mensagem"
+              className="w-9 h-9 rounded-full bg-sky-500 hover:bg-sky-400 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 font-semibold transition-all flex items-center justify-center cursor-pointer shrink-0 shadow-sm"
+            >
+              <ArrowUp className="w-5 h-5 stroke-[2.5]" />
+            </button>
           </div>
-        )}
-
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-end gap-2">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".pdf,application/pdf,image/jpeg,image/png,image/webp"
-            onChange={handleFileChange}
-            className="hidden"
-          />
-
-          <button
-            type="button"
-            disabled={isSending}
-            onClick={() => fileInputRef.current?.click()}
-            title="Anexar novo PDF (ex: painel CLP-SASE, QDCC) ou foto de campo direto no chat"
-            className="px-3 py-2.5 text-xs font-medium text-sky-300 hover:text-white bg-[#0B111E] hover:bg-sky-500/20 border border-sky-500/40 rounded-md transition-colors cursor-pointer shrink-0 disabled:opacity-50 flex items-center justify-center gap-1.5"
-          >
-            <Paperclip className="w-4 h-4 text-sky-400" />
-            <span>Anexar PDF / Foto</span>
-          </button>
-
-          <textarea
-            rows={2}
-            value={inputText}
-            onChange={(e) => setInputText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                handleSubmit(e);
-              }
-            }}
-            placeholder='Pergunte ao Gemini ou anexe outro PDF ao lado (ex: "Anexei o PDF do painel CLP-SASE, localize o switch desta falha")...'
-            className="flex-1 bg-[#0B111E] border border-slate-700 focus:border-sky-500 rounded-md px-3 py-2 text-xs sm:text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none resize-none"
-          />
-
-          <button
-            type="submit"
-            disabled={isSending || (!inputText.trim() && !attachedFile)}
-            className="px-4 py-2.5 bg-sky-600 hover:bg-sky-500 disabled:bg-slate-800 disabled:text-slate-500 text-white text-xs font-medium rounded-md transition-colors flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
-          >
-            <Send className="w-3.5 h-3.5" />
-            <span>Enviar no Chat</span>
-          </button>
         </div>
       </form>
     </div>
   );
 };
+
