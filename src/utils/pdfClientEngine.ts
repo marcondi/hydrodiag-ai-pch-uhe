@@ -73,7 +73,7 @@ async function callServerlessStep(payload: Record<string, unknown>): Promise<Rec
       `Erro de comunicação com o servidor (HTTP ${res.status}). Verifique se a variável GEMINI_API_KEY está configurada.`
     );
   }
-  if (!res.ok) {
+  if (!res.ok || data.ok === false) {
     throw new Error(
       String(data.error || `Falha na etapa de análise (HTTP ${res.status}).`)
     );
@@ -133,12 +133,18 @@ export async function prepareClientSmartAttachmentParts(
     };
   }
 
-  // Step 1: Get or build complete visual page index of the PDF
-  let pageIndex = getCachedPdfIndex(att);
+  // Step 1: Get or build complete visual page index of the PDF (resumes from partial cache if available)
+  const existingCached = getCachedPdfIndex(att) || [];
+  const lastIndexedPage =
+    existingCached.length > 0
+      ? Math.max(...existingCached.map((b) => b.endPage))
+      : 0;
 
-  if (!pageIndex) {
+  let pageIndex: PageBatchIndex[] = existingCached;
+
+  if (lastIndexedPage < totalPages) {
     const batchSize = 10;
-    const batches: PageBatchIndex[] = [];
+    const batches: PageBatchIndex[] = [...existingCached];
 
     const scanSingleBatch = async (startIdx: number): Promise<PageBatchIndex> => {
       const indices: number[] = [];
@@ -169,7 +175,7 @@ export async function prepareClientSmartAttachmentParts(
       };
     };
 
-    for (let s = 0; s < totalPages; s += 20) {
+    for (let s = lastIndexedPage; s < totalPages; s += 20) {
       const endRange = Math.min(s + 20, totalPages);
       if (onProgress) {
         onProgress(
@@ -181,10 +187,10 @@ export async function prepareClientSmartAttachmentParts(
       const [r1, r2] = await Promise.all([p1, p2]);
       if (r1) batches.push(r1);
       if (r2) batches.push(r2);
+      saveCachedPdfIndex(att, batches);
     }
 
     pageIndex = batches;
-    saveCachedPdfIndex(att, pageIndex);
   }
 
   const fullIndexText = pageIndex
