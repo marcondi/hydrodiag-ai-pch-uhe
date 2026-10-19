@@ -23,6 +23,7 @@ import {
   Download,
 } from 'lucide-react';
 import {
+  ChatAttachmentPayload,
   DiagramAttachment,
   DiagramCategoryTag,
   DiagnosticTurn,
@@ -583,48 +584,106 @@ export default function App() {
     }
   };
 
-  // Interactive Chat Handler on Active Fault Turn
+  // Interactive Chat Handler on Active Fault Turn (supports attaching new PDFs or field photos directly in chat)
   const handleSendChatMessage = async (
     turnId: string,
     messageText: string,
-    inlineImage?: { base64: string; mimeType: string; name: string }
+    chatAttachment?: ChatAttachmentPayload
   ) => {
     const targetTurn = turns.find((t) => t.id === turnId);
     if (!targetTurn) return;
+
+    const isNewPdfInChat = chatAttachment?.mimeType === 'application/pdf';
+    let workingAttachments = [...attachments];
+
+    if (chatAttachment && isNewPdfInChat) {
+      const nextSeq = workingAttachments.length + 1;
+      const newPdfItem: DiagramAttachment = {
+        id: `att_chat_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        name: chatAttachment.name,
+        mimeType: 'application/pdf',
+        sizeBytes:
+          chatAttachment.sizeBytes ||
+          Math.round((chatAttachment.base64.length * 3) / 4),
+        base64Data: chatAttachment.base64,
+        sequenceIndex: nextSeq,
+        categoryTag:
+          chatAttachment.categoryTag ||
+          inferCategoryFromFilename(chatAttachment.name),
+        panelName: chatAttachment.panelName?.trim() || undefined,
+        addedAtTimestamp: new Date().toLocaleTimeString('pt-BR', {
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+        serverUploadStatus: 'synced',
+        uploadProgress: 100,
+      };
+      workingAttachments = [...workingAttachments, newPdfItem];
+      setAttachments(workingAttachments);
+
+      // Upload to server in background for local/stateful persistence
+      uploadAttachmentInChunks(newPdfItem).catch(() => {});
+    }
 
     const userMsg: FaultChatMessage = {
       id: `cmsg_${Date.now()}_u`,
       role: 'user',
       content: messageText,
       timestamp: new Date().toISOString(),
-      attachedImageName: inlineImage?.name,
+      attachedImageName: chatAttachment?.name,
+      attachedFileCategory: chatAttachment?.categoryTag,
+      attachedPanelName: chatAttachment?.panelName?.trim() || undefined,
     };
 
     const updatedHistory = [...(targetTurn.chatMessages || []), userMsg];
 
     setTurns((prev) =>
       prev.map((t) =>
-        t.id === turnId ? { ...t, chatMessages: updatedHistory } : t
+        t.id === turnId
+          ? {
+              ...t,
+              attachedFileNames: workingAttachments.map(
+                (a) => `#${a.sequenceIndex} ${a.name} (${a.categoryTag})`
+              ),
+              sequenceCountAtTurn: workingAttachments.length,
+              chatMessages: updatedHistory,
+            }
+          : t
       )
     );
 
     setIsChatSending(true);
     setChatProgressStep(
-      'Consultando diagramas e histórico da falha para responder no chat...'
+      isNewPdfInChat
+        ? `Indexando e inspecionando o novo PDF "${chatAttachment?.name}" anexado no chat...`
+        : 'Consultando diagramas e histórico da falha para responder no chat...'
     );
     setError(null);
 
     try {
       const canUseStatelessServerless =
-        attachments.length === 0 ||
-        attachments.some((a) => Boolean(a.base64Data));
+        workingAttachments.length === 0 ||
+        workingAttachments.some((a) => Boolean(a.base64Data));
 
       if (canUseStatelessServerless) {
         const preparedParts: unknown[] = [];
         const allSelectedPages: number[] = [];
 
-        for (const att of attachments) {
+        const totalWithBase64 = workingAttachments.filter((a) =>
+          Boolean(a.base64Data)
+        ).length;
+
+        for (let idx = 0; idx < workingAttachments.length; idx++) {
+          const att = workingAttachments[idx];
           if (att.base64Data) {
+            const isLatestAttachment = idx === workingAttachments.length - 1;
+            const maxPagesForThisPdf =
+              totalWithBase64 <= 1 ? 8 : isLatestAttachment ? 6 : 3;
+
+            preparedParts.push({
+              text: `[ARQUIVO NA SEQUÊNCIA #${att.sequenceIndex} | Categoria: ${att.categoryTag} | Painel: ${att.panelName || 'Não informado'} | Nome: "${att.name}"]`,
+            });
+
             const { parts, selectedPages } =
               await prepareClientSmartAttachmentParts(
                 att,
@@ -632,7 +691,8 @@ export default function App() {
                 targetTurn.markdownResponse
                   ? targetTurn.markdownResponse.slice(0, 600)
                   : '',
-                (msg) => setChatProgressStep(msg)
+                (msg) => setChatProgressStep(msg),
+                maxPagesForThisPdf
               );
             preparedParts.push(...parts);
             allSelectedPages.push(...selectedPages);
@@ -656,8 +716,14 @@ export default function App() {
               role: m.role,
               content: m.content,
             })),
-            inlineImageBase64: inlineImage?.base64,
-            inlineImageMimeType: inlineImage?.mimeType,
+            inlineImageBase64:
+              !isNewPdfInChat && chatAttachment
+                ? chatAttachment.base64
+                : undefined,
+            inlineImageMimeType:
+              !isNewPdfInChat && chatAttachment
+                ? chatAttachment.mimeType
+                : undefined,
           }),
         });
 
@@ -706,14 +772,20 @@ export default function App() {
             role: m.role,
             content: m.content,
           })),
-          attachments: attachments.map((att) => ({
+          attachments: workingAttachments.map((att) => ({
             id: att.id,
             name: att.name,
             mimeType: att.mimeType,
             sizeBytes: att.sizeBytes,
           })),
-          inlineImageBase64: inlineImage?.base64,
-          inlineImageMimeType: inlineImage?.mimeType,
+          inlineImageBase64:
+            !isNewPdfInChat && chatAttachment
+              ? chatAttachment.base64
+              : undefined,
+          inlineImageMimeType:
+            !isNewPdfInChat && chatAttachment
+              ? chatAttachment.mimeType
+              : undefined,
         }),
       });
 
