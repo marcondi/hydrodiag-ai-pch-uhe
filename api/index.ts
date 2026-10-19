@@ -117,10 +117,6 @@ function getGeminiClient() {
   });
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function readHistoryDb(): unknown[] {
   try {
     if (fs.existsSync(HISTORY_DB_PATH)) {
@@ -171,41 +167,51 @@ function findStoredAttachment(fileMeta: {
   return undefined;
 }
 
+/**
+ * Prioritizes the fastest active Gemini 3.5 / 3.6 / 3.0 / 3.8 Flash models
+ * with independent free-tier quota buckets and zero delay between fallbacks.
+ */
 async function callGeminiFast(
   ai: GoogleGenAI,
   parts: unknown[],
   systemPrompt: string | null,
-  thinkingLevel: ThinkingLevel = ThinkingLevel.LOW
+  _thinkingLevel: ThinkingLevel = ThinkingLevel.MINIMAL,
+  preferUltraFastLite = false
 ): Promise<{ text: string; modelUsed: string }> {
-  const candidateModels = [
-    { name: 'gemini-3.8-flash', thinking: thinkingLevel },
-    { name: 'gemini-3-flash-preview', thinking: thinkingLevel },
-    { name: 'gemini-flash-latest', thinking: undefined },
-    { name: 'gemini-3.1-flash-lite', thinking: undefined },
-  ];
+  const candidateModels = preferUltraFastLite
+    ? [
+        'gemini-3.5-flash-lite',
+        'gemini-3.6-flash',
+        'gemini-3.5-flash',
+        'gemini-3-flash-preview',
+        'gemini-flash-lite-latest',
+        'gemini-3.8-flash',
+      ]
+    : [
+        'gemini-3.6-flash',
+        'gemini-3.5-flash-lite',
+        'gemini-3.5-flash',
+        'gemini-3-flash-preview',
+        'gemini-3.8-flash',
+        'gemini-flash-lite-latest',
+      ];
 
   let lastError: unknown = null;
-  for (let round = 0; round < 3; round++) {
-    for (const candidate of candidateModels) {
-      try {
-        const config: Record<string, unknown> = { temperature: 0.2 };
-        if (systemPrompt) config.systemInstruction = systemPrompt;
-        if (candidate.thinking) {
-          config.thinkingConfig = { thinkingLevel: candidate.thinking };
-        }
-        const response = await ai.models.generateContent({
-          model: candidate.name,
-          contents: { parts: parts as never[] },
-          config,
-        });
-        if (response && response.text) {
-          return { text: response.text, modelUsed: candidate.name };
-        }
-      } catch (err) {
-        lastError = err;
+  for (const modelName of candidateModels) {
+    try {
+      const config: Record<string, unknown> = { temperature: 0.2 };
+      if (systemPrompt) config.systemInstruction = systemPrompt;
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents: { parts: parts as never[] },
+        config,
+      });
+      if (response && response.text) {
+        return { text: response.text, modelUsed: modelName };
       }
+    } catch (err) {
+      lastError = err;
     }
-    await sleep(1000 * (round + 1));
   }
   throw lastError || new Error('Serviço Gemini temporariamente indisponível.');
 }
@@ -238,27 +244,23 @@ function saveCachedIndex(sizeBytes: number, batches: PageBatchIndex[]) {
   }
 }
 
-/**
- * Advances a job by 1 incremental step per poll so each HTTP request finishes
- * in ~3-6 seconds (never hitting Vercel Serverless timeout or background freeze).
- */
 async function advanceJobOneStep(job: DiagnosticJob) {
   if (job.status !== 'running' || job.isProcessingStep) return;
   job.isProcessingStep = true;
 
   try {
     const ai = getGeminiClient();
-    const attachments = (job.payload.attachments as Array<{
-      id: string;
-      name: string;
-      mimeType: string;
-      sizeBytes?: number;
-      sequenceIndex?: number;
-      categoryTag?: string;
-      panelName?: string;
-    }>) || [];
+    const attachments =
+      (job.payload.attachments as Array<{
+        id: string;
+        name: string;
+        mimeType: string;
+        sizeBytes?: number;
+        sequenceIndex?: number;
+        categoryTag?: string;
+        panelName?: string;
+      }>) || [];
 
-    // 1. Check if any large PDF attachment still needs incremental batch indexing
     for (const attMeta of attachments) {
       const stored = findStoredAttachment(attMeta);
       if (
@@ -314,7 +316,8 @@ async function advanceJobOneStep(job: DiagnosticJob) {
                   },
                 ],
                 null,
-                ThinkingLevel.MINIMAL
+                ThinkingLevel.MINIMAL,
+                true
               );
 
               return {
@@ -337,7 +340,6 @@ async function advanceJobOneStep(job: DiagnosticJob) {
             if (r2) cachedBatches.push(r2);
             saveCachedIndex(rawBytes.length, cachedBatches);
 
-            // If still more pages to index, return and let next poll index the next 20 pages
             if (endRange < totalPages) {
               job.isProcessingStep = false;
               return;
@@ -347,12 +349,9 @@ async function advanceJobOneStep(job: DiagnosticJob) {
       }
     }
 
-    // 2. All PDFs are indexed! Now select relevant pages & run final diagnosis or chat
     const parts: unknown[] = [];
     const allSelectedPages: number[] = [];
-    const queryText = String(
-      job.payload.query || job.payload.message || ''
-    );
+    const queryText = String(job.payload.query || job.payload.message || '');
     const focusText = String(
       job.payload.focusTopic || job.payload.diagnosticMarkdown || ''
     ).slice(0, 600);
@@ -409,7 +408,8 @@ async function advanceJobOneStep(job: DiagnosticJob) {
                 ai,
                 [{ text: selectorPrompt }],
                 null,
-                ThinkingLevel.MINIMAL
+                ThinkingLevel.MINIMAL,
+                true
               );
               const matches = selRes.text.match(/\b\d+\b/g);
               if (matches && matches.length > 0) {
@@ -489,7 +489,8 @@ async function advanceJobOneStep(job: DiagnosticJob) {
         ai,
         parts,
         SYSTEM_INSTRUCTION,
-        ThinkingLevel.LOW
+        ThinkingLevel.MINIMAL,
+        false
       );
       const markdownText = result.text || 'Diagnóstico concluído.';
       const lowerText = markdownText.toLowerCase();
@@ -506,7 +507,6 @@ async function advanceJobOneStep(job: DiagnosticJob) {
       job.modelUsed = result.modelUsed;
       job.timestamp = new Date().toISOString();
     } else {
-      // Chat job
       if (job.payload.inlineImageBase64 && job.payload.inlineImageMimeType) {
         parts.push({
           text: '[FOTO DE CAMPO ENVIADA PELO OPERADOR NO CHAT]:',
@@ -540,7 +540,8 @@ async function advanceJobOneStep(job: DiagnosticJob) {
         ai,
         parts,
         CHAT_SYSTEM_INSTRUCTION,
-        ThinkingLevel.LOW
+        ThinkingLevel.MINIMAL,
+        false
       );
       job.status = 'completed';
       job.markdown = result.text || 'Resposta concluída.';
@@ -563,8 +564,31 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Stateless Serverless Step Endpoint
+/**
+ * Stateless Serverless Step Endpoint with Immediate Chunked Heartbeat
+ * so Vercel Hobby NEVER times out with HTTP 504!
+ */
 app.post('/api/serverless-step', async (req, res) => {
+  res.status(200);
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Transfer-Encoding', 'chunked');
+  // Flush first whitespace byte immediately (<10ms TTFB) to prevent Vercel 504 timeout
+  res.write(' ');
+
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(' ');
+    } catch {
+      // Ignore if socket closed
+    }
+  }, 1500);
+
+  const sendChunkedJson = (payload: Record<string, unknown>) => {
+    clearInterval(heartbeat);
+    res.end(JSON.stringify(payload));
+  };
+
   try {
     const { action } = req.body || {};
     const ai = getGeminiClient();
@@ -582,9 +606,10 @@ app.post('/api/serverless-step', async (req, res) => {
           },
         ],
         null,
-        ThinkingLevel.MINIMAL
+        ThinkingLevel.MINIMAL,
+        true
       );
-      return res.json({ summary: result.text });
+      return sendChunkedJson({ summary: result.text });
     }
 
     if (action === 'select_pages') {
@@ -598,7 +623,8 @@ app.post('/api/serverless-step', async (req, res) => {
           },
         ],
         null,
-        ThinkingLevel.MINIMAL
+        ThinkingLevel.MINIMAL,
+        true
       );
       const matches = selRes.text.match(/\b\d+\b/g);
       let selectedPages: number[] = [1, 2];
@@ -610,7 +636,7 @@ app.post('/api/serverless-step', async (req, res) => {
           selectedPages = Array.from(new Set([1, ...parsed])).slice(0, 9);
         }
       }
-      return res.json({ selectedPages });
+      return sendChunkedJson({ selectedPages });
     }
 
     if (action === 'diagnose') {
@@ -635,11 +661,12 @@ app.post('/api/serverless-step', async (req, res) => {
         ai,
         parts,
         SYSTEM_INSTRUCTION,
-        ThinkingLevel.LOW
+        ThinkingLevel.MINIMAL,
+        false
       );
       const markdownText = result.text || '';
       const lower = markdownText.toLowerCase();
-      return res.json({
+      return sendChunkedJson({
         status: 'completed',
         markdown: markdownText,
         requiresNextDrawing:
@@ -687,9 +714,10 @@ app.post('/api/serverless-step', async (req, res) => {
         ai,
         parts,
         CHAT_SYSTEM_INSTRUCTION,
-        ThinkingLevel.LOW
+        ThinkingLevel.MINIMAL,
+        false
       );
-      return res.json({
+      return sendChunkedJson({
         status: 'completed',
         markdown: result.text || '',
         modelUsed: result.modelUsed,
@@ -697,9 +725,10 @@ app.post('/api/serverless-step', async (req, res) => {
       });
     }
 
-    return res.status(400).json({ error: 'Ação inválida.' });
+    return sendChunkedJson({ ok: false, error: 'Ação inválida.' });
   } catch (err) {
-    return res.status(500).json({
+    return sendChunkedJson({
+      ok: false,
       error: err instanceof Error ? err.message : 'Erro interno.',
     });
   }
@@ -716,7 +745,11 @@ app.post('/api/history', (req, res) => {
   const items = readHistoryDb() as Array<Record<string, unknown>>;
   const idx = items.findIndex((i) => i.id === record.id);
   if (idx >= 0) {
-    items[idx] = { ...items[idx], ...record, updatedAt: new Date().toISOString() };
+    items[idx] = {
+      ...items[idx],
+      ...record,
+      updatedAt: new Date().toISOString(),
+    };
   } else {
     items.unshift({ ...record, updatedAt: new Date().toISOString() });
   }
@@ -729,7 +762,11 @@ app.patch('/api/history/:id', (req, res) => {
   const items = readHistoryDb() as Array<Record<string, unknown>>;
   const idx = items.findIndex((i) => i.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Não encontrado' });
-  items[idx] = { ...items[idx], ...req.body, updatedAt: new Date().toISOString() };
+  items[idx] = {
+    ...items[idx],
+    ...req.body,
+    updatedAt: new Date().toISOString(),
+  };
   writeHistoryDb(items);
   return res.json({ status: 'updated', item: items[idx], items });
 });
@@ -796,7 +833,7 @@ app.post('/api/upload-chunk', (req, res) => {
   }
 });
 
-// Diagnose Job Creation (compatible with both 15:46h frontend and latest frontend)
+// Diagnose Job Creation
 app.post('/api/diagnose', (req, res) => {
   const { query, attachments, focusTopic } = req.body || {};
   if (!query && !focusTopic) {
@@ -853,7 +890,7 @@ app.post('/api/chat-fault', (req, res) => {
   return res.json({ status: 'started', jobId });
 });
 
-// Poll Status Endpoint — advances 1 step synchronously on each poll so Vercel Serverless never freezes!
+// Poll Status Endpoint
 app.get('/api/diagnose/status/:jobId', async (req, res) => {
   const job = diagnosticJobs.get(req.params.jobId);
   if (!job) {
