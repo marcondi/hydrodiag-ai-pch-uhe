@@ -14,6 +14,7 @@ import {
   BookmarkCheck,
 } from 'lucide-react';
 import {
+  ChatAttachmentPayload,
   DiagramAttachment,
   DiagnosticTurn,
   InvestigationStatus,
@@ -31,7 +32,7 @@ interface DiagnosticReportViewProps {
   onSendChatMessage: (
     turnId: string,
     messageText: string,
-    inlineImage?: { base64: string; mimeType: string; name: string }
+    attachment?: ChatAttachmentPayload
   ) => Promise<void>;
   isChatSending: boolean;
   chatProgressStep?: string;
