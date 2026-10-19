@@ -16,7 +16,7 @@ import {
   RotateCcw,
   Search,
   Star,
-  Github,
+  GitBranch,
   MessageSquare,
   CheckCircle2,
   Clock,
@@ -1711,7 +1711,7 @@ export default function App() {
             }}
             className="text-sky-400 hover:underline flex items-center gap-1"
           >
-            <Github className="w-3.5 h-3.5" />
+            <GitBranch className="w-3.5 h-3.5" />
             <span>github.com/marcondi</span>
           </a>
         </div>
