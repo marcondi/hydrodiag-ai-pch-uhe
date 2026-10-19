@@ -4,7 +4,6 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createServer as createViteServer } from 'vite';
 import { PDFDocument } from 'pdf-lib';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 
@@ -12,15 +11,30 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const UPLOAD_DIR = path.join(os.tmpdir(), 'hydrodiag_uploads');
-if (!fs.existsSync(UPLOAD_DIR)) {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+try {
+  if (!fs.existsSync(UPLOAD_DIR)) {
+    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+  }
+} catch {
+  // Ignore on restricted environments
 }
 
-const DATA_DIR = path.join(__dirname, 'data');
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+function getWritableDataDir(): string {
+  if (process.env.VERCEL) {
+    return UPLOAD_DIR;
+  }
+  const localDataDir = path.join(__dirname, 'data');
+  try {
+    if (!fs.existsSync(localDataDir)) {
+      fs.mkdirSync(localDataDir, { recursive: true });
+    }
+    return localDataDir;
+  } catch {
+    return UPLOAD_DIR;
+  }
 }
-const HISTORY_DB_PATH = path.join(DATA_DIR, 'fault_history_db.json');
+
+const HISTORY_DB_PATH = path.join(getWritableDataDir(), 'fault_history_db.json');
 
 interface StoredAttachmentRecord {
   id: string;
@@ -57,7 +71,7 @@ const attachmentStore = new Map<string, StoredAttachmentRecord>();
 const diagnosticJobs = new Map<string, DiagnosticJob>();
 const activeIndexingPromises = new Map<string, Promise<PageBatchIndex[]>>();
 
-const SYSTEM_INSTRUCTION = `Você é um Sistema Especialista Híbrido composto por um Engenheiro Eletricista Sênior de Manutenção/Proteção de Usinas Hidrelétricas (PCH/UHE) e um Engenheiro de Automação.
+export const SYSTEM_INSTRUCTION = `Você é um Sistema Especialista Híbrido composto por um Engenheiro Eletricista Sênior de Manutenção/Proteção de Usinas Hidrelétricas (PCH/UHE) e um Engenheiro de Automação.
 Sua missão é analisar cadernos de projetos elétricos industriais (padrão WEG/IEC/ANSI, contendo diagramas unifilares, funcionais \`/EL\`, mecânicos \`/ME\`, materiais \`/RM\` e réguas de bornes \`/RB\`) enviados em PDF ou imagem para localizar falhas sinalizadas no supervisório e ensinar como corrigi-las passo a passo.
 
 DIRETRIZES DE ANÁLISE TÉCNICA E RESOLUÇÃO:
@@ -84,7 +98,7 @@ DIRETRIZES DE ANÁLISE TÉCNICA E RESOLUÇÃO:
 6. NAVEGAÇÃO SEQUENCIAL ENTRE DESENHOS:
    - Quando o sinal sair para outro documento externo (indicado por linhas tracejadas na régua de bornes ou funcional), informe o Número do Documento externo (ex: \`10001879846-PRJ\`), o nome do painel (\`PCPG1\`, \`PCPG2\`, \`PSE+CLP-SASE\`), a Folha de destino (\`EL.xx\`) e os bornes de chegada, solicitando o upload desse desenho na sequência caso necessário.
 
-FORMATO OBRIGATÓRIO DE RESPOSTA:
+FORMATO OBRIGATÓRIO DE RESPOSTA:
 ### 🚨 1. Diagnóstico e Localização no Desenho
 ### 📟 2. Guia de Teste com Multímetro (Passo a Passo)
 ### 🛠️ 3. Como Resolver e Corrigir a Falha (Procedimento de Campo)
@@ -92,7 +106,7 @@ FORMATO OBRIGATÓRIO DE RESPOSTA:
 ### 🔄 5. Próximo Desenho na Sequência (Se aplicável)
 Caso haja novas dúvidas ou falhas, forneça o próximo diagrama detalhado.`;
 
-const CHAT_SYSTEM_INSTRUCTION = `Você é o Copiloto Especialista em Manutenção Eletromecânica e Automação de Usinas Hidrelétricas (PCH/UHE), conversando em tempo real com o operador/eletricista sobre uma falha em investigação.
+export const CHAT_SYSTEM_INSTRUCTION = `Você é o Copiloto Especialista em Manutenção Eletromecânica e Automação de Usinas Hidrelétricas (PCH/UHE), conversando em tempo real com o operador/eletricista sobre uma falha em investigação.
 Você tem acesso ao índice completo do caderno elétrico em PDF anexado, às páginas recortadas em alta resolução do diagrama (/EL, /RB, /ME, /RM) e ao histórico do diagnóstico.
 DIRETRIZES DO CHAT INTERATIVO:
 - Responda de forma direta, técnica, prática e altamente precisa (citando Folha, Página do PDF, Coordenada Linha/Coluna, Régua de Bornes, terminais NA/NF, tensões 125Vcc/24Vcc/220Vca e códigos da lista de materiais /RM).
@@ -100,8 +114,17 @@ DIRETRIZES DO CHAT INTERATIVO:
 - Se o operador relatar o resultado de uma medição em campo (ex: "Medi 0Vcc no borne XED:217" ou "O disjuntor está armado mas o LED apagado"), raciocine sobre o circuito elétrico passo a passo e indique o próximo ponto exato de teste com as pontas de prova (+) e (-).`;
 
 function getGeminiClient() {
+  const apiKey =
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.VITE_GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      'Variável de ambiente GEMINI_API_KEY não configurada. Adicione GEMINI_API_KEY nas configurações (Environment Variables) da Vercel.'
+    );
+  }
   return new GoogleGenAI({
-    apiKey: process.env.GEMINI_API_KEY,
+    apiKey,
     httpOptions: {
       headers: {
         'User-Agent': 'aistudio-build',
@@ -136,6 +159,7 @@ function writeHistoryDb(items: unknown[]) {
 
 function preloadExistingUploadsFromDisk() {
   try {
+    if (!fs.existsSync(UPLOAD_DIR)) return;
     const files = fs.readdirSync(UPLOAD_DIR);
     for (const f of files) {
       if (
@@ -194,7 +218,6 @@ function findStoredAttachment(fileMeta: {
     }
   }
 
-  // Fallback: if there is at least one uploaded PDF on disk and attachments list was empty/restored from history
   if (!fileMeta.id && attachmentStore.size > 0) {
     const latest = Array.from(attachmentStore.values()).sort(
       (a, b) => b.updatedAt - a.updatedAt
@@ -212,6 +235,7 @@ async function callGeminiFast(
 ): Promise<{ text: string; modelUsed: string }> {
   const candidateModels = [
     { name: 'gemini-3-flash-preview', thinking: thinkingLevel },
+    { name: 'gemini-2.5-flash', thinking: undefined },
     { name: 'gemini-3.8-flash', thinking: thinkingLevel },
     { name: 'gemini-flash-latest', thinking: undefined },
     { name: 'gemini-3.1-flash-lite', thinking: undefined },
@@ -219,7 +243,7 @@ async function callGeminiFast(
 
   let lastError: unknown = null;
 
-  for (let round = 0; round < 3; round++) {
+  for (let round = 0; round < 2; round++) {
     for (const candidate of candidateModels) {
       try {
         const config: Record<string, unknown> = {
@@ -254,7 +278,7 @@ async function callGeminiFast(
         );
       }
     }
-    await sleep(1200 * (round + 1));
+    await sleep(900 * (round + 1));
   }
 
   throw lastError || new Error('Serviço de IA temporariamente indisponível.');
@@ -510,12 +534,216 @@ Retorne APENAS os números das páginas do PDF separados por vírgula (exemplo: 
   };
 }
 
-async function startServer() {
+export function createApiApp() {
   const app = express();
-  const PORT = 3000;
 
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+  // ============================================================================
+  // 0. STATELESS VERCEL SERVERLESS ENDPOINT (/api/serverless-step)
+  // ============================================================================
+  app.post('/api/serverless-step', async (req, res) => {
+    try {
+      const { action } = req.body || {};
+      const ai = getGeminiClient();
+
+      if (action === 'index_batch') {
+        const { subPdfBase64, startPage, endPage, pageCount } = req.body;
+        const result = await callGeminiFast(
+          ai,
+          [
+            {
+              inlineData: {
+                mimeType: 'application/pdf',
+                data: subPdfBase64,
+              },
+            },
+            {
+              text: `Para cada uma das ${pageCount} páginas deste lote (que correspondem às páginas PDF ${startPage} até ${endPage}), retorne APENAS uma linha no formato: PAGINA_PDF|FOLHA_SELO|TITULO_E_TAGs_PRINCIPAIS (inclua tags como 52, 89, XED, 1X2, 2X2, 3XD, GMG, MSS, QGBT, UHLM, bornes, códigos RM, etc.).`,
+            },
+          ],
+          null,
+          ThinkingLevel.MINIMAL
+        );
+        return res.json({ summary: result.text });
+      }
+
+      if (action === 'select_pages') {
+        const { fileName, totalPages, fullIndexText, userQuery, focusTopic } =
+          req.body;
+        const selectorPrompt = `Abaixo está o índice completo das ${totalPages} páginas do caderno elétrico "${fileName}":
+
+${fullIndexText}
+
+CONSULTA / PERGUNTA ATUAL DO OPERADOR: "${userQuery}"
+${focusTopic ? `CONTEXTO ADICIONAL: "${focusTopic}"` : ''}
+
+Selecione até 8 números de PÁGINA_PDF (entre 1 e ${totalPages}) que são mais relevantes para responder à consulta, incluindo:
+- Qualquer Folha ou Página explicitamente mencionada pelo operador (ex: se ele pedir Folha 27 ou Folha 31, localize a PAGINA_PDF correspondente no índice acima!);
+- A(s) folha(s) funcional(is) /EL onde aparece o alarme/componente consultado e seu comando/alimentação;
+- A(s) página(s) de Desenho Mecânico (/ME), Relação de Materiais (/RM) e Régua de Bornes (/RB) associadas.
+
+Retorne APENAS os números das páginas do PDF separados por vírgula (exemplo: 1, 29, 33, 51, 68, 75, 84).`;
+
+        const selRes = await callGeminiFast(
+          ai,
+          [{ text: selectorPrompt }],
+          null,
+          ThinkingLevel.MINIMAL
+        );
+        const matches = selRes.text.match(/\b\d+\b/g);
+        let selectedPages: number[] = [1, 2];
+        if (matches && matches.length > 0) {
+          const parsed = matches
+            .map((n) => parseInt(n, 10))
+            .filter((n) => n >= 1 && n <= Number(totalPages));
+          if (parsed.length > 0) {
+            selectedPages = Array.from(new Set([1, ...parsed])).slice(0, 9);
+          }
+        }
+        return res.json({ selectedPages });
+      }
+
+      if (action === 'diagnose') {
+        const { preparedParts, query, focusTopic, history, hasAttachments } =
+          req.body;
+        const parts: unknown[] = Array.isArray(preparedParts)
+          ? [...preparedParts]
+          : [];
+
+        if (Array.isArray(history) && history.length > 0) {
+          const previousTurnsSummary = history
+            .map(
+              (
+                turn: { userQuery: string; markdownResponse: string },
+                idx: number
+              ) =>
+                `--- ETAPA ANTERIOR #${idx + 1} ---\nConsulta do Operador: ${turn.userQuery}\nDiagnóstico Emitido:\n${turn.markdownResponse}\n`
+            )
+            .join('\n');
+
+          parts.push({
+            text: `HISTÓRICO ACUMULADO DA INVESTIGAÇÃO SEQUENCIAL ENTRE PAINÉIS:\n${previousTurnsSummary}`,
+          });
+        }
+
+        let finalPromptText = query || '';
+        if (focusTopic) {
+          finalPromptText = finalPromptText
+            ? `${finalPromptText}\n\nFOCO TÉCNICO SOLICITADO PELO OPERADOR: ${focusTopic}`
+            : `FOCO TÉCNICO SOLICITADO PELO OPERADOR: ${focusTopic}`;
+        }
+
+        if (!hasAttachments) {
+          finalPromptText += `\n\n[Nota: Nenhum arquivo PDF ou foto foi anexado ainda nesta consulta. Forneça orientação preliminar baseada no padrão WEG/IEC/ANSI para PCH/UHE e indique exatamente qual caderno (/EL, /RB, /ME, /RM) e painel (ex: PCPG, QDCC, CLP-SASE, UHLM) o operador deve anexar para a localização exata dos bornes.]`;
+        }
+
+        parts.push({ text: finalPromptText });
+
+        const result = await callGeminiFast(
+          ai,
+          parts,
+          SYSTEM_INSTRUCTION,
+          ThinkingLevel.LOW
+        );
+        const markdownText =
+          result.text ||
+          'Não foi possível gerar o diagnóstico para os dados enviados.';
+
+        const lowerText = markdownText.toLowerCase();
+        const requiresNextDrawing =
+          lowerText.includes('subir o caderno') ||
+          lowerText.includes('próximo desenho') ||
+          lowerText.includes('documento externo') ||
+          lowerText.includes('outro painel') ||
+          lowerText.includes('anexar') ||
+          lowerText.includes('não pertence') ||
+          lowerText.includes('sequência');
+
+        return res.json({
+          status: 'completed',
+          markdown: markdownText,
+          requiresNextDrawing,
+          modelUsed: result.modelUsed,
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      if (action === 'chat') {
+        const {
+          preparedParts,
+          message,
+          alarmTitle,
+          diagnosticMarkdown,
+          chatHistory,
+          inlineImageBase64,
+          inlineImageMimeType,
+        } = req.body;
+
+        const parts: unknown[] = Array.isArray(preparedParts)
+          ? [...preparedParts]
+          : [];
+
+        if (inlineImageBase64 && inlineImageMimeType) {
+          parts.push({
+            text: '[FOTO DE CAMPO / MEDIÇÃO ENVIADA PELO OPERADOR NO CHAT]:',
+          });
+          parts.push({
+            inlineData: {
+              mimeType: inlineImageMimeType,
+              data: inlineImageBase64,
+            },
+          });
+        }
+
+        const formattedChatHistory = Array.isArray(chatHistory)
+          ? chatHistory
+              .map(
+                (m: { role: string; content: string }) =>
+                  `${m.role === 'user' ? 'OPERADOR EM CAMPO' : 'ENGENHEIRO ESPECIALISTA (IA)'}: ${m.content}`
+              )
+              .join('\n\n')
+          : '';
+
+        parts.push({
+          text: `CONTEXTO DO LAUDO TÉCNICO ATUAL (Alarme: "${alarmTitle || 'Em investigação'}"):
+${diagnosticMarkdown || 'Sem laudo inicial.'}
+
+${formattedChatHistory ? `HISTÓRICO DA CONVERSA NO CHAT:\n${formattedChatHistory}\n` : ''}
+NOVA MENSAGEM DO OPERADOR EM CAMPO:
+"${message}"
+
+Responda em Markdown técnico claro, objetivo e direto para auxiliar o operador em campo.`,
+        });
+
+        const result = await callGeminiFast(
+          ai,
+          parts,
+          CHAT_SYSTEM_INSTRUCTION,
+          ThinkingLevel.LOW
+        );
+
+        return res.json({
+          status: 'completed',
+          markdown:
+            result.text || 'Não foi possível processar a resposta do chat.',
+          modelUsed: result.modelUsed,
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      return res.status(400).json({ error: 'Ação serverless desconhecida.' });
+    } catch (err) {
+      console.error('Erro em /api/serverless-step:', err);
+      return res.status(500).json({
+        error:
+          err instanceof Error
+            ? err.message
+            : 'Erro ao processar requisição na função serverless.',
+      });
+    }
+  });
 
   // ============================================================================
   // 1. PERSISTENT FAULT HISTORY DATABASE API (/api/history)
@@ -655,13 +883,6 @@ async function startServer() {
         const filePath = path.join(UPLOAD_DIR, safeName);
         fs.writeFileSync(filePath, rawBuf);
         record.filePath = filePath;
-
-        if (record.mimeType === 'application/pdf' && rawBuf.length > 1500000) {
-          const ai = getGeminiClient();
-          getOrCreatePdfIndex(ai, filePath, rawBuf.length).catch((err) =>
-            console.warn('Background index warning:', err)
-          );
-        }
 
         return res.json({
           status: 'complete',
@@ -892,7 +1113,6 @@ async function startServer() {
           const parts: unknown[] = [];
           const inspectedPages: number[] = [];
 
-          // Find relevant attachments (or fallback to most recent PDF on disk if session was loaded from history)
           const attList =
             Array.isArray(attachments) && attachments.length > 0
               ? attachments
@@ -1041,7 +1261,6 @@ Responda em Markdown técnico claro, objetivo e direto para auxiliar o operador 
         'User-Agent': 'HydroDiag-AI-Publisher',
       };
 
-      // Step 1: Check if repository exists; if not, create it on GitHub
       const checkRes = await fetch(
         `https://api.github.com/repos/${owner}/${cleanRepo}`,
         { headers }
@@ -1074,9 +1293,10 @@ Responda em Markdown técnico claro, objetivo e direto para auxiliar o operador 
         });
       }
 
-      // Step 2: Collect project source files to publish
       const filesToPublish = [
         'package.json',
+        'vercel.json',
+        'api/index.ts',
         'tsconfig.json',
         'vite.config.ts',
         'index.html',
@@ -1088,6 +1308,7 @@ Responda em Markdown técnico claro, objetivo e direto para auxiliar o operador 
         'src/index.css',
         'src/types.ts',
         'src/App.tsx',
+        'src/utils/pdfClientEngine.ts',
         'src/components/DiagramUploadPanel.tsx',
         'src/components/FaultQueryPanel.tsx',
         'src/components/DiagnosticReportView.tsx',
@@ -1105,13 +1326,12 @@ Sistema especialista multimodal desenvolvido para engenharia de manutenção, pr
 - **Chat Técnico Contínuo com o Especialista Gemini:** Converse em tempo real sobre a falha, envie fotos de medições em campo e peça análise de folhas complementares sem perder o contexto.
 - **Banco de Dados Persistente de Histórico de Falhas:** Busque rapidamente diagnósticos anteriores, registre a solução confirmada em campo e exporte Ordens de Serviço.
 
-## 🛠️ Como Executar Localmente
-\`\`\`bash
-npm install
-cp .env.example .env
-# Adicione sua GEMINI_API_KEY no arquivo .env
-npm run dev
-\`\`\`
+## ☁️ Como Publicar na Vercel (Acesso em Qualquer PC)
+1. Acesse [https://vercel.com/new](https://vercel.com/new) e importe este repositório (\`hydrodiag-ai-pch-uhe\`).
+2. Em **Environment Variables**, adicione:
+   - Nome: \`GEMINI_API_KEY\`
+   - Valor: Sua chave da API do Google Gemini (obtenha gratuitamente em [https://aistudio.google.com/apikey](https://aistudio.google.com/apikey)).
+3. Clique em **Deploy**. O arquivo \`vercel.json\` e a função serverless \`api/index.ts\` já configuram automaticamente o backend e o frontend!
 `;
 
       const uploadedFiles: string[] = [];
@@ -1133,7 +1353,7 @@ npm run dev
             method: 'PUT',
             headers,
             body: JSON.stringify({
-              message: `feat: update ${relPath} via HydroDiag AI`,
+              message: `feat: update ${relPath} for Vercel Serverless deploy`,
               content: contentBase64,
               ...(existingSha ? { sha: existingSha } : {}),
             }),
@@ -1180,14 +1400,22 @@ npm run dev
     });
   });
 
+  return app;
+}
+
+async function startLocalOrCloudRunServer() {
+  const app = createApiApp();
+  const PORT = 3000;
+
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(__dirname, 'dist');
+    const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
@@ -1195,8 +1423,11 @@ npm run dev
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`HydroDiag AI server listening on http://0.0.0.0:${PORT}`);
+    console.log(`HydroDiag AI server running on http://localhost:${PORT}`);
   });
 }
 
-startServer();
+// Start server when running directly (AI Studio / local dev / Cloud Run), skip listen when imported by Vercel Serverless
+if (!process.env.VERCEL) {
+  startLocalOrCloudRunServer();
+}
