@@ -493,9 +493,10 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
           <FaultChatPanel
             alarmTitle={activeTurn.userQuery}
             messages={activeTurn.chatMessages || []}
-            onSendMessage={(text, photo) =>
-              onSendChatMessage(activeTurn.id, text, photo)
+            onSendMessage={(text, attachment) =>
+              onSendChatMessage(activeTurn.id, text, attachment)
             }
+            onOpenSequenceUpload={onOpenSequenceUpload}
             isSending={isChatSending}
             chatProgressStep={chatProgressStep}
           />
