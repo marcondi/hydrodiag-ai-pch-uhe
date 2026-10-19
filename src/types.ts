@@ -20,6 +20,15 @@ export interface DiagramAttachment {
   uploadProgress?: number;
 }
 
+export interface ChatAttachmentPayload {
+  base64: string;
+  mimeType: string;
+  name: string;
+  sizeBytes?: number;
+  categoryTag?: DiagramCategoryTag;
+  panelName?: string;
+}
+
 export interface FaultChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -27,6 +36,8 @@ export interface FaultChatMessage {
   timestamp: string;
   inspectedPages?: number[];
   attachedImageName?: string;
+  attachedFileCategory?: DiagramCategoryTag;
+  attachedPanelName?: string;
 }
 
 export interface DiagnosticTurn {
