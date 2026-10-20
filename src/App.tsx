@@ -49,7 +49,9 @@ import { DiagnosticReportView } from './components/DiagnosticReportView';
 import { GitHubDeployPanel } from './components/GitHubDeployModal';
 import {
   extractSignalChainFromContext,
+  hydrateAttachmentsFromVault,
   prepareClientSmartAttachmentParts,
+  saveAttachmentBinaryToVault,
 } from './utils/pdfClientEngine';
 
 const STORAGE_KEY = 'hydrodiag_saved_investigations_v2';
@@ -709,7 +711,8 @@ export default function App() {
       workingAttachments = [...workingAttachments, newPdfItem];
       setAttachments(workingAttachments);
 
-      // Upload to server in background for local/stateful persistence
+      // Persist binary in browser IndexedDB Vault and server chunk store
+      saveAttachmentBinaryToVault(newPdfItem).catch(() => {});
       uploadAttachmentInChunks(newPdfItem).catch(() => {});
     }
 
@@ -1048,33 +1051,57 @@ export default function App() {
     try {
       const filesArray = Array.from(fileList);
       const newItems: DiagramAttachment[] = [];
+      let updatedExisting = [...attachments];
 
-      let nextSeqIndex = attachments.length + 1;
+      let nextSeqIndex = updatedExisting.length + 1;
       for (const file of filesArray) {
         const base64Data = await fileToBase64(file);
         const categoryTag =
           defaultCategory || inferCategoryFromFilename(file.name);
 
-        newItems.push({
-          id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-          name: file.name,
-          mimeType:
-            file.type ||
-            (file.name.toLowerCase().endsWith('.pdf')
-              ? 'application/pdf'
-              : 'image/jpeg'),
-          sizeBytes: file.size,
-          base64Data,
-          sequenceIndex: nextSeqIndex++,
-          categoryTag,
-          panelName: panelHint,
-          addedAtTimestamp: new Date().toISOString(),
-          serverUploadStatus: 'synced',
-          uploadProgress: 100,
-        });
+        // Check if this file matches an existing attachment from a reopened history item that had empty base64Data
+        const existingEmptyIdx = updatedExisting.findIndex(
+          (ex) =>
+            !ex.base64Data &&
+            (ex.name.trim().toLowerCase() === file.name.trim().toLowerCase() ||
+              ex.sizeBytes === file.size)
+        );
+
+        if (existingEmptyIdx !== -1 && !isSequentialNext) {
+          const relinked: DiagramAttachment = {
+            ...updatedExisting[existingEmptyIdx],
+            base64Data,
+            sizeBytes: file.size,
+            serverUploadStatus: 'synced',
+            uploadProgress: 100,
+          };
+          updatedExisting[existingEmptyIdx] = relinked;
+          saveAttachmentBinaryToVault(relinked).catch(() => {});
+          uploadAttachmentInChunks(relinked).catch(() => {});
+        } else {
+          const created: DiagramAttachment = {
+            id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            name: file.name,
+            mimeType:
+              file.type ||
+              (file.name.toLowerCase().endsWith('.pdf')
+                ? 'application/pdf'
+                : 'image/jpeg'),
+            sizeBytes: file.size,
+            base64Data,
+            sequenceIndex: nextSeqIndex++,
+            categoryTag,
+            panelName: panelHint,
+            addedAtTimestamp: new Date().toISOString(),
+            serverUploadStatus: 'synced',
+            uploadProgress: 100,
+          };
+          newItems.push(created);
+          saveAttachmentBinaryToVault(created).catch(() => {});
+        }
       }
 
-      const combinedAttachments = [...attachments, ...newItems];
+      const combinedAttachments = [...updatedExisting, ...newItems];
       setAttachments(combinedAttachments);
 
       // Background sync to local/server disk cache if available (non-blocking for Vercel Serverless)
@@ -1179,26 +1206,69 @@ export default function App() {
     setActiveNavTab('bancada');
   };
 
-  const handleLoadInvestigation = (saved: SavedInvestigationSummary) => {
+  const handleRelinkAttachmentBinary = (
+    attachmentId: string,
+    base64Data: string,
+    fileName?: string,
+    sizeBytes?: number
+  ) => {
+    setAttachments((prev) =>
+      prev.map((item) => {
+        if (
+          item.id === attachmentId ||
+          (fileName &&
+            item.name.trim().toLowerCase() === fileName.trim().toLowerCase()) ||
+          (sizeBytes && item.sizeBytes === sizeBytes)
+        ) {
+          const updated = {
+            ...item,
+            base64Data,
+            serverUploadStatus: 'synced' as const,
+            uploadProgress: 100,
+          };
+          saveAttachmentBinaryToVault(updated).catch(() => {});
+          return updated;
+        }
+        return item;
+      })
+    );
+  };
+
+  const handleLoadInvestigation = async (saved: SavedInvestigationSummary) => {
     setSessionId(saved.id);
     setTurns(saved.turns);
     setInvestigationStatus(saved.status || 'em_investigacao');
     setFieldResolutionNote(saved.fieldResolutionNote || '');
     setIsFavorite(Boolean(saved.isFavorite));
-    // Restore attachment metadata so server can match cached PDFs in /tmp/hydrodiag_uploads by size/name!
-    setAttachments(
-      (saved.attachmentMetadata || []).map((meta) => ({
+
+    const initialList: DiagramAttachment[] = (
+      saved.attachmentMetadata || []
+    ).map((meta) => {
+      // Preserve base64Data if this attachment is already in memory in current state
+      const existingInMemory = attachments.find(
+        (a) =>
+          a.base64Data &&
+          (a.id === meta.id ||
+            (a.name === meta.name && a.sizeBytes === meta.sizeBytes))
+      );
+      return {
         ...meta,
-        base64Data: '',
+        base64Data: existingInMemory?.base64Data || '',
         addedAtTimestamp: saved.createdAt,
         serverUploadStatus: 'synced',
         uploadProgress: 100,
-      }))
-    );
+      };
+    });
+
+    setAttachments(initialList);
     setQuery(saved.turns[saved.turns.length - 1]?.userQuery || '');
     setError(null);
     setIsLeftSidebarCollapsed(true);
     setActiveNavTab('bancada');
+
+    // Automatically hydrate full PDF binaries from IndexedDB Vault or Server Disk Cache
+    const hydrated = await hydrateAttachmentsFromVault(initialList);
+    setAttachments(hydrated);
   };
 
   const handleToggleFavorite = (id: string) => {
@@ -1675,6 +1745,7 @@ export default function App() {
                   onToggleLeftSidebar={() =>
                     setIsLeftSidebarCollapsed((prev) => !prev)
                   }
+                  onRelinkAttachmentBinary={handleRelinkAttachmentBinary}
                 />
               </div>
             </div>

@@ -62,6 +62,12 @@ interface DiagnosticReportViewProps {
   onUpdateResolutionNote: (note: string) => void;
   isLeftSidebarCollapsed?: boolean;
   onToggleLeftSidebar?: () => void;
+  onRelinkAttachmentBinary?: (
+    attachmentId: string,
+    base64Data: string,
+    fileName?: string,
+    sizeBytes?: number
+  ) => void;
 }
 
 export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
@@ -81,6 +87,7 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
   onUpdateResolutionNote,
   isLeftSidebarCollapsed = false,
   onToggleLeftSidebar,
+  onRelinkAttachmentBinary,
 }) => {
   const [copiedTurnId, setCopiedTurnId] = useState<string | null>(null);
   const [selectedTurnIndex, setSelectedTurnIndex] = useState<number | null>(
@@ -924,6 +931,7 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
             onToggleLeftSidebar();
           }
         }}
+        onRelinkAttachmentBinary={onRelinkAttachmentBinary}
       />
     </section>
   );

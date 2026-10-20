@@ -8,6 +8,154 @@ export interface PageBatchIndex {
 }
 
 const PDF_INDEX_STORAGE_PREFIX = 'hydrodiag_pdf_idx_v2_';
+const IDB_DB_NAME = 'hydrodiag_pdf_vault_v1';
+const IDB_STORE_NAME = 'pdf_binaries';
+
+function openPdfVaultDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      reject(new Error('IndexedDB indisponível'));
+      return;
+    }
+    const req = indexedDB.open(IDB_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE_NAME)) {
+        db.createObjectStore(IDB_STORE_NAME);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function getVaultSignatureKey(name: string, sizeBytes: number): string {
+  return `sig__${(name || '').trim().toLowerCase()}__${sizeBytes || 0}`;
+}
+
+function getVaultNameKey(name: string): string {
+  return `name__${(name || '').trim().toLowerCase()}`;
+}
+
+/**
+ * Persists a PDF/image base64 binary in browser IndexedDB (supports hundreds of MBs)
+ * so closing/refreshing the app or reopening an investigation from History restores the PDF automatically.
+ */
+export async function saveAttachmentBinaryToVault(
+  att: Pick<DiagramAttachment, 'id' | 'name' | 'sizeBytes' | 'base64Data'>
+): Promise<void> {
+  if (!att.base64Data) return;
+  try {
+    const db = await openPdfVaultDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE_NAME, 'readwrite');
+      const store = tx.objectStore(IDB_STORE_NAME);
+      if (att.id) {
+        store.put(att.base64Data, `id__${att.id}`);
+      }
+      if (att.name && att.sizeBytes) {
+        store.put(
+          att.base64Data,
+          getVaultSignatureKey(att.name, att.sizeBytes)
+        );
+      }
+      if (att.name) {
+        store.put(att.base64Data, getVaultNameKey(att.name));
+      }
+      tx.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error);
+      };
+    });
+  } catch {
+    // Ignore IndexedDB quota or private browsing restrictions
+  }
+}
+
+export async function loadAttachmentBinaryFromVault(
+  att: Pick<DiagramAttachment, 'id' | 'name' | 'sizeBytes'>
+): Promise<string | null> {
+  try {
+    const db = await openPdfVaultDb();
+    const readKey = (key: string): Promise<string | null> =>
+      new Promise((resolve) => {
+        const tx = db.transaction(IDB_STORE_NAME, 'readonly');
+        const store = tx.objectStore(IDB_STORE_NAME);
+        const req = store.get(key);
+        req.onsuccess = () => {
+          resolve(typeof req.result === 'string' && req.result ? req.result : null);
+        };
+        req.onerror = () => resolve(null);
+      });
+
+    let found: string | null = null;
+    if (att.id) {
+      found = await readKey(`id__${att.id}`);
+    }
+    if (!found && att.name && att.sizeBytes) {
+      found = await readKey(getVaultSignatureKey(att.name, att.sizeBytes));
+    }
+    if (!found && att.name) {
+      found = await readKey(getVaultNameKey(att.name));
+    }
+    db.close();
+    if (found) return found;
+  } catch {
+    // Ignore IndexedDB read errors
+  }
+
+  // Fallback: try fetching from server disk cache (/tmp/hydrodiag_uploads) if available
+  try {
+    const params = new URLSearchParams();
+    if (att.id) params.set('id', att.id);
+    if (att.name) params.set('name', att.name);
+    if (att.sizeBytes) params.set('sizeBytes', String(att.sizeBytes));
+    const res = await fetch(`/api/attachments/fetch-binary?${params.toString()}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && typeof data.base64Data === 'string' && data.base64Data.length > 0) {
+        await saveAttachmentBinaryToVault({
+          id: att.id,
+          name: att.name,
+          sizeBytes: att.sizeBytes,
+          base64Data: data.base64Data,
+        });
+        return data.base64Data;
+      }
+    }
+  } catch {
+    // Ignore network fallback error
+  }
+
+  return null;
+}
+
+export async function hydrateAttachmentsFromVault(
+  list: DiagramAttachment[]
+): Promise<DiagramAttachment[]> {
+  const hydrated = await Promise.all(
+    list.map(async (item) => {
+      if (item.base64Data && item.base64Data.length > 0) {
+        return item;
+      }
+      const restoredBase64 = await loadAttachmentBinaryFromVault(item);
+      if (restoredBase64) {
+        return {
+          ...item,
+          base64Data: restoredBase64,
+          serverUploadStatus: 'synced' as const,
+          uploadProgress: 100,
+        };
+      }
+      return item;
+    })
+  );
+  return hydrated;
+}
 
 function base64ToUint8Array(base64: string): Uint8Array {
   const clean = base64.includes(',') ? base64.split(',')[1] : base64;
@@ -30,12 +178,14 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function getCacheKey(att: DiagramAttachment): string {
+function getCacheKey(att: Pick<DiagramAttachment, 'name' | 'sizeBytes'>): string {
   const safeName = (att.name || 'pdf').replace(/[^a-zA-Z0-9]/g, '_').slice(0, 32);
   return `${PDF_INDEX_STORAGE_PREFIX}${att.sizeBytes}_${safeName}`;
 }
 
-export function getCachedPdfIndex(att: DiagramAttachment): PageBatchIndex[] | null {
+export function getCachedPdfIndex(
+  att: Pick<DiagramAttachment, 'name' | 'sizeBytes'>
+): PageBatchIndex[] | null {
   try {
     const raw = localStorage.getItem(getCacheKey(att));
     if (raw) {
@@ -50,7 +200,10 @@ export function getCachedPdfIndex(att: DiagramAttachment): PageBatchIndex[] | nu
   return null;
 }
 
-function saveCachedPdfIndex(att: DiagramAttachment, index: PageBatchIndex[]) {
+function saveCachedPdfIndex(
+  att: Pick<DiagramAttachment, 'name' | 'sizeBytes'>,
+  index: PageBatchIndex[]
+) {
   try {
     localStorage.setItem(getCacheKey(att), JSON.stringify(index));
   } catch {

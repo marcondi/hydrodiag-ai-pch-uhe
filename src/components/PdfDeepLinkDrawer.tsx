@@ -14,6 +14,8 @@ import { DiagramAttachment } from '../types';
 import {
   extractSinglePdfPageUrl,
   getCachedPdfIndex,
+  loadAttachmentBinaryFromVault,
+  saveAttachmentBinaryToVault,
 } from '../utils/pdfClientEngine';
 
 interface PdfDeepLinkDrawerProps {
@@ -24,6 +26,47 @@ interface PdfDeepLinkDrawerProps {
   initialAttachmentId?: string;
   onAskAboutCurrentPage?: (pageNumber: number, attachmentName: string) => void;
   onRequestReupload?: () => void;
+  onRelinkAttachmentBinary?: (
+    attachmentId: string,
+    base64Data: string,
+    fileName?: string,
+    sizeBytes?: number
+  ) => void;
+}
+
+function pickBestAttachmentForPage(
+  attachments: DiagramAttachment[],
+  targetPage: number,
+  initialAttachmentId?: string
+): DiagramAttachment | undefined {
+  if (attachments.length === 0) return undefined;
+  if (initialAttachmentId) {
+    const explicit = attachments.find((a) => a.id === initialAttachmentId);
+    if (explicit) return explicit;
+  }
+  if (attachments.length === 1) return attachments[0];
+
+  // Check cached PDF index from latest attachment to oldest to see which PDF actually has targetPage
+  const reversed = [...attachments].reverse();
+  for (const att of reversed) {
+    const cached = getCachedPdfIndex(att);
+    if (cached && cached.length > 0) {
+      const maxIndexedPage = Math.max(...cached.map((b) => b.endPage));
+      if (targetPage <= maxIndexedPage && maxIndexedPage > 1) {
+        return att;
+      }
+    }
+  }
+
+  // If targetPage > 2, prefer the largest PDF or latest PDF in sequence
+  if (targetPage > 2) {
+    const largest = [...attachments].sort(
+      (a, b) => (b.sizeBytes || 0) - (a.sizeBytes || 0)
+    )[0];
+    if (largest) return largest;
+  }
+
+  return reversed.find((a) => Boolean(a.base64Data)) || attachments[attachments.length - 1];
 }
 
 export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
@@ -34,9 +77,11 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
   initialAttachmentId,
   onAskAboutCurrentPage,
   onRequestReupload,
+  onRelinkAttachmentBinary,
 }) => {
   const drawerRef = useRef<HTMLElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const quickRelinkInputRef = useRef<HTMLInputElement | null>(null);
 
   const pdfAttachments = attachments.filter(
     (a) =>
@@ -58,6 +103,9 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [isLoadingPage, setIsLoadingPage] = useState<boolean>(false);
   const [pageError, setPageError] = useState<string | null>(null);
+  const [localRecoveredBase64, setLocalRecoveredBase64] = useState<
+    Record<string, string>
+  >({});
 
   // Close drawer with ESC key (and navigate pages with ArrowLeft / ArrowRight when not typing in input)
   useEffect(() => {
@@ -119,23 +167,25 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       const targetPage = Math.max(1, initialPage || 1);
       setCurrentPage(targetPage);
       setPageInput(String(targetPage));
-      if (initialAttachmentId) {
-        setSelectedAttachmentId(initialAttachmentId);
-      } else if (
-        !selectedAttachmentId ||
-        !attachments.some((a) => a.id === selectedAttachmentId)
-      ) {
-        const firstWithData =
-          attachments.find((a) => Boolean(a.base64Data)) || attachments[0];
-        if (firstWithData) {
-          setSelectedAttachmentId(firstWithData.id);
-        }
+      const bestAtt = pickBestAttachmentForPage(
+        attachments,
+        targetPage,
+        initialAttachmentId
+      );
+      if (bestAtt) {
+        setSelectedAttachmentId(bestAtt.id);
       }
     }
   }, [isOpen, initialPage, initialAttachmentId, attachments]);
 
   const activeAttachment =
     attachments.find((a) => a.id === selectedAttachmentId) || attachments[0];
+
+  const effectiveBase64 = activeAttachment
+    ? activeAttachment.base64Data ||
+      localRecoveredBase64[activeAttachment.id] ||
+      ''
+    : '';
 
   useEffect(() => {
     if (!isOpen || !activeAttachment) return;
@@ -144,20 +194,43 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     let isCancelled = false;
 
     const loadExtractedPage = async () => {
-      if (!activeAttachment.base64Data) {
-        setBlobUrl(null);
-        setPageError(
-          'Este diagnóstico foi reaberto do histórico na nuvem. Para visualizar o desenho em tela cheia neste computador, selecione novamente o arquivo PDF na caixa de Upload.'
-        );
-        return;
-      }
-
       setIsLoadingPage(true);
       setPageError(null);
 
+      let b64ToUse = effectiveBase64;
+      if (!b64ToUse) {
+        const vaulted = await loadAttachmentBinaryFromVault(activeAttachment);
+        if (vaulted && !isCancelled) {
+          b64ToUse = vaulted;
+          setLocalRecoveredBase64((prev) => ({
+            ...prev,
+            [activeAttachment.id]: vaulted,
+          }));
+          if (onRelinkAttachmentBinary) {
+            onRelinkAttachmentBinary(
+              activeAttachment.id,
+              vaulted,
+              activeAttachment.name,
+              activeAttachment.sizeBytes
+            );
+          }
+        }
+      }
+
+      if (!b64ToUse) {
+        if (!isCancelled) {
+          setBlobUrl(null);
+          setIsLoadingPage(false);
+          setPageError(
+            `O arquivo "${activeAttachment.name}" foi enviado antes da ativação do Cofre Local de PDFs (ou em outro dispositivo). Clique no botão abaixo para selecionar o PDF uma única vez — ele ficará salvo automaticamente no navegador mesmo se você fechar o app!`
+          );
+        }
+        return;
+      }
+
       try {
         if (activeAttachment.mimeType !== 'application/pdf') {
-          const imgDataUrl = `data:${activeAttachment.mimeType};base64,${activeAttachment.base64Data}`;
+          const imgDataUrl = `data:${activeAttachment.mimeType};base64,${b64ToUse}`;
           if (!isCancelled) {
             setBlobUrl(imgDataUrl);
             setTotalPages(1);
@@ -167,10 +240,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
           return;
         }
 
-        const result = await extractSinglePdfPageUrl(
-          activeAttachment.base64Data,
-          currentPage
-        );
+        const result = await extractSinglePdfPageUrl(b64ToUse, currentPage);
         activeUrl = result.blobUrl;
 
         if (!isCancelled) {
@@ -202,7 +272,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
         URL.revokeObjectURL(activeUrl);
       }
     };
-  }, [isOpen, activeAttachment, currentPage]);
+  }, [isOpen, activeAttachment, effectiveBase64, currentPage]);
 
   if (!isOpen) return null;
 
@@ -397,25 +467,88 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
               </div>
               <div className="space-y-1.5">
                 <h4 className="text-sm font-semibold text-slate-100">
-                  Arquivo PDF Local Não Carregado Nesta Sessão
+                  Vincular PDF no Cofre Local do Navegador
                 </h4>
                 <p className="text-xs text-slate-400 leading-relaxed">
                   {pageError}
                 </p>
               </div>
-              {onRequestReupload && (
+
+              <input
+                ref={quickRelinkInputRef}
+                type="file"
+                accept=".pdf,application/pdf,image/jpeg,image/png,image/webp"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (!file || !activeAttachment) return;
+                  setIsLoadingPage(true);
+                  const reader = new FileReader();
+                  reader.onload = async () => {
+                    const result = String(reader.result || '');
+                    const b64 = result.includes(',')
+                      ? result.split(',')[1]
+                      : result;
+                    if (b64) {
+                      await saveAttachmentBinaryToVault({
+                        id: activeAttachment.id,
+                        name: activeAttachment.name,
+                        sizeBytes: activeAttachment.sizeBytes,
+                        base64Data: b64,
+                      });
+                      await saveAttachmentBinaryToVault({
+                        id: activeAttachment.id,
+                        name: file.name,
+                        sizeBytes: file.size,
+                        base64Data: b64,
+                      });
+                      setLocalRecoveredBase64((prev) => ({
+                        ...prev,
+                        [activeAttachment.id]: b64,
+                      }));
+                      if (onRelinkAttachmentBinary) {
+                        onRelinkAttachmentBinary(
+                          activeAttachment.id,
+                          b64,
+                          file.name,
+                          file.size
+                        );
+                      }
+                      setPageError(null);
+                    }
+                    setIsLoadingPage(false);
+                  };
+                  reader.onerror = () => setIsLoadingPage(false);
+                  reader.readAsDataURL(file);
+                  e.target.value = '';
+                }}
+              />
+
+              <div className="flex flex-col sm:flex-row items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => {
-                    onClose();
-                    onRequestReupload();
-                  }}
-                  className="px-4 py-2 text-xs font-medium text-white bg-sky-600 hover:bg-sky-500 rounded-md flex items-center gap-2 cursor-pointer"
+                  onClick={() => quickRelinkInputRef.current?.click()}
+                  className="px-4 py-2 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-500 rounded-md flex items-center gap-2 cursor-pointer"
                 >
                   <Upload className="w-3.5 h-3.5" />
-                  <span>Abrir Painel de Upload para Anexar o PDF</span>
+                  <span>
+                    Selecionar PDF Agora e Abrir Página {currentPage}
+                  </span>
                 </button>
-              )}
+
+                {onRequestReupload && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose();
+                      onRequestReupload();
+                    }}
+                    className="px-3 py-2 text-xs font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-md cursor-pointer"
+                  >
+                    Abrir Caixa de Upload
+                  </button>
+                )}
+              </div>
             </div>
           )}
 

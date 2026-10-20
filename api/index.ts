@@ -1320,6 +1320,32 @@ app.delete('/api/history/:id', async (req, res) => {
   });
 });
 
+// Recover cached PDF binary if available in /tmp/hydrodiag_uploads
+app.get('/api/attachments/fetch-binary', (req, res) => {
+  try {
+    const id = String(req.query.id || '');
+    const name = String(req.query.name || '');
+    const sizeBytes = Number(req.query.sizeBytes || 0);
+    const stored = findStoredAttachment({
+      id: id || undefined,
+      name: name || undefined,
+      sizeBytes: sizeBytes > 0 ? sizeBytes : undefined,
+    });
+    if (stored) {
+      if (stored.completeBase64) {
+        return res.json({ ok: true, base64Data: stored.completeBase64 });
+      }
+      if (stored.filePath && fs.existsSync(stored.filePath)) {
+        const b64 = fs.readFileSync(stored.filePath).toString('base64');
+        return res.json({ ok: true, base64Data: b64 });
+      }
+    }
+    return res.status(404).json({ ok: false });
+  } catch {
+    return res.status(404).json({ ok: false });
+  }
+});
+
 // Chunked Upload Endpoint
 app.post('/api/upload-chunk', (req, res) => {
   try {
