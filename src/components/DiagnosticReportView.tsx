@@ -916,6 +916,7 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
         onClose={() => setDeepLinkOpen(false)}
         attachments={attachments}
         initialPage={deepLinkPage}
+        reportMarkdown={activeTurn?.markdownResponse}
         onAskAboutCurrentPage={
           activeTurn
             ? (pageNum, attName) => {

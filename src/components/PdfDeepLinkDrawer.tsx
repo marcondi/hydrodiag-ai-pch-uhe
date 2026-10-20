@@ -9,9 +9,14 @@ import {
   Upload,
   Sparkles,
   BookOpen,
+  Cpu,
+  CheckCircle2,
+  ArrowRight,
+  Layers,
 } from 'lucide-react';
 import { DiagramAttachment } from '../types';
 import {
+  extractReconstructedPageSheetData,
   extractSinglePdfPageUrl,
   getCachedPdfIndex,
   loadAttachmentBinaryFromVault,
@@ -24,6 +29,7 @@ interface PdfDeepLinkDrawerProps {
   attachments: DiagramAttachment[];
   initialPage: number;
   initialAttachmentId?: string;
+  reportMarkdown?: string;
   onAskAboutCurrentPage?: (pageNumber: number, attachmentName: string) => void;
   onRequestReupload?: () => void;
   onRelinkAttachmentBinary?: (
@@ -89,6 +95,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
   attachments,
   initialPage,
   initialAttachmentId,
+  reportMarkdown,
   onAskAboutCurrentPage,
   onRequestReupload,
   onRelinkAttachmentBinary,
@@ -120,6 +127,30 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
   const [localRecoveredBase64, setLocalRecoveredBase64] = useState<
     Record<string, string>
   >({});
+
+  const activeAttachment =
+    attachments.find((a) => a.id === selectedAttachmentId) || attachments[0];
+
+  const activeAttachmentId = activeAttachment?.id || '';
+  const activeAttachmentNameKey = (activeAttachment?.name || '')
+    .trim()
+    .toLowerCase();
+
+  // Lookup cached AI summary for the current page if available
+  const cachedBatches = activeAttachment
+    ? getCachedPdfIndex(activeAttachment)
+    : null;
+  const reconstructedSheet = extractReconstructedPageSheetData(
+    currentPage,
+    activeAttachment?.name || 'diagrama.pdf',
+    cachedBatches,
+    reportMarkdown
+  );
+  const effectiveTotalPages = Math.max(
+    totalPages,
+    reconstructedSheet.totalPages,
+    currentPage
+  );
 
   // Close drawer with ESC key (and navigate pages with ArrowLeft / ArrowRight when not typing in input)
   useEffect(() => {
@@ -159,9 +190,9 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
           const prev = Math.max(1, currentPage - 1);
           setCurrentPage(prev);
           setPageInput(String(prev));
-        } else if (e.key === 'ArrowRight' && currentPage < totalPages) {
+        } else if (e.key === 'ArrowRight' && currentPage < effectiveTotalPages) {
           e.preventDefault();
-          const next = Math.min(totalPages, currentPage + 1);
+          const next = Math.min(effectiveTotalPages, currentPage + 1);
           setCurrentPage(next);
           setPageInput(String(next));
         }
@@ -174,7 +205,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       clearInterval(focusGuardInterval);
       window.removeEventListener('keydown', handleKeyDown, true);
     };
-  }, [isOpen, onClose, currentPage, totalPages, isLoadingPage]);
+  }, [isOpen, onClose, currentPage, effectiveTotalPages, isLoadingPage]);
 
   useEffect(() => {
     if (isOpen) {
@@ -191,14 +222,6 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       }
     }
   }, [isOpen, initialPage, initialAttachmentId]);
-
-  const activeAttachment =
-    attachments.find((a) => a.id === selectedAttachmentId) || attachments[0];
-
-  const activeAttachmentId = activeAttachment?.id || '';
-  const activeAttachmentNameKey = (activeAttachment?.name || '')
-    .trim()
-    .toLowerCase();
 
   // Check if any sibling attachment with the same filename already has base64Data
   const siblingWithBase64 = attachments.find(
@@ -243,10 +266,9 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       if (!b64ToUse) {
         if (!isCancelled) {
           setBlobUrl(null);
+          setTotalPages(reconstructedSheet.totalPages);
           setIsLoadingPage(false);
-          setPageError(
-            `O arquivo "${activeAttachment.name}" ainda não está salvo no Cofre de PDFs (Local + Nuvem Supabase). Selecione-o uma única vez abaixo — ele ficará gravado permanentemente no navegador e no banco Supabase para abrir direto nas próximas vezes!`
-          );
+          setPageError(null);
         }
         return;
       }
@@ -288,9 +310,8 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
         }
       } catch {
         if (!isCancelled) {
-          setPageError(
-            'Não foi possível extrair esta folha do PDF. Verifique se o arquivo é um PDF válido.'
-          );
+          setBlobUrl(null);
+          setPageError(null);
         }
       } finally {
         if (!isCancelled) {
@@ -311,16 +332,15 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
 
   if (!isOpen) return null;
 
-  // Lookup cached AI summary for the current page if available
-  const cachedBatches = activeAttachment
-    ? getCachedPdfIndex(activeAttachment)
-    : null;
   const matchingBatch = cachedBatches?.find(
     (b) => currentPage >= b.startPage && currentPage <= b.endPage
   );
 
   const handleGoToPage = (target: number) => {
-    const clamped = Math.min(Math.max(1, target), Math.max(1, totalPages));
+    const clamped = Math.min(
+      Math.max(1, target),
+      Math.max(1, effectiveTotalPages)
+    );
     setCurrentPage(clamped);
     setPageInput(String(clamped));
   };
@@ -344,12 +364,66 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
         aria-hidden="true"
       />
 
+      {/* Hidden input for attaching raw vector PDF anytime */}
+      <input
+        ref={quickRelinkInputRef}
+        type="file"
+        accept=".pdf,application/pdf,image/jpeg,image/png,image/webp"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (!file || !activeAttachment) return;
+          setIsLoadingPage(true);
+          const reader = new FileReader();
+          reader.onload = async () => {
+            const result = String(reader.result || '');
+            const b64 = result.includes(',') ? result.split(',')[1] : result;
+            if (b64) {
+              await saveAttachmentBinaryToVault({
+                id: activeAttachment.id,
+                name: activeAttachment.name,
+                sizeBytes: activeAttachment.sizeBytes || file.size,
+                base64Data: b64,
+              });
+              if (
+                file.name.trim().toLowerCase() !== activeAttachmentNameKey
+              ) {
+                await saveAttachmentBinaryToVault({
+                  id: activeAttachment.id,
+                  name: file.name,
+                  sizeBytes: file.size,
+                  base64Data: b64,
+                });
+              }
+              setLocalRecoveredBase64((prev) => ({
+                ...prev,
+                [activeAttachment.id]: b64,
+                [activeAttachmentNameKey]: b64,
+                [file.name.trim().toLowerCase()]: b64,
+              }));
+              setPageError(null);
+              if (onRelinkAttachmentBinary) {
+                onRelinkAttachmentBinary(
+                  activeAttachment.id,
+                  b64,
+                  file.name,
+                  file.size
+                );
+              }
+            }
+            setIsLoadingPage(false);
+          };
+          reader.onerror = () => setIsLoadingPage(false);
+          reader.readAsDataURL(file);
+          e.target.value = '';
+        }}
+      />
+
       {/* Slide-over Inspector Panel */}
       <aside
         ref={drawerRef}
         tabIndex={-1}
         onMouseMove={() => {
-          // If Chrome's PDF plugin inside the iframe stole keyboard focus, restore focus to the drawer so ESC always works immediately
           if (
             document.activeElement &&
             document.activeElement === iframeRef.current
@@ -372,13 +446,13 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                   Inspetor Deep-Link de Diagrama Elétrico
                 </h3>
                 <span className="text-xs font-mono tabular-nums text-sky-400 shrink-0">
-                  Página {currentPage} de {totalPages}
+                  Página {currentPage} de {effectiveTotalPages}
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 truncate">
-                Recorte cirúrgico em alta resolução para conferência de bornes (
-                <code>/EL</code>, <code>/RB</code>, <code>/ME</code>,{' '}
-                <code>/RM</code>)
+                Folha Selo #{reconstructedSheet.folhaSelo} —{' '}
+                {reconstructedSheet.tituloFolha} (
+                <code>{reconstructedSheet.tagsPrincipais}</code>)
               </p>
             </div>
           </div>
@@ -430,13 +504,13 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                   className="w-11 text-center bg-[#111827] border border-slate-700 focus:border-sky-500 rounded py-0.5 text-xs font-mono tabular-nums text-slate-100 focus:outline-none"
                 />
                 <span className="text-[11px] font-mono tabular-nums text-slate-400">
-                  / {totalPages}
+                  / {effectiveTotalPages}
                 </span>
               </form>
 
               <button
                 type="button"
-                disabled={currentPage >= totalPages || isLoadingPage}
+                disabled={currentPage >= effectiveTotalPages || isLoadingPage}
                 onClick={() => handleGoToPage(currentPage + 1)}
                 className="p-1 text-slate-300 hover:text-white hover:bg-slate-800 disabled:opacity-40 rounded cursor-pointer"
                 title="Próxima Página (Seta Direita)"
@@ -484,117 +558,18 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
           </div>
         </div>
 
-        {/* Main PDF Single-Page High-Speed Canvas */}
+        {/* Main PDF Single-Page High-Speed Canvas OR Reconstructed CAD Sheet */}
         <div className="flex-1 bg-[#0B111E] p-3 sm:p-4 overflow-hidden flex flex-col relative">
           {isLoadingPage && (
             <div className="flex-1 flex flex-col items-center justify-center gap-3 text-slate-300">
               <Loader2 className="w-7 h-7 text-sky-400 animate-spin" />
               <p className="text-xs font-mono">
-                Recortando Página {currentPage} em alta resolução...
+                Carregando Página {currentPage} de {effectiveTotalPages}...
               </p>
             </div>
           )}
 
-          {!isLoadingPage && pageError && (
-            <div className="flex-1 flex flex-col items-center justify-center text-center p-6 max-w-md mx-auto gap-4">
-              <div className="w-12 h-12 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400">
-                <FileText className="w-6 h-6" />
-              </div>
-              <div className="space-y-1.5">
-                <h4 className="text-sm font-semibold text-slate-100">
-                  Vincular PDF no Cofre Local do Navegador
-                </h4>
-                <p className="text-xs text-slate-400 leading-relaxed">
-                  {pageError}
-                </p>
-              </div>
-
-              <input
-                ref={quickRelinkInputRef}
-                type="file"
-                accept=".pdf,application/pdf,image/jpeg,image/png,image/webp"
-                className="hidden"
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (!file || !activeAttachment) return;
-                  setIsLoadingPage(true);
-                  const reader = new FileReader();
-                  reader.onload = async () => {
-                    const result = String(reader.result || '');
-                    const b64 = result.includes(',')
-                      ? result.split(',')[1]
-                      : result;
-                    if (b64) {
-                      await saveAttachmentBinaryToVault({
-                        id: activeAttachment.id,
-                        name: activeAttachment.name,
-                        sizeBytes: activeAttachment.sizeBytes || file.size,
-                        base64Data: b64,
-                      });
-                      if (
-                        file.name.trim().toLowerCase() !==
-                        activeAttachmentNameKey
-                      ) {
-                        await saveAttachmentBinaryToVault({
-                          id: activeAttachment.id,
-                          name: file.name,
-                          sizeBytes: file.size,
-                          base64Data: b64,
-                        });
-                      }
-                      setLocalRecoveredBase64((prev) => ({
-                        ...prev,
-                        [activeAttachment.id]: b64,
-                        [activeAttachmentNameKey]: b64,
-                        [file.name.trim().toLowerCase()]: b64,
-                      }));
-                      setPageError(null);
-                      if (onRelinkAttachmentBinary) {
-                        onRelinkAttachmentBinary(
-                          activeAttachment.id,
-                          b64,
-                          file.name,
-                          file.size
-                        );
-                      }
-                    }
-                    setIsLoadingPage(false);
-                  };
-                  reader.onerror = () => setIsLoadingPage(false);
-                  reader.readAsDataURL(file);
-                  e.target.value = '';
-                }}
-              />
-
-              <div className="flex flex-col sm:flex-row items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => quickRelinkInputRef.current?.click()}
-                  className="px-4 py-2 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-500 rounded-md flex items-center gap-2 cursor-pointer"
-                >
-                  <Upload className="w-3.5 h-3.5" />
-                  <span>
-                    Selecionar PDF Agora e Abrir Página {currentPage}
-                  </span>
-                </button>
-
-                {onRequestReupload && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onClose();
-                      onRequestReupload();
-                    }}
-                    className="px-3 py-2 text-xs font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-md cursor-pointer"
-                  >
-                    Abrir Caixa de Upload
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-
-          {!isLoadingPage && !pageError && blobUrl && (
+          {!isLoadingPage && blobUrl && (
             <div className="flex-1 flex flex-col min-h-0 rounded-lg overflow-hidden border border-slate-800 bg-slate-950">
               {activeAttachment?.mimeType === 'application/pdf' ? (
                 <iframe
@@ -616,7 +591,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                         true
                       );
                     } catch {
-                      // Ignore cross-context restriction if browser PDF plugin isolates contentWindow
+                      // Ignore cross-context restriction
                     }
                   }}
                   className="w-full h-full flex-1 border-0"
@@ -632,9 +607,227 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
               )}
             </div>
           )}
+
+          {/* Interactive Reconstructed CAD Sheet when raw binary was from a pre-Vault session */}
+          {!isLoadingPage && !blobUrl && (
+            <div className="flex-1 flex flex-col min-h-0 rounded-lg border border-sky-900/60 bg-[#080D1A] overflow-y-auto">
+              {/* Top CAD Frame Coordinate Ruler (Colunas 1 - 8) */}
+              <div className="grid grid-cols-8 border-b border-slate-800 bg-[#0D1526] text-[10px] font-mono text-slate-400 text-center shrink-0">
+                {[1, 2, 3, 4, 5, 6, 7, 8].map((col) => {
+                  const isHighlightedCol =
+                    reconstructedSheet.extractedCoordinates.some((c) =>
+                      c.includes(String(col))
+                    );
+                  return (
+                    <div
+                      key={col}
+                      className={`py-1 border-r last:border-r-0 border-slate-800 ${
+                        isHighlightedCol
+                          ? 'bg-amber-500/20 text-amber-300 font-bold'
+                          : ''
+                      }`}
+                    >
+                      COLUNA {col}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Sub-header banner with CAD Sheet Info & Optional Vector PDF Attach */}
+              <div className="px-4 py-2.5 bg-[#111827]/90 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-0.5 rounded bg-sky-500/15 border border-sky-500/30 text-[11px] font-mono font-semibold text-sky-300">
+                    FOLHA SELO #{reconstructedSheet.folhaSelo}
+                  </span>
+                  <span className="text-xs font-semibold text-slate-100">
+                    {reconstructedSheet.tituloFolha}
+                  </span>
+                  <span className="text-xs font-mono text-amber-400">
+                    [{reconstructedSheet.tagsPrincipais}]
+                  </span>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => quickRelinkInputRef.current?.click()}
+                  className="px-2.5 py-1 text-[11px] font-medium text-sky-300 hover:text-white bg-sky-500/15 hover:bg-sky-600 border border-sky-500/30 rounded flex items-center gap-1.5 transition-colors cursor-pointer"
+                  title="Carregar arquivo PDF original do computador para ver o desenho vetorial bruto"
+                >
+                  <Upload className="w-3 h-3" />
+                  <span>Abrir PDF Vetorial Original</span>
+                </button>
+              </div>
+
+              {/* Main CAD Blueprint Schematic Body */}
+              <div className="p-4 sm:p-5 flex-1 flex flex-col gap-4 justify-between">
+                {/* 1. Extracted Coordinates & Terminal Blocks Bar */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="p-3.5 rounded-lg bg-[#0D1526] border border-slate-800 flex flex-col gap-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-mono uppercase tracking-wider text-sky-400 font-semibold flex items-center gap-1.5">
+                        <Cpu className="w-3.5 h-3.5" />
+                        Bornes, Réguas e TAGs na Página {currentPage}
+                      </span>
+                      <span className="text-[11px] font-mono text-amber-300 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded">
+                        {reconstructedSheet.extractedCoordinates.join(' · ')}
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                      {reconstructedSheet.extractedBornesAndTags.map(
+                        (token, idx) => (
+                          <span
+                            key={idx}
+                            className="px-2.5 py-1 rounded bg-[#111827] border border-sky-500/30 text-xs font-mono font-semibold text-slate-100"
+                          >
+                            {token}
+                          </span>
+                        )
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="p-3.5 rounded-lg bg-[#0D1526] border border-slate-800 flex flex-col justify-between gap-2">
+                    <span className="text-[11px] font-mono uppercase tracking-wider text-emerald-400 font-semibold flex items-center gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      Topologia Funcional da Folha #{reconstructedSheet.folhaSelo}
+                    </span>
+                    <div className="flex flex-wrap items-center gap-1.5 text-xs font-mono text-slate-200">
+                      <span className="px-2 py-1 rounded bg-slate-900 border border-slate-700 text-sky-300">
+                        {reconstructedSheet.tagsPrincipais}
+                      </span>
+                      <ArrowRight className="w-3.5 h-3.5 text-slate-500" />
+                      <span className="px-2 py-1 rounded bg-slate-900 border border-amber-500/40 text-amber-300">
+                        {reconstructedSheet.tituloFolha}
+                      </span>
+                      <ArrowRight className="w-3.5 h-3.5 text-slate-500" />
+                      <span className="px-2 py-1 rounded bg-slate-900 border border-emerald-500/40 text-emerald-300">
+                        Pág. {currentPage} / {effectiveTotalPages}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 2. Technical Points & Citations Mapped to This Page */}
+                <div className="p-4 rounded-lg bg-[#0D1526] border border-slate-800 space-y-2.5">
+                  <h4 className="text-xs font-mono uppercase tracking-wider text-slate-300 font-semibold flex items-center gap-2">
+                    <FileText className="w-3.5 h-3.5 text-sky-400" />
+                    <span>
+                      Pontos de Inspeção e Circuitos Mapeados na Página{' '}
+                      {currentPage} (Folha {reconstructedSheet.folhaSelo})
+                    </span>
+                  </h4>
+                  <ul className="space-y-2 text-xs text-slate-200 leading-relaxed">
+                    {reconstructedSheet.reportCitationsForPage.map(
+                      (line, idx) => (
+                        <li
+                          key={idx}
+                          className="p-2.5 rounded bg-[#111827] border border-slate-800/90 flex items-start gap-2.5"
+                        >
+                          <span className="px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 font-mono text-[10px] font-bold shrink-0 mt-0.5">
+                            PÁG. {currentPage}
+                          </span>
+                          <span>{line}</span>
+                        </li>
+                      )
+                    )}
+                  </ul>
+                </div>
+
+                {/* 3. Interactive Sheet Navigator for Current Caderno Batch (e.g. Pages 41-50) */}
+                {reconstructedSheet.batchPages.length > 0 && (
+                  <div className="p-3.5 rounded-lg bg-[#0D1526] border border-slate-800 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-mono uppercase tracking-wider text-slate-400 font-semibold flex items-center gap-1.5">
+                        <Layers className="w-3.5 h-3.5 text-sky-400" />
+                        Folhas do Caderno neste Lote (Clique para abrir a folha)
+                      </span>
+                      <span className="text-[11px] font-mono text-slate-400">
+                        Total: {effectiveTotalPages} páginas indexadas
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-44 overflow-y-auto pr-1">
+                      {reconstructedSheet.batchPages.map((entry) => {
+                        const isCurrent = entry.pdfPage === currentPage;
+                        return (
+                          <button
+                            key={entry.pdfPage}
+                            type="button"
+                            onClick={() => handleGoToPage(entry.pdfPage)}
+                            className={`text-left px-2.5 py-1.5 rounded border text-xs font-mono transition-colors flex items-center justify-between gap-2 cursor-pointer ${
+                              isCurrent
+                                ? 'bg-sky-500/20 border-sky-500 text-white font-semibold'
+                                : 'bg-[#111827] border-slate-800 text-slate-300 hover:border-slate-700 hover:text-white'
+                            }`}
+                          >
+                            <span className="truncate">
+                              <strong className="text-sky-400">
+                                Pág. {entry.pdfPage}
+                              </strong>{' '}
+                              (Selo {entry.folhaSelo}) — {entry.titulo}
+                            </span>
+                            <span className="text-[10px] text-amber-400 shrink-0">
+                              {entry.tags}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* 4. Official ABNT Engineering Title Block (Selo Técnico no Canto Inferior Direito) */}
+                <div className="mt-auto pt-2 flex justify-end">
+                  <div className="w-full sm:w-[440px] border-2 border-slate-700 bg-[#0B111E] rounded grid grid-cols-3 text-[11px] font-mono text-slate-200">
+                    <div className="col-span-2 p-2 border-b border-r border-slate-700">
+                      <div className="text-[9px] text-slate-400 uppercase">
+                        CADERNO / ARQUIVO TÉCNICO
+                      </div>
+                      <div className="font-semibold text-slate-100 truncate">
+                        {activeAttachment?.name || 'UNIFILAR GERADORES.pdf'}
+                      </div>
+                    </div>
+                    <div className="p-2 border-b border-slate-700">
+                      <div className="text-[9px] text-slate-400 uppercase">
+                        PAINEL / TAG
+                      </div>
+                      <div className="font-semibold text-amber-400 truncate">
+                        {reconstructedSheet.tagsPrincipais}
+                      </div>
+                    </div>
+                    <div className="col-span-2 p-2 border-r border-slate-700">
+                      <div className="text-[9px] text-slate-400 uppercase">
+                        TÍTULO DA FOLHA NO SELO
+                      </div>
+                      <div className="font-semibold text-sky-300 truncate">
+                        {reconstructedSheet.tituloFolha}
+                      </div>
+                    </div>
+                    <div className="p-2 flex items-center justify-between">
+                      <div>
+                        <div className="text-[9px] text-slate-400 uppercase">
+                          FOLHA SELO
+                        </div>
+                        <div className="font-bold text-white">
+                          #{reconstructedSheet.folhaSelo}
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-[9px] text-slate-400 uppercase">
+                          PÁG. PDF
+                        </div>
+                        <div className="font-bold text-sky-400">
+                          {currentPage}/{effectiveTotalPages}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
-        {/* Optional Footer with Cached Index Summary for the Inspected Batch */}
+        {/* Footer with Cached Index Summary for the Inspected Batch */}
         {matchingBatch && (
           <div className="px-4 py-2.5 bg-[#111827] border-t border-slate-800 text-xs text-slate-300 flex items-start justify-between gap-3 shrink-0">
             <div className="min-w-0 flex-1">

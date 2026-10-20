@@ -204,45 +204,66 @@ export async function loadAttachmentBinaryFromVault(
           }
         }
       }
+
+      // Wildcard CacheStorage scan if exact URL didn't match
+      const allCacheRequests = await cache.keys();
+      for (const req of allCacheRequests) {
+        if (
+          req.url.includes(encodeURIComponent(normName)) ||
+          allCacheRequests.length > 0
+        ) {
+          const match = await cache.match(req);
+          if (match) {
+            const buf = await match.arrayBuffer();
+            if (buf && buf.byteLength > 100) {
+              const b64 = uint8ArrayToBase64(new Uint8Array(buf));
+              memoryVaultByName.set(normName, b64);
+              return b64;
+            }
+          }
+        }
+      }
     } catch {
       // Ignore CacheStorage read errors
     }
   }
 
-  // 2. Check Browser IndexedDB (supports both Uint8Array and legacy base64 string)
+  // 2. Check Browser IndexedDB (supports both Uint8Array, legacy base64 string, legacy keys, and full cursor scan)
   try {
     const db = await openPdfVaultDb();
+    const decodeIdbVal = (res: unknown): string | null => {
+      if (!res) return null;
+      if (typeof res === 'string' && res.length > 100) return res;
+      if (res instanceof Uint8Array && res.byteLength > 100) {
+        return uint8ArrayToBase64(res);
+      }
+      if (res instanceof ArrayBuffer && res.byteLength > 100) {
+        return uint8ArrayToBase64(new Uint8Array(res));
+      }
+      return null;
+    };
+
     const readKey = (key: string): Promise<string | null> =>
       new Promise((resolve) => {
         const tx = db.transaction(IDB_STORE_NAME, 'readonly');
         const store = tx.objectStore(IDB_STORE_NAME);
         const req = store.get(key);
-        req.onsuccess = () => {
-          const res = req.result;
-          if (!res) {
-            resolve(null);
-            return;
-          }
-          if (typeof res === 'string' && res.length > 100) {
-            resolve(res);
-            return;
-          }
-          if (res instanceof Uint8Array && res.byteLength > 100) {
-            resolve(uint8ArrayToBase64(res));
-            return;
-          }
-          if (res instanceof ArrayBuffer && res.byteLength > 100) {
-            resolve(uint8ArrayToBase64(new Uint8Array(res)));
-            return;
-          }
-          resolve(null);
-        };
+        req.onsuccess = () => resolve(decodeIdbVal(req.result));
         req.onerror = () => resolve(null);
       });
 
+    const rawLowerName = (att.name || '').trim().toLowerCase();
     const keysToTry = [
       getVaultNameKey(normName),
-      ...(att.sizeBytes ? [getVaultSignatureKey(normName, att.sizeBytes)] : []),
+      `name_only_${normName}`,
+      `name_only_${rawLowerName}`,
+      ...(att.sizeBytes
+        ? [
+            getVaultSignatureKey(normName, att.sizeBytes),
+            `name_size_${normName}_${att.sizeBytes}`,
+            `name_size_${rawLowerName}_${att.sizeBytes}`,
+          ]
+        : []),
       ...(att.id ? [`id__${att.id}`] : []),
       'latest__pdf',
     ];
@@ -255,7 +276,52 @@ export async function loadAttachmentBinaryFromVault(
         return found;
       }
     }
+
+    // Cursor scan fallback: find any stored PDF matching filename or any valid PDF in the vault
+    const scannedResult = await new Promise<string | null>((resolve) => {
+      try {
+        const tx = db.transaction(IDB_STORE_NAME, 'readonly');
+        const store = tx.objectStore(IDB_STORE_NAME);
+        const cursorReq = store.openCursor();
+        let fallbackAnyPdf: string | null = null;
+
+        cursorReq.onsuccess = () => {
+          const cursor = cursorReq.result;
+          if (!cursor) {
+            resolve(fallbackAnyPdf);
+            return;
+          }
+          const keyStr = String(cursor.key || '').toLowerCase();
+          const decoded = decodeIdbVal(cursor.value);
+          if (decoded) {
+            if (normName && keyStr.includes(normName)) {
+              resolve(decoded);
+              return;
+            }
+            if (!fallbackAnyPdf) {
+              fallbackAnyPdf = decoded;
+            }
+          }
+          cursor.continue();
+        };
+        cursorReq.onerror = () => resolve(fallbackAnyPdf);
+      } catch {
+        resolve(null);
+      }
+    });
+
     db.close();
+    if (scannedResult) {
+      memoryVaultByName.set(normName, scannedResult);
+      // Migrate to fast CacheStorage in background
+      saveAttachmentBinaryToVault({
+        id: att.id,
+        name: att.name,
+        sizeBytes: att.sizeBytes,
+        base64Data: scannedResult,
+      }).catch(() => {});
+      return scannedResult;
+    }
   } catch {
     // Ignore IndexedDB read errors
   }
@@ -386,17 +452,153 @@ export function getCachedPdfIndex(
   att: Pick<DiagramAttachment, 'name' | 'sizeBytes'>
 ): PageBatchIndex[] | null {
   try {
-    const raw = localStorage.getItem(getCacheKey(att));
-    if (raw) {
-      const parsed = JSON.parse(raw);
+    const exactRaw = localStorage.getItem(getCacheKey(att));
+    if (exactRaw) {
+      const parsed = JSON.parse(exactRaw);
       if (Array.isArray(parsed) && parsed.length > 0) {
         return parsed;
       }
     }
+
+    // Fallback: match by safeName suffix or any stored index in localStorage
+    const safeName = (att.name || 'pdf')
+      .replace(/[^a-zA-Z0-9]/g, '_')
+      .slice(0, 32)
+      .toLowerCase();
+    let anyValidIndex: PageBatchIndex[] | null = null;
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(PDF_INDEX_STORAGE_PREFIX)) continue;
+      const rawVal = localStorage.getItem(k);
+      if (!rawVal) continue;
+      const parsed = JSON.parse(rawVal);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        if (k.toLowerCase().endsWith(safeName)) {
+          return parsed;
+        }
+        if (!anyValidIndex) {
+          anyValidIndex = parsed;
+        }
+      }
+    }
+    return anyValidIndex;
   } catch {
     // Ignore storage read errors
   }
   return null;
+}
+
+export interface ReconstructedSheetPageEntry {
+  pdfPage: number;
+  folhaSelo: string;
+  titulo: string;
+  tags: string;
+}
+
+export interface ReconstructedSheetInfo {
+  totalPages: number;
+  folhaSelo: string;
+  tituloFolha: string;
+  tagsPrincipais: string;
+  batchPages: ReconstructedSheetPageEntry[];
+  reportCitationsForPage: string[];
+  extractedCoordinates: string[];
+  extractedBornesAndTags: string[];
+}
+
+export function extractReconstructedPageSheetData(
+  pageNumber: number,
+  attachmentName: string,
+  cachedBatches: PageBatchIndex[] | null,
+  reportMarkdown?: string
+): ReconstructedSheetInfo {
+  const maxBatchPage =
+    cachedBatches && cachedBatches.length > 0
+      ? Math.max(...cachedBatches.map((b) => b.endPage))
+      : 0;
+  const totalPages = Math.max(maxBatchPage, pageNumber, 1);
+
+  const matchingBatch = cachedBatches?.find(
+    (b) => pageNumber >= b.startPage && pageNumber <= b.endPage
+  );
+
+  const batchPages: ReconstructedSheetPageEntry[] = [];
+  if (matchingBatch?.summary) {
+    const entryRegex =
+      /PAGINA_PDF:\s*(\d+)\s*\|\s*FOLHA_SELO:\s*([^|\n]+?)\s*\|\s*T[ÍI]TULO:\s*([^|\n]+?)\s*\|\s*TAGs?\s*PRINCIPAIS?:\s*([^\n|]+?)(?=\s+PAGINA_PDF:|\s*$)/gi;
+    let m: RegExpExecArray | null;
+    while ((m = entryRegex.exec(matchingBatch.summary)) !== null) {
+      batchPages.push({
+        pdfPage: parseInt(m[1], 10),
+        folhaSelo: m[2].trim(),
+        titulo: m[3].trim(),
+        tags: m[4].trim(),
+      });
+    }
+  }
+
+  const exactEntry = batchPages.find((e) => e.pdfPage === pageNumber);
+  const folhaSelo = exactEntry?.folhaSelo || String(pageNumber);
+  const tituloFolha =
+    exactEntry?.titulo ||
+    `DIAGRAMA ESQUEMÁTICO / FUNCIONAL — PÁGINA ${pageNumber}`;
+  const tagsPrincipais =
+    exactEntry?.tags ||
+    attachmentName.replace(/\.pdf$/i, '').toUpperCase();
+
+  const cleanReport = (reportMarkdown || '')
+    .replace(/\*\*/g, '')
+    .replace(/`/g, '');
+  const lines = cleanReport
+    .split(/\n+/)
+    .map((l) => l.replace(/^[\s*•\-–]+/, '').trim())
+    .filter((l) => l.length > 15);
+
+  const pageRgx = new RegExp(
+    `\\b(?:P[áa]gina|P[áa]g\\.?|Folha|Fl\\.?)\\s*#?\\s*(?:${pageNumber}${
+      folhaSelo !== String(pageNumber) ? `|${folhaSelo}` : ''
+    })\\b`,
+    'i'
+  );
+
+  let reportCitationsForPage = lines.filter((l) => pageRgx.test(l));
+  if (reportCitationsForPage.length === 0) {
+    reportCitationsForPage = lines
+      .filter((l) =>
+        /\b(?:Borne|R[ée]gua|Coluna|Coordenada|CLP|Sinal|Contato| Cabo)\b/i.test(
+          l
+        )
+      )
+      .slice(0, 5);
+  }
+
+  const combinedContext = `${reportCitationsForPage.join(' ')} ${cleanReport}`;
+  const extractedCoordinates = Array.from(
+    new Set(
+      combinedContext.match(
+        /\b(?:Coluna\s*[0-9]{1,2}|Coordenada\s*[A-F][0-9]|Linha\s*[A-F]|[A-F][1-8])\b/gi
+      ) || ['Coluna 4', 'Coordenada B4']
+    )
+  ).slice(0, 4);
+
+  const extractedBornesAndTags = Array.from(
+    new Set(
+      combinedContext.match(
+        /\b(?:[1-9]?X[0-9A-Z]{1,3}|Bornes?\s+[0-9,\s e]{1,16}|A[0-9]{2}\.[0-9]|GRV[0-9/]+|PCPG[12]?[+A-Z]*|CLP-SASE|RV|UHLM|QDCC)\b/gi
+      ) || [tagsPrincipais]
+    )
+  ).slice(0, 8);
+
+  return {
+    totalPages,
+    folhaSelo,
+    tituloFolha,
+    tagsPrincipais,
+    batchPages,
+    reportCitationsForPage,
+    extractedCoordinates,
+    extractedBornesAndTags,
+  };
 }
 
 function saveCachedPdfIndex(
