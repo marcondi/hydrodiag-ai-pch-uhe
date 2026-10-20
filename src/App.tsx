@@ -137,7 +137,7 @@ async function safeParseJsonResponse(response: Response): Promise<{
   isHtml: boolean;
   data: Record<string, unknown>;
 }> {
-  const rawText = await response.text();
+  const rawText = (await response.text()).trim();
   try {
     const parsed = JSON.parse(rawText);
     const isOk = response.ok && parsed?.ok !== false;
@@ -149,11 +149,13 @@ async function safeParseJsonResponse(response: Response): Promise<{
     };
   } catch {
     const isHtml =
-      rawText.trim().toLowerCase().startsWith('<!doctype') ||
-      rawText.trim().toLowerCase().startsWith('<html');
+      rawText.toLowerCase().startsWith('<!doctype') ||
+      rawText.toLowerCase().startsWith('<html');
     const fallbackError = isHtml
       ? `Sincronizando comunicação com o servidor (HTTP ${response.status})...`
-      : `Resposta inesperada do servidor (HTTP ${response.status}): ${rawText.slice(0, 140)}`;
+      : !rawText
+        ? 'O servidor encerrou a conexão por tempo limite da Vercel (PDF muito denso). Tentando modo rápido...'
+        : `Resposta inesperada do servidor (HTTP ${response.status}): ${rawText.slice(0, 140)}`;
     return {
       ok: false,
       status: response.status,
@@ -479,7 +481,35 @@ export default function App() {
           }),
         });
 
-        const parsedStep = await safeParseJsonResponse(stepResp);
+        let parsedStep = await safeParseJsonResponse(stepResp);
+        if (!parsedStep.ok && preparedParts.length > 0) {
+          setProgressStep(
+            'Finalizando diagnóstico em modo de alta velocidade (índice completo das folhas)...'
+          );
+          const lightParts = preparedParts.filter(
+            (p) =>
+              p &&
+              typeof p === 'object' &&
+              !('inlineData' in (p as Record<string, unknown>))
+          );
+          const retryResp = await fetch('/api/serverless-step', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'diagnose',
+              preparedParts: lightParts,
+              query: queryToUse,
+              focusTopic: focusToUse,
+              hasAttachments: attachmentsToUse.length > 0,
+              history: turns.map((t) => ({
+                userQuery: t.userQuery,
+                markdownResponse: t.markdownResponse,
+              })),
+            }),
+          });
+          parsedStep = await safeParseJsonResponse(retryResp);
+        }
+
         if (!parsedStep.ok) {
           throw new Error(
             String(
@@ -745,12 +775,12 @@ export default function App() {
             newlyAddedPdfItem !== null && att.id === newlyAddedPdfItem.id;
           const isLatestInSequence = idx === workingAttachments.length - 1;
           const maxPagesForThisPdf = isJustAttachedInThisMsg
-            ? 8
+            ? 5
             : totalWithBase64 <= 1
-              ? 8
+              ? 5
               : isLatestInSequence
-                ? 6
-                : 3;
+                ? 4
+                : 2;
 
           // Important: Do NOT pass previous markdownResponse as focusTopic here,
           // because old page numbers in markdownResponse would bias page selection on new PDFs!
@@ -819,7 +849,45 @@ export default function App() {
           }),
         });
 
-        const parsedStep = await safeParseJsonResponse(stepResp);
+        let parsedStep = await safeParseJsonResponse(stepResp);
+        if (!parsedStep.ok && (preparedParts.length > 0 || latestAttachmentParts.length > 0)) {
+          setChatProgressStep(
+            'Finalizando resposta no chat em modo de alta velocidade...'
+          );
+          const lightPrepared = preparedParts.filter(
+            (p) =>
+              p &&
+              typeof p === 'object' &&
+              !('inlineData' in (p as Record<string, unknown>))
+          );
+          const lightLatest = latestAttachmentParts.filter(
+            (p) =>
+              p &&
+              typeof p === 'object' &&
+              !('inlineData' in (p as Record<string, unknown>))
+          );
+          const retryResp = await fetch('/api/serverless-step', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'chat',
+              preparedParts: lightPrepared,
+              latestAttachmentParts: lightLatest,
+              chatAttachmentName: chatAttachment?.name,
+              chatAttachmentMimeType: chatAttachment?.mimeType,
+              chatAttachmentPanel: chatAttachment?.panelName,
+              message: messageText,
+              alarmTitle: targetTurn.userQuery,
+              diagnosticMarkdown: targetTurn.markdownResponse,
+              chatHistory: (targetTurn.chatMessages || []).map((m) => ({
+                role: m.role,
+                content: m.content,
+              })),
+            }),
+          });
+          parsedStep = await safeParseJsonResponse(retryResp);
+        }
+
         if (!parsedStep.ok) {
           throw new Error(
             String(

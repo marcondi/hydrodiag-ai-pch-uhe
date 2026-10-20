@@ -397,50 +397,100 @@ function findStoredAttachment(fileMeta: {
   return undefined;
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Timeout (${ms}ms) em ${label}`));
+    }, ms);
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 /**
- * Prioritizes the fastest active Gemini 3.5 / 3.6 / 3.0 / 3.8 Flash models
- * with independent free-tier quota buckets and zero delay between fallbacks.
+ * Prioritizes the fastest active Gemini Flash models with ThinkingLevel.MINIMAL
+ * and per-attempt timeout so Vercel serverless functions NEVER exceed 60s.
  */
 async function callGeminiFast(
   ai: GoogleGenAI,
   parts: unknown[],
   systemPrompt: string | null,
-  _thinkingLevel: ThinkingLevel = ThinkingLevel.MINIMAL,
+  thinkingLevel: ThinkingLevel = ThinkingLevel.MINIMAL,
   preferUltraFastLite = false
 ): Promise<{ text: string; modelUsed: string }> {
   const candidateModels = preferUltraFastLite
     ? [
-        'gemini-3.5-flash-lite',
-        'gemini-3.6-flash',
-        'gemini-3.5-flash',
-        'gemini-3-flash-preview',
+        'gemini-3.1-flash-lite',
         'gemini-flash-lite-latest',
+        'gemini-3-flash-preview',
+        'gemini-flash-latest',
         'gemini-3.8-flash',
       ]
     : [
-        'gemini-3.6-flash',
-        'gemini-3.5-flash-lite',
-        'gemini-3.5-flash',
         'gemini-3-flash-preview',
+        'gemini-flash-latest',
         'gemini-3.8-flash',
+        'gemini-3.1-flash-lite',
         'gemini-flash-lite-latest',
       ];
 
   let lastError: unknown = null;
+  const perAttemptTimeoutMs = preferUltraFastLite ? 18000 : 25000;
+
   for (const modelName of candidateModels) {
     try {
       const config: Record<string, unknown> = { temperature: 0.2 };
       if (systemPrompt) config.systemInstruction = systemPrompt;
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: { parts: parts as never[] },
-        config,
-      });
+      if (modelName.startsWith('gemini-3')) {
+        config.thinkingConfig = {
+          thinkingLevel: thinkingLevel || ThinkingLevel.MINIMAL,
+        };
+      }
+
+      const response = await withTimeout(
+        ai.models.generateContent({
+          model: modelName,
+          contents: { parts: parts as never[] },
+          config,
+        }),
+        perAttemptTimeoutMs,
+        modelName
+      );
       if (response && response.text) {
         return { text: response.text, modelUsed: modelName };
       }
     } catch (err) {
       lastError = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      // If thinkingConfig was rejected by a specific model alias, retry once without thinkingConfig
+      if (msg.toLowerCase().includes('thinking')) {
+        try {
+          const fallbackConfig: Record<string, unknown> = { temperature: 0.2 };
+          if (systemPrompt) fallbackConfig.systemInstruction = systemPrompt;
+          const retryRes = await withTimeout(
+            ai.models.generateContent({
+              model: modelName,
+              contents: { parts: parts as never[] },
+              config: fallbackConfig,
+            }),
+            perAttemptTimeoutMs,
+            `${modelName}-no-thinking-cfg`
+          );
+          if (retryRes && retryRes.text) {
+            return { text: retryRes.text, modelUsed: modelName };
+          }
+        } catch (retryErr) {
+          lastError = retryErr;
+        }
+      }
     }
   }
   throw lastError || new Error('Serviço Gemini temporariamente indisponível.');
@@ -896,13 +946,36 @@ app.post('/api/serverless-step', async (req, res) => {
       }
       parts.push({ text: finalPromptText });
 
-      const result = await callGeminiFast(
-        ai,
-        parts,
-        SYSTEM_INSTRUCTION,
-        ThinkingLevel.MINIMAL,
-        false
-      );
+      let result: { text: string; modelUsed: string };
+      try {
+        result = await withTimeout(
+          callGeminiFast(
+            ai,
+            parts,
+            SYSTEM_INSTRUCTION,
+            ThinkingLevel.MINIMAL,
+            false
+          ),
+          36000,
+          'diagnose-multimodal'
+        );
+      } catch {
+        // Fallback ultra-rápido usando o índice textual completo já extraído caso o binário PDF seja muito pesado
+        const textOnlyParts = parts.filter(
+          (p) =>
+            p &&
+            typeof p === 'object' &&
+            !('inlineData' in (p as Record<string, unknown>))
+        );
+        result = await callGeminiFast(
+          ai,
+          textOnlyParts,
+          SYSTEM_INSTRUCTION,
+          ThinkingLevel.MINIMAL,
+          true
+        );
+      }
+
       const markdownText = result.text || '';
       const lower = markdownText.toLowerCase();
       return sendChunkedJson({
@@ -978,13 +1051,35 @@ app.post('/api/serverless-step', async (req, res) => {
         text: `NOVA MENSAGEM DO OPERADOR EM CAMPO${chatAttachmentName ? ` (enviada junto com o arquivo anexado "${chatAttachmentName}" [${chatAttachmentMimeType || 'anexo'}])` : ''}:\n"${message}"\n\nResponda em Markdown técnico claro, objetivo e direto, analisando integralmente o arquivo/foto anexado (se presente) para auxiliar o operador em campo.`,
       });
 
-      const result = await callGeminiFast(
-        ai,
-        parts,
-        CHAT_SYSTEM_INSTRUCTION,
-        ThinkingLevel.MINIMAL,
-        false
-      );
+      let result: { text: string; modelUsed: string };
+      try {
+        result = await withTimeout(
+          callGeminiFast(
+            ai,
+            parts,
+            CHAT_SYSTEM_INSTRUCTION,
+            ThinkingLevel.MINIMAL,
+            false
+          ),
+          36000,
+          'chat-multimodal'
+        );
+      } catch {
+        const textOnlyParts = parts.filter(
+          (p) =>
+            p &&
+            typeof p === 'object' &&
+            !('inlineData' in (p as Record<string, unknown>))
+        );
+        result = await callGeminiFast(
+          ai,
+          textOnlyParts,
+          CHAT_SYSTEM_INSTRUCTION,
+          ThinkingLevel.MINIMAL,
+          true
+        );
+      }
+
       return sendChunkedJson({
         status: 'completed',
         markdown: result.text || '',

@@ -458,32 +458,49 @@ function findStoredAttachment(fileMeta: {
   return undefined;
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Timeout (${ms}ms) em ${label}`));
+    }, ms);
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 async function callGeminiFast(
   ai: GoogleGenAI,
   parts: unknown[],
   systemPrompt: string | null,
-  _thinkingLevel: ThinkingLevel = ThinkingLevel.MINIMAL,
+  thinkingLevel: ThinkingLevel = ThinkingLevel.MINIMAL,
   preferUltraFastLite = false
 ): Promise<{ text: string; modelUsed: string }> {
   const candidateModels = preferUltraFastLite
     ? [
-        'gemini-3.5-flash-lite',
-        'gemini-3.6-flash',
-        'gemini-3.5-flash',
-        'gemini-3-flash-preview',
+        'gemini-3.1-flash-lite',
         'gemini-flash-lite-latest',
+        'gemini-3-flash-preview',
+        'gemini-flash-latest',
         'gemini-3.8-flash',
       ]
     : [
-        'gemini-3.6-flash',
-        'gemini-3.5-flash-lite',
-        'gemini-3.5-flash',
         'gemini-3-flash-preview',
+        'gemini-flash-latest',
         'gemini-3.8-flash',
+        'gemini-3.1-flash-lite',
         'gemini-flash-lite-latest',
       ];
 
   let lastError: unknown = null;
+  const perAttemptTimeoutMs = preferUltraFastLite ? 18000 : 25000;
 
   for (const modelName of candidateModels) {
     try {
@@ -493,12 +510,21 @@ async function callGeminiFast(
       if (systemPrompt) {
         config.systemInstruction = systemPrompt;
       }
+      if (modelName.startsWith('gemini-3')) {
+        config.thinkingConfig = {
+          thinkingLevel: thinkingLevel || ThinkingLevel.MINIMAL,
+        };
+      }
 
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: { parts: parts as never[] },
-        config,
-      });
+      const response = await withTimeout(
+        ai.models.generateContent({
+          model: modelName,
+          contents: { parts: parts as never[] },
+          config,
+        }),
+        perAttemptTimeoutMs,
+        modelName
+      );
 
       if (response && response.text) {
         return {
@@ -512,6 +538,26 @@ async function callGeminiFast(
       console.warn(
         `[HydroDiag AI] Modelo ${modelName} retornou: ${msg.slice(0, 140)}`
       );
+      if (msg.toLowerCase().includes('thinking')) {
+        try {
+          const fallbackConfig: Record<string, unknown> = { temperature: 0.2 };
+          if (systemPrompt) fallbackConfig.systemInstruction = systemPrompt;
+          const retryRes = await withTimeout(
+            ai.models.generateContent({
+              model: modelName,
+              contents: { parts: parts as never[] },
+              config: fallbackConfig,
+            }),
+            perAttemptTimeoutMs,
+            `${modelName}-no-thinking-cfg`
+          );
+          if (retryRes && retryRes.text) {
+            return { text: retryRes.text, modelUsed: modelName };
+          }
+        } catch (retryErr) {
+          lastError = retryErr;
+        }
+      }
     }
   }
 
@@ -896,13 +942,35 @@ Retorne APENAS os números das páginas do PDF separados por vírgula (exemplo: 
 
         parts.push({ text: finalPromptText });
 
-        const result = await callGeminiFast(
-          ai,
-          parts,
-          SYSTEM_INSTRUCTION,
-          ThinkingLevel.MINIMAL,
-          false
-        );
+        let result: { text: string; modelUsed: string };
+        try {
+          result = await withTimeout(
+            callGeminiFast(
+              ai,
+              parts,
+              SYSTEM_INSTRUCTION,
+              ThinkingLevel.MINIMAL,
+              false
+            ),
+            36000,
+            'diagnose-multimodal'
+          );
+        } catch {
+          const textOnlyParts = parts.filter(
+            (p) =>
+              p &&
+              typeof p === 'object' &&
+              !('inlineData' in (p as Record<string, unknown>))
+          );
+          result = await callGeminiFast(
+            ai,
+            textOnlyParts,
+            SYSTEM_INSTRUCTION,
+            ThinkingLevel.MINIMAL,
+            true
+          );
+        }
+
         const markdownText =
           result.text ||
           'Não foi possível gerar o diagnóstico para os dados enviados.';
@@ -996,13 +1064,34 @@ ${formattedChatHistory ? `HISTÓRICO DA CONVERSA NO CHAT:\n${formattedChatHistor
 Responda em Markdown técnico claro, objetivo e direto, analisando integralmente o arquivo/foto anexado (se presente) para auxiliar o operador em campo.`,
         });
 
-        const result = await callGeminiFast(
-          ai,
-          parts,
-          CHAT_SYSTEM_INSTRUCTION,
-          ThinkingLevel.MINIMAL,
-          false
-        );
+        let result: { text: string; modelUsed: string };
+        try {
+          result = await withTimeout(
+            callGeminiFast(
+              ai,
+              parts,
+              CHAT_SYSTEM_INSTRUCTION,
+              ThinkingLevel.MINIMAL,
+              false
+            ),
+            36000,
+            'chat-multimodal'
+          );
+        } catch {
+          const textOnlyParts = parts.filter(
+            (p) =>
+              p &&
+              typeof p === 'object' &&
+              !('inlineData' in (p as Record<string, unknown>))
+          );
+          result = await callGeminiFast(
+            ai,
+            textOnlyParts,
+            CHAT_SYSTEM_INSTRUCTION,
+            ThinkingLevel.MINIMAL,
+            true
+          );
+        }
 
         return sendChunkedJson({
           status: 'completed',

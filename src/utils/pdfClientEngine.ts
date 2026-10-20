@@ -59,26 +59,33 @@ function saveCachedPdfIndex(att: DiagramAttachment, index: PageBatchIndex[]) {
 }
 
 async function callServerlessStep(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const res = await fetch('/api/serverless-step', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  const text = await res.text();
-  let data: Record<string, unknown> = {};
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(
-      `Erro de comunicação com o servidor (HTTP ${res.status}). Verifique se a variável GEMINI_API_KEY está configurada.`
-    );
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = await fetch('/api/serverless-step', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const text = (await res.text()).trim();
+    if (!text && attempt === 0) {
+      continue;
+    }
+    let data: Record<string, unknown> = {};
+    try {
+      data = JSON.parse(text);
+    } catch {
+      if (attempt === 0) continue;
+      throw new Error(
+        `Erro de comunicação com o servidor (HTTP ${res.status}). Verifique se a variável GEMINI_API_KEY está configurada.`
+      );
+    }
+    if (!res.ok || data.ok === false) {
+      throw new Error(
+        String(data.error || `Falha na etapa de análise (HTTP ${res.status}).`)
+      );
+    }
+    return data;
   }
-  if (!res.ok || data.ok === false) {
-    throw new Error(
-      String(data.error || `Falha na etapa de análise (HTTP ${res.status}).`)
-    );
-  }
-  return data;
+  throw new Error('Tempo limite excedido na etapa de indexação.');
 }
 
 /**
@@ -91,7 +98,7 @@ export async function prepareClientSmartAttachmentParts(
   userQuery: string,
   focusTopic: string,
   onProgress?: (msg: string) => void,
-  maxPages = 8
+  maxPages = 5
 ): Promise<{
   parts: unknown[];
   selectedPages: number[];
@@ -119,8 +126,8 @@ export async function prepareClientSmartAttachmentParts(
   const srcDoc = await PDFDocument.load(rawBytes, { ignoreEncryption: true });
   const totalPages = srcDoc.getPageCount();
 
-  // Small PDFs (<= 12 pages) can be sent directly if under 3MB
-  if (totalPages <= 12 && rawBytes.byteLength <= 3 * 1024 * 1024) {
+  // Small PDFs (<= 8 pages) can be sent directly if under 1.5MB
+  if (totalPages <= 8 && rawBytes.byteLength <= 1.5 * 1024 * 1024) {
     return {
       parts: [
         {
@@ -236,12 +243,25 @@ export async function prepareClientSmartAttachmentParts(
     );
   }
 
-  // Step 3: Slice only the selected pages in browser so payload is < 900KB
-  const subDoc = await PDFDocument.create();
-  const zeroBasedIndices = selectedPagesOneBased.map((p) => p - 1);
-  const copied = await subDoc.copyPages(srcDoc, zeroBasedIndices);
-  copied.forEach((p) => subDoc.addPage(p));
-  const subPdfBytes = await subDoc.save();
+  // Step 3: Slice only the selected pages in browser and ensure compact payload (< 1.8MB) for fast serverless execution
+  const buildSlicedPdfBytes = async (pagesToSlice: number[]) => {
+    const subDoc = await PDFDocument.create();
+    const zeroBasedIndices = pagesToSlice.map((p) => p - 1);
+    const copied = await subDoc.copyPages(srcDoc, zeroBasedIndices);
+    copied.forEach((p) => subDoc.addPage(p));
+    return subDoc.save();
+  };
+
+  let subPdfBytes = await buildSlicedPdfBytes(selectedPagesOneBased);
+  if (subPdfBytes.byteLength > 1.8 * 1024 * 1024 && selectedPagesOneBased.length > 3) {
+    selectedPagesOneBased = selectedPagesOneBased.slice(0, 3);
+    subPdfBytes = await buildSlicedPdfBytes(selectedPagesOneBased);
+  }
+  if (subPdfBytes.byteLength > 2.2 * 1024 * 1024 && selectedPagesOneBased.length > 2) {
+    selectedPagesOneBased = selectedPagesOneBased.slice(0, 2);
+    subPdfBytes = await buildSlicedPdfBytes(selectedPagesOneBased);
+  }
+
   const subPdfBase64 = uint8ArrayToBase64(subPdfBytes);
 
   const pageMappingExplanation = selectedPagesOneBased
