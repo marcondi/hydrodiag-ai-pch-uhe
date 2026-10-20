@@ -48,6 +48,7 @@ import { FaultQueryPanel } from './components/FaultQueryPanel';
 import { DiagnosticReportView } from './components/DiagnosticReportView';
 import { GitHubDeployPanel } from './components/GitHubDeployModal';
 import {
+  deduplicateAttachments,
   extractSignalChainFromContext,
   hydrateAttachmentsFromVault,
   prepareClientSmartAttachmentParts,
@@ -55,6 +56,7 @@ import {
 } from './utils/pdfClientEngine';
 
 const STORAGE_KEY = 'hydrodiag_saved_investigations_v2';
+const ACTIVE_SESSION_STORAGE_KEY = 'hydrodiag_active_session_id_v1';
 const BASE64_CHUNK_SIZE = 1500 * 1024;
 
 const INITIAL_SAFETY_CHECKLIST: SafetyChecklistItem[] = [
@@ -280,6 +282,24 @@ export default function App() {
           } catch {
             // Ignore
           }
+          if (!itemsOverride && turns.length === 0 && data.items.length > 0) {
+            try {
+              const lastActiveId = localStorage.getItem(
+                ACTIVE_SESSION_STORAGE_KEY
+              );
+              const toRestore =
+                (lastActiveId &&
+                  data.items.find(
+                    (i: SavedInvestigationSummary) => i.id === lastActiveId
+                  )) ||
+                null;
+              if (toRestore) {
+                handleLoadInvestigation(toRestore);
+              }
+            } catch {
+              // Ignore
+            }
+          }
           setIsSyncingCloud(false);
           return;
         }
@@ -290,6 +310,20 @@ export default function App() {
 
     if (localItems.length > 0) {
       setSavedInvestigations(localItems);
+      if (!itemsOverride && turns.length === 0) {
+        try {
+          const lastActiveId = localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
+          const toRestore =
+            (lastActiveId &&
+              localItems.find((i) => i.id === lastActiveId)) ||
+            null;
+          if (toRestore) {
+            handleLoadInvestigation(toRestore);
+          }
+        } catch {
+          // Ignore
+        }
+      }
     }
     setIsSyncingCloud(false);
   };
@@ -314,7 +348,7 @@ export default function App() {
       fieldResolutionNote,
       createdAt: turns[0]?.timestamp || nowIso,
       updatedAt: nowIso,
-      attachmentMetadata: attachments.map((a) => ({
+      attachmentMetadata: deduplicateAttachments(attachments).map((a) => ({
         id: a.id,
         name: a.name,
         mimeType: a.mimeType,
@@ -325,6 +359,12 @@ export default function App() {
       })),
       turns,
     };
+
+    try {
+      localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, sessionId);
+    } catch {
+      // Ignore
+    }
 
     setSavedInvestigations((prev) => {
       const filtered = prev.filter((item) => item.id !== sessionId);
@@ -1054,30 +1094,42 @@ export default function App() {
       let updatedExisting = [...attachments];
 
       let nextSeqIndex = updatedExisting.length + 1;
+      const toUploadToCloud: DiagramAttachment[] = [];
+
       for (const file of filesArray) {
         const base64Data = await fileToBase64(file);
         const categoryTag =
           defaultCategory || inferCategoryFromFilename(file.name);
+        const normFileName = file.name.trim().toLowerCase();
 
-        // Check if this file matches an existing attachment from a reopened history item that had empty base64Data
-        const existingEmptyIdx = updatedExisting.findIndex(
+        // Check if this file matches ANY existing attachment(s) from a reopened history item
+        const matchedExisting = updatedExisting.some(
           (ex) =>
-            !ex.base64Data &&
-            (ex.name.trim().toLowerCase() === file.name.trim().toLowerCase() ||
-              ex.sizeBytes === file.size)
+            ex.name.trim().toLowerCase() === normFileName ||
+            (ex.sizeBytes > 0 && ex.sizeBytes === file.size)
         );
 
-        if (existingEmptyIdx !== -1 && !isSequentialNext) {
-          const relinked: DiagramAttachment = {
-            ...updatedExisting[existingEmptyIdx],
-            base64Data,
-            sizeBytes: file.size,
-            serverUploadStatus: 'synced',
-            uploadProgress: 100,
-          };
-          updatedExisting[existingEmptyIdx] = relinked;
-          saveAttachmentBinaryToVault(relinked).catch(() => {});
-          uploadAttachmentInChunks(relinked).catch(() => {});
+        if (matchedExisting && !isSequentialNext) {
+          updatedExisting = await Promise.all(
+            updatedExisting.map(async (ex) => {
+              if (
+                ex.name.trim().toLowerCase() === normFileName ||
+                (ex.sizeBytes > 0 && ex.sizeBytes === file.size)
+              ) {
+                const relinked: DiagramAttachment = {
+                  ...ex,
+                  base64Data,
+                  sizeBytes: file.size,
+                  serverUploadStatus: 'synced',
+                  uploadProgress: 100,
+                };
+                await saveAttachmentBinaryToVault(relinked);
+                toUploadToCloud.push(relinked);
+                return relinked;
+              }
+              return ex;
+            })
+          );
         } else {
           const created: DiagramAttachment = {
             id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
@@ -1097,15 +1149,19 @@ export default function App() {
             uploadProgress: 100,
           };
           newItems.push(created);
-          saveAttachmentBinaryToVault(created).catch(() => {});
+          await saveAttachmentBinaryToVault(created);
+          toUploadToCloud.push(created);
         }
       }
 
-      const combinedAttachments = [...updatedExisting, ...newItems];
+      const combinedAttachments = deduplicateAttachments([
+        ...updatedExisting,
+        ...newItems,
+      ]);
       setAttachments(combinedAttachments);
 
-      // Background sync to local/server disk cache if available (non-blocking for Vercel Serverless)
-      for (const item of newItems) {
+      // Background sync to Supabase Cloud PDF Vault + server disk cache
+      for (const item of deduplicateAttachments(toUploadToCloud)) {
         uploadAttachmentInChunks(item).catch(() => {});
       }
 
@@ -1190,7 +1246,13 @@ export default function App() {
   };
 
   const handleNewInvestigation = () => {
-    setSessionId(`inv_${Date.now()}`);
+    const newId = `inv_${Date.now()}`;
+    setSessionId(newId);
+    try {
+      localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
+    } catch {
+      // Ignore
+    }
     setAttachments([]);
     setTurns([]);
     setQuery('');
@@ -1212,36 +1274,51 @@ export default function App() {
     fileName?: string,
     sizeBytes?: number
   ) => {
-    setAttachments((prev) =>
-      prev.map((item) => {
+    let cloudSyncCandidate: DiagramAttachment | null = null;
+    setAttachments((prev) => {
+      const mapped = prev.map((item) => {
         if (
           item.id === attachmentId ||
           (fileName &&
             item.name.trim().toLowerCase() === fileName.trim().toLowerCase()) ||
           (sizeBytes && item.sizeBytes === sizeBytes)
         ) {
-          const updated = {
+          const updated: DiagramAttachment = {
             ...item,
             base64Data,
+            sizeBytes: sizeBytes || item.sizeBytes,
             serverUploadStatus: 'synced' as const,
             uploadProgress: 100,
           };
           saveAttachmentBinaryToVault(updated).catch(() => {});
+          if (!cloudSyncCandidate) {
+            cloudSyncCandidate = updated;
+          }
           return updated;
         }
         return item;
-      })
-    );
+      });
+      return deduplicateAttachments(mapped);
+    });
+
+    if (cloudSyncCandidate) {
+      uploadAttachmentInChunks(cloudSyncCandidate).catch(() => {});
+    }
   };
 
   const handleLoadInvestigation = async (saved: SavedInvestigationSummary) => {
     setSessionId(saved.id);
+    try {
+      localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, saved.id);
+    } catch {
+      // Ignore
+    }
     setTurns(saved.turns);
     setInvestigationStatus(saved.status || 'em_investigacao');
     setFieldResolutionNote(saved.fieldResolutionNote || '');
     setIsFavorite(Boolean(saved.isFavorite));
 
-    const initialList: DiagramAttachment[] = (
+    const rawInitialList: DiagramAttachment[] = (
       saved.attachmentMetadata || []
     ).map((meta) => {
       // Preserve base64Data if this attachment is already in memory in current state
@@ -1249,7 +1326,8 @@ export default function App() {
         (a) =>
           a.base64Data &&
           (a.id === meta.id ||
-            (a.name === meta.name && a.sizeBytes === meta.sizeBytes))
+            a.name.trim().toLowerCase() === meta.name.trim().toLowerCase() ||
+            (a.sizeBytes > 0 && a.sizeBytes === meta.sizeBytes))
       );
       return {
         ...meta,
@@ -1260,13 +1338,15 @@ export default function App() {
       };
     });
 
+    const initialList = deduplicateAttachments(rawInitialList);
+
     setAttachments(initialList);
     setQuery(saved.turns[saved.turns.length - 1]?.userQuery || '');
     setError(null);
     setIsLeftSidebarCollapsed(true);
     setActiveNavTab('bancada');
 
-    // Automatically hydrate full PDF binaries from IndexedDB Vault or Server Disk Cache
+    // Automatically hydrate full PDF binaries from CacheStorage, IndexedDB Vault, or Supabase Cloud Vault
     const hydrated = await hydrateAttachmentsFromVault(initialList);
     setAttachments(hydrated);
   };

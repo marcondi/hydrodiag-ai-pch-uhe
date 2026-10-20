@@ -299,7 +299,7 @@ async function fetchHistoryFromSupabase(): Promise<{
 
   try {
     const res = await fetch(
-      `${cfg.url}/rest/v1/${SUPABASE_TABLE}?select=*&order=updated_at.desc&limit=100`,
+      `${cfg.url}/rest/v1/${SUPABASE_TABLE}?select=*&status=neq.pdf_vault_chunk&order=updated_at.desc&limit=100`,
       {
         method: 'GET',
         headers: getSupabaseHeaders(cfg.key),
@@ -313,7 +313,13 @@ async function fetchHistoryFromSupabase(): Promise<{
 
     const rows = (await res.json()) as Array<Record<string, unknown>>;
     const items = Array.isArray(rows)
-      ? rows.map(supabaseRowToInvestigation)
+      ? rows
+          .filter(
+            (r) =>
+              String(r.status || '') !== 'pdf_vault_chunk' &&
+              !String(r.id || '').startsWith('__pdf_blob__')
+          )
+          .map(supabaseRowToInvestigation)
       : [];
     return { ok: true, items };
   } catch (err) {
@@ -323,6 +329,139 @@ async function fetchHistoryFromSupabase(): Promise<{
       error: err instanceof Error ? err.message : 'Erro de rede no Supabase',
     };
   }
+}
+
+const CHUNK_DOWNLOAD_SIZE = 1500 * 1024;
+
+function getCanonicalPdfNameSlug(name?: string): string {
+  return (name || 'diagrama.pdf')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, '_')
+    .slice(0, 60);
+}
+
+async function savePdfChunkToSupabase(params: {
+  attachmentId: string;
+  name: string;
+  mimeType: string;
+  sizeBytes?: number;
+  chunkIndex: number;
+  totalChunks: number;
+  chunkData: string;
+}): Promise<boolean> {
+  const cfg = getSupabaseConfig();
+  if (!cfg || !params.chunkData) return false;
+  const slug = getCanonicalPdfNameSlug(params.name);
+  const rowId = `__pdf_blob__${slug}__c_${params.chunkIndex}`;
+  const nowIso = new Date().toISOString();
+  const row = {
+    id: rowId,
+    title: `[PDF_VAULT] ${params.name || 'diagrama.pdf'} (${params.chunkIndex + 1}/${params.totalChunks})`,
+    status: 'pdf_vault_chunk',
+    is_favorite: false,
+    field_resolution_note: slug,
+    created_at: nowIso,
+    updated_at: nowIso,
+    attachment_metadata: [
+      {
+        id: params.attachmentId,
+        name: params.name,
+        mimeType: params.mimeType,
+        sizeBytes: params.sizeBytes || 0,
+        chunkIndex: params.chunkIndex,
+        totalChunks: params.totalChunks,
+        slug,
+      },
+    ],
+    turns: [],
+    raw_payload: {
+      chunkIndex: params.chunkIndex,
+      totalChunks: params.totalChunks,
+      chunkData: params.chunkData,
+      name: params.name,
+      sizeBytes: params.sizeBytes || 0,
+      mimeType: params.mimeType,
+      slug,
+    },
+  };
+
+  try {
+    const res = await fetch(
+      `${cfg.url}/rest/v1/${SUPABASE_TABLE}?on_conflict=id`,
+      {
+        method: 'POST',
+        headers: getSupabaseHeaders(cfg.key, {
+          Prefer: 'resolution=merge-duplicates,return=minimal',
+        }),
+        body: JSON.stringify([row]),
+      }
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function fetchPdfChunkFromSupabase(params: {
+  name?: string;
+  chunkIndex: number;
+}): Promise<{ chunkData: string; totalChunks: number } | null> {
+  const cfg = getSupabaseConfig();
+  if (!cfg) return null;
+
+  const extractFromRows = (
+    rows: unknown
+  ): { chunkData: string; totalChunks: number } | null => {
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    const r = rows[0] as Record<string, unknown>;
+    const raw =
+      r.raw_payload && typeof r.raw_payload === 'object'
+        ? (r.raw_payload as Record<string, unknown>)
+        : {};
+    const chunkData = typeof raw.chunkData === 'string' ? raw.chunkData : '';
+    const totalChunks =
+      typeof raw.totalChunks === 'number' && raw.totalChunks > 0
+        ? raw.totalChunks
+        : 1;
+    if (chunkData.length > 0) {
+      return { chunkData, totalChunks };
+    }
+    return null;
+  };
+
+  try {
+    if (params.name) {
+      const slug = getCanonicalPdfNameSlug(params.name);
+      const exactId = `__pdf_blob__${slug}__c_${params.chunkIndex}`;
+      const res = await fetch(
+        `${cfg.url}/rest/v1/${SUPABASE_TABLE}?select=raw_payload&id=eq.${encodeURIComponent(exactId)}&limit=1`,
+        {
+          method: 'GET',
+          headers: getSupabaseHeaders(cfg.key),
+        }
+      );
+      if (res.ok) {
+        const found = extractFromRows(await res.json());
+        if (found) return found;
+      }
+    }
+
+    // Fallback: latest PDF chunk with this chunkIndex in Supabase Vault
+    const fallbackRes = await fetch(
+      `${cfg.url}/rest/v1/${SUPABASE_TABLE}?select=raw_payload&status=eq.pdf_vault_chunk&id=like.*__c_${params.chunkIndex}&order=updated_at.desc&limit=1`,
+      {
+        method: 'GET',
+        headers: getSupabaseHeaders(cfg.key),
+      }
+    );
+    if (fallbackRes.ok) {
+      return extractFromRows(await fallbackRes.json());
+    }
+  } catch {
+    // Ignore Supabase network error
+  }
+  return null;
 }
 
 async function upsertHistoryToSupabase(
@@ -1320,34 +1459,65 @@ app.delete('/api/history/:id', async (req, res) => {
   });
 });
 
-// Recover cached PDF binary if available in /tmp/hydrodiag_uploads
-app.get('/api/attachments/fetch-binary', (req, res) => {
+// Recover cached PDF binary in safe 1.5MB chunks from /tmp/hydrodiag_uploads OR Supabase Cloud Vault
+app.get('/api/attachments/fetch-binary', async (req, res) => {
   try {
     const id = String(req.query.id || '');
     const name = String(req.query.name || '');
     const sizeBytes = Number(req.query.sizeBytes || 0);
+    const chunkIndexParam = req.query.chunkIndex;
+    const chunkIndex =
+      chunkIndexParam !== undefined ? Number(chunkIndexParam) : 0;
+
     const stored = findStoredAttachment({
       id: id || undefined,
       name: name || undefined,
       sizeBytes: sizeBytes > 0 ? sizeBytes : undefined,
     });
+
     if (stored) {
-      if (stored.completeBase64) {
-        return res.json({ ok: true, base64Data: stored.completeBase64 });
+      let fullB64 = stored.completeBase64 || '';
+      if (!fullB64 && stored.filePath && fs.existsSync(stored.filePath)) {
+        fullB64 = fs.readFileSync(stored.filePath).toString('base64');
       }
-      if (stored.filePath && fs.existsSync(stored.filePath)) {
-        const b64 = fs.readFileSync(stored.filePath).toString('base64');
-        return res.json({ ok: true, base64Data: b64 });
+      if (fullB64) {
+        const totalChunks = Math.max(
+          1,
+          Math.ceil(fullB64.length / CHUNK_DOWNLOAD_SIZE)
+        );
+        const start = chunkIndex * CHUNK_DOWNLOAD_SIZE;
+        const chunkData = fullB64.slice(start, start + CHUNK_DOWNLOAD_SIZE);
+        return res.json({
+          ok: true,
+          chunkData,
+          chunkIndex,
+          totalChunks,
+        });
       }
     }
+
+    // Fallback: Retrieve chunk directly from Supabase Cloud PDF Vault (Agenda Financeira youware)
+    const cloudChunk = await fetchPdfChunkFromSupabase({
+      name: name || undefined,
+      chunkIndex: isNaN(chunkIndex) ? 0 : chunkIndex,
+    });
+    if (cloudChunk) {
+      return res.json({
+        ok: true,
+        chunkData: cloudChunk.chunkData,
+        chunkIndex: isNaN(chunkIndex) ? 0 : chunkIndex,
+        totalChunks: cloudChunk.totalChunks,
+      });
+    }
+
     return res.status(404).json({ ok: false });
   } catch {
     return res.status(404).json({ ok: false });
   }
 });
 
-// Chunked Upload Endpoint
-app.post('/api/upload-chunk', (req, res) => {
+// Chunked Upload Endpoint (saves to /tmp AND Supabase Cloud PDF Vault)
+app.post('/api/upload-chunk', async (req, res) => {
   try {
     const {
       attachmentId,
@@ -1373,6 +1543,17 @@ app.post('/api/upload-chunk', (req, res) => {
     }
     record.receivedChunks.set(chunkIndex, chunkData);
     record.updatedAt = Date.now();
+
+    // Persist chunk in Supabase Cloud Vault so it survives Vercel container restarts and works across PCs
+    await savePdfChunkToSupabase({
+      attachmentId: String(attachmentId || ''),
+      name: String(name || 'diagrama.pdf'),
+      mimeType: String(mimeType || 'application/pdf'),
+      sizeBytes: typeof sizeBytes === 'number' ? sizeBytes : undefined,
+      chunkIndex: Number(chunkIndex || 0),
+      totalChunks: Number(totalChunks || 1),
+      chunkData: String(chunkData || ''),
+    });
 
     if (record.receivedChunks.size === totalChunks) {
       const ordered: string[] = [];

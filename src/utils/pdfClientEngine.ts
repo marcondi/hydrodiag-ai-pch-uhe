@@ -10,6 +10,48 @@ export interface PageBatchIndex {
 const PDF_INDEX_STORAGE_PREFIX = 'hydrodiag_pdf_idx_v2_';
 const IDB_DB_NAME = 'hydrodiag_pdf_vault_v1';
 const IDB_STORE_NAME = 'pdf_binaries';
+const CACHE_STORAGE_NAME = 'hydrodiag_pdf_binary_cache_v2';
+
+// Fast in-memory session cache keyed by normalized filename and attachment ID
+const memoryVaultByName = new Map<string, string>();
+let memoryLatestBase64: string | null = null;
+
+function normalizeFileNameKey(name?: string): string {
+  return (name || 'diagrama.pdf')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+export function deduplicateAttachments(
+  list: DiagramAttachment[]
+): DiagramAttachment[] {
+  const byKey = new Map<string, DiagramAttachment>();
+  for (const item of list) {
+    const key = normalizeFileNameKey(item.name);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, { ...item });
+    } else {
+      // Merge: keep non-empty base64Data, prefer valid sizeBytes and panelName
+      byKey.set(key, {
+        ...existing,
+        base64Data: existing.base64Data || item.base64Data || '',
+        sizeBytes: existing.sizeBytes || item.sizeBytes || 0,
+        panelName: existing.panelName || item.panelName,
+        categoryTag: existing.categoryTag || item.categoryTag,
+        serverUploadStatus:
+          existing.base64Data || item.base64Data
+            ? 'synced'
+            : existing.serverUploadStatus,
+      });
+    }
+  }
+  return Array.from(byKey.values()).map((att, idx) => ({
+    ...att,
+    sequenceIndex: idx + 1,
+  }));
+}
 
 function openPdfVaultDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -30,37 +72,86 @@ function openPdfVaultDb(): Promise<IDBDatabase> {
 }
 
 function getVaultSignatureKey(name: string, sizeBytes: number): string {
-  return `sig__${(name || '').trim().toLowerCase()}__${sizeBytes || 0}`;
+  return `sig__${normalizeFileNameKey(name)}__${sizeBytes || 0}`;
 }
 
 function getVaultNameKey(name: string): string {
-  return `name__${(name || '').trim().toLowerCase()}`;
+  return `name__${normalizeFileNameKey(name)}`;
 }
 
 /**
- * Persists a PDF/image base64 binary in browser IndexedDB (supports hundreds of MBs)
- * so closing/refreshing the app or reopening an investigation from History restores the PDF automatically.
+ * Persists a PDF/image binary across 3 local layers:
+ * 1) In-Memory Map (instant)
+ * 2) Browser CacheStorage API as native binary Response (handles 5MB-100MB PDFs with zero IPC string limit)
+ * 3) Browser IndexedDB as compact Uint8Array binary
  */
 export async function saveAttachmentBinaryToVault(
   att: Pick<DiagramAttachment, 'id' | 'name' | 'sizeBytes' | 'base64Data'>
 ): Promise<void> {
   if (!att.base64Data) return;
+  const cleanB64 = att.base64Data.includes(',')
+    ? att.base64Data.split(',')[1]
+    : att.base64Data;
+  if (!cleanB64) return;
+
+  const normName = normalizeFileNameKey(att.name);
+  memoryVaultByName.set(normName, cleanB64);
+  if (att.id) memoryVaultByName.set(`id__${att.id}`, cleanB64);
+  memoryLatestBase64 = cleanB64;
+
+  let rawBytes: Uint8Array | null = null;
+  try {
+    rawBytes = base64ToUint8Array(cleanB64);
+  } catch {
+    rawBytes = null;
+  }
+
+  // Layer 1: Browser CacheStorage API (Native Binary Stream — immune to V8 string/IPC limits)
+  if (rawBytes && typeof caches !== 'undefined') {
+    try {
+      const cache = await caches.open(CACHE_STORAGE_NAME);
+      const urls = [
+        `https://hydrodiag.local/pdf/name/${encodeURIComponent(normName)}`,
+        `https://hydrodiag.local/pdf/sig/${encodeURIComponent(normName)}__${att.sizeBytes || rawBytes.byteLength}`,
+        `https://hydrodiag.local/pdf/latest`,
+      ];
+      if (att.id) {
+        urls.push(`https://hydrodiag.local/pdf/id/${encodeURIComponent(att.id)}`);
+      }
+      for (const u of urls) {
+        const copyBuf = new Uint8Array(rawBytes);
+        await cache.put(
+          u,
+          new Response(copyBuf.buffer, {
+            headers: {
+              'Content-Type': 'application/pdf',
+              'X-File-Name': encodeURIComponent(normName),
+            },
+          })
+        );
+      }
+    } catch {
+      // Ignore CacheStorage errors
+    }
+  }
+
+  // Layer 2: Browser IndexedDB (Single compact Uint8Array write per transaction)
   try {
     const db = await openPdfVaultDb();
+    const payloadToStore: Uint8Array | string = rawBytes || cleanB64;
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(IDB_STORE_NAME, 'readwrite');
       const store = tx.objectStore(IDB_STORE_NAME);
-      if (att.id) {
-        store.put(att.base64Data, `id__${att.id}`);
-      }
-      if (att.name && att.sizeBytes) {
+      store.put(payloadToStore, getVaultNameKey(normName));
+      store.put(payloadToStore, 'latest__pdf');
+      if (att.sizeBytes) {
         store.put(
-          att.base64Data,
-          getVaultSignatureKey(att.name, att.sizeBytes)
+          payloadToStore,
+          getVaultSignatureKey(normName, att.sizeBytes)
         );
       }
-      if (att.name) {
-        store.put(att.base64Data, getVaultNameKey(att.name));
+      if (att.id) {
+        store.put(payloadToStore, `id__${att.id}`);
       }
       tx.oncomplete = () => {
         db.close();
@@ -79,6 +170,46 @@ export async function saveAttachmentBinaryToVault(
 export async function loadAttachmentBinaryFromVault(
   att: Pick<DiagramAttachment, 'id' | 'name' | 'sizeBytes'>
 ): Promise<string | null> {
+  const normName = normalizeFileNameKey(att.name);
+
+  // 0. Check fast in-memory map first
+  if (att.id && memoryVaultByName.has(`id__${att.id}`)) {
+    return memoryVaultByName.get(`id__${att.id}`) || null;
+  }
+  if (normName && memoryVaultByName.has(normName)) {
+    return memoryVaultByName.get(normName) || null;
+  }
+
+  // 1. Check Browser CacheStorage API (Native Binary)
+  if (typeof caches !== 'undefined') {
+    try {
+      const cache = await caches.open(CACHE_STORAGE_NAME);
+      const candidateUrls = [
+        `https://hydrodiag.local/pdf/name/${encodeURIComponent(normName)}`,
+        `https://hydrodiag.local/pdf/sig/${encodeURIComponent(normName)}__${att.sizeBytes || 0}`,
+        ...(att.id
+          ? [`https://hydrodiag.local/pdf/id/${encodeURIComponent(att.id)}`]
+          : []),
+        `https://hydrodiag.local/pdf/latest`,
+      ];
+
+      for (const url of candidateUrls) {
+        const match = await cache.match(url);
+        if (match) {
+          const buf = await match.arrayBuffer();
+          if (buf && buf.byteLength > 100) {
+            const b64 = uint8ArrayToBase64(new Uint8Array(buf));
+            memoryVaultByName.set(normName, b64);
+            return b64;
+          }
+        }
+      }
+    } catch {
+      // Ignore CacheStorage read errors
+    }
+  }
+
+  // 2. Check Browser IndexedDB (supports both Uint8Array and legacy base64 string)
   try {
     const db = await openPdfVaultDb();
     const readKey = (key: string): Promise<string | null> =>
@@ -87,48 +218,114 @@ export async function loadAttachmentBinaryFromVault(
         const store = tx.objectStore(IDB_STORE_NAME);
         const req = store.get(key);
         req.onsuccess = () => {
-          resolve(typeof req.result === 'string' && req.result ? req.result : null);
+          const res = req.result;
+          if (!res) {
+            resolve(null);
+            return;
+          }
+          if (typeof res === 'string' && res.length > 100) {
+            resolve(res);
+            return;
+          }
+          if (res instanceof Uint8Array && res.byteLength > 100) {
+            resolve(uint8ArrayToBase64(res));
+            return;
+          }
+          if (res instanceof ArrayBuffer && res.byteLength > 100) {
+            resolve(uint8ArrayToBase64(new Uint8Array(res)));
+            return;
+          }
+          resolve(null);
         };
         req.onerror = () => resolve(null);
       });
 
-    let found: string | null = null;
-    if (att.id) {
-      found = await readKey(`id__${att.id}`);
-    }
-    if (!found && att.name && att.sizeBytes) {
-      found = await readKey(getVaultSignatureKey(att.name, att.sizeBytes));
-    }
-    if (!found && att.name) {
-      found = await readKey(getVaultNameKey(att.name));
+    const keysToTry = [
+      getVaultNameKey(normName),
+      ...(att.sizeBytes ? [getVaultSignatureKey(normName, att.sizeBytes)] : []),
+      ...(att.id ? [`id__${att.id}`] : []),
+      'latest__pdf',
+    ];
+
+    for (const k of keysToTry) {
+      const found = await readKey(k);
+      if (found) {
+        db.close();
+        memoryVaultByName.set(normName, found);
+        return found;
+      }
     }
     db.close();
-    if (found) return found;
   } catch {
     // Ignore IndexedDB read errors
   }
 
-  // Fallback: try fetching from server disk cache (/tmp/hydrodiag_uploads) if available
+  // 3. Fallback: Fetch in chunks from Server / Supabase Cloud PDF Vault (/api/attachments/fetch-binary)
   try {
-    const params = new URLSearchParams();
-    if (att.id) params.set('id', att.id);
-    if (att.name) params.set('name', att.name);
-    if (att.sizeBytes) params.set('sizeBytes', String(att.sizeBytes));
-    const res = await fetch(`/api/attachments/fetch-binary?${params.toString()}`);
-    if (res.ok) {
-      const data = await res.json();
-      if (data && typeof data.base64Data === 'string' && data.base64Data.length > 0) {
-        await saveAttachmentBinaryToVault({
-          id: att.id,
-          name: att.name,
-          sizeBytes: att.sizeBytes,
-          base64Data: data.base64Data,
-        });
-        return data.base64Data;
+    const buildParams = (chunkIdx: number) => {
+      const p = new URLSearchParams();
+      if (att.id) p.set('id', att.id);
+      if (att.name) p.set('name', att.name);
+      if (att.sizeBytes) p.set('sizeBytes', String(att.sizeBytes));
+      p.set('chunkIndex', String(chunkIdx));
+      return p.toString();
+    };
+
+    const firstRes = await fetch(
+      `/api/attachments/fetch-binary?${buildParams(0)}`
+    );
+    if (firstRes.ok) {
+      const firstData = await firstRes.json();
+      if (firstData && firstData.ok) {
+        let fullBase64 = '';
+        if (
+          typeof firstData.base64Data === 'string' &&
+          firstData.base64Data.length > 0
+        ) {
+          fullBase64 = firstData.base64Data;
+        } else if (
+          typeof firstData.chunkData === 'string' &&
+          typeof firstData.totalChunks === 'number'
+        ) {
+          const chunks: string[] = [firstData.chunkData];
+          const totalChunks = firstData.totalChunks;
+          for (let c = 1; c < totalChunks; c++) {
+            const cRes = await fetch(
+              `/api/attachments/fetch-binary?${buildParams(c)}`
+            );
+            if (!cRes.ok) {
+              chunks.length = 0;
+              break;
+            }
+            const cData = await cRes.json();
+            if (!cData?.ok || typeof cData.chunkData !== 'string') {
+              chunks.length = 0;
+              break;
+            }
+            chunks.push(cData.chunkData);
+          }
+          if (chunks.length === totalChunks) {
+            fullBase64 = chunks.join('');
+          }
+        }
+
+        if (fullBase64.length > 100) {
+          await saveAttachmentBinaryToVault({
+            id: att.id,
+            name: att.name,
+            sizeBytes: att.sizeBytes,
+            base64Data: fullBase64,
+          });
+          return fullBase64;
+        }
       }
     }
   } catch {
     // Ignore network fallback error
+  }
+
+  if (memoryLatestBase64) {
+    return memoryLatestBase64;
   }
 
   return null;
@@ -137,9 +334,11 @@ export async function loadAttachmentBinaryFromVault(
 export async function hydrateAttachmentsFromVault(
   list: DiagramAttachment[]
 ): Promise<DiagramAttachment[]> {
+  const deduped = deduplicateAttachments(list);
   const hydrated = await Promise.all(
-    list.map(async (item) => {
-      if (item.base64Data && item.base64Data.length > 0) {
+    deduped.map(async (item) => {
+      if (item.base64Data && item.base64Data.length > 100) {
+        await saveAttachmentBinaryToVault(item);
         return item;
       }
       const restoredBase64 = await loadAttachmentBinaryFromVault(item);

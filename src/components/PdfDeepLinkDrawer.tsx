@@ -46,7 +46,22 @@ function pickBestAttachmentForPage(
   }
   if (attachments.length === 1) return attachments[0];
 
-  // Check cached PDF index from latest attachment to oldest to see which PDF actually has targetPage
+  // 1. Prefer attachments that ALREADY have base64Data loaded in memory and cover targetPage
+  const withBinary = attachments.filter((a) => Boolean(a.base64Data));
+  for (const att of [...withBinary].reverse()) {
+    const cached = getCachedPdfIndex(att);
+    if (cached && cached.length > 0) {
+      const maxIndexedPage = Math.max(...cached.map((b) => b.endPage));
+      if (targetPage <= maxIndexedPage && maxIndexedPage > 1) {
+        return att;
+      }
+    }
+  }
+  if (withBinary.length > 0) {
+    return withBinary[withBinary.length - 1];
+  }
+
+  // 2. Otherwise check cached PDF index from latest attachment to oldest
   const reversed = [...attachments].reverse();
   for (const att of reversed) {
     const cached = getCachedPdfIndex(att);
@@ -58,7 +73,6 @@ function pickBestAttachmentForPage(
     }
   }
 
-  // If targetPage > 2, prefer the largest PDF or latest PDF in sequence
   if (targetPage > 2) {
     const largest = [...attachments].sort(
       (a, b) => (b.sizeBytes || 0) - (a.sizeBytes || 0)
@@ -66,7 +80,7 @@ function pickBestAttachmentForPage(
     if (largest) return largest;
   }
 
-  return reversed.find((a) => Boolean(a.base64Data)) || attachments[attachments.length - 1];
+  return attachments[0];
 }
 
 export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
@@ -176,14 +190,28 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
         setSelectedAttachmentId(bestAtt.id);
       }
     }
-  }, [isOpen, initialPage, initialAttachmentId, attachments]);
+  }, [isOpen, initialPage, initialAttachmentId]);
 
   const activeAttachment =
     attachments.find((a) => a.id === selectedAttachmentId) || attachments[0];
 
+  const activeAttachmentId = activeAttachment?.id || '';
+  const activeAttachmentNameKey = (activeAttachment?.name || '')
+    .trim()
+    .toLowerCase();
+
+  // Check if any sibling attachment with the same filename already has base64Data
+  const siblingWithBase64 = attachments.find(
+    (a) =>
+      Boolean(a.base64Data) &&
+      a.name.trim().toLowerCase() === activeAttachmentNameKey
+  );
+
   const effectiveBase64 = activeAttachment
     ? activeAttachment.base64Data ||
+      siblingWithBase64?.base64Data ||
       localRecoveredBase64[activeAttachment.id] ||
+      localRecoveredBase64[activeAttachmentNameKey] ||
       ''
     : '';
 
@@ -198,22 +226,17 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       setPageError(null);
 
       let b64ToUse = effectiveBase64;
+      let justRecoveredFromVault = false;
       if (!b64ToUse) {
         const vaulted = await loadAttachmentBinaryFromVault(activeAttachment);
         if (vaulted && !isCancelled) {
           b64ToUse = vaulted;
+          justRecoveredFromVault = true;
           setLocalRecoveredBase64((prev) => ({
             ...prev,
             [activeAttachment.id]: vaulted,
+            [activeAttachmentNameKey]: vaulted,
           }));
-          if (onRelinkAttachmentBinary) {
-            onRelinkAttachmentBinary(
-              activeAttachment.id,
-              vaulted,
-              activeAttachment.name,
-              activeAttachment.sizeBytes
-            );
-          }
         }
       }
 
@@ -222,7 +245,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
           setBlobUrl(null);
           setIsLoadingPage(false);
           setPageError(
-            `O arquivo "${activeAttachment.name}" foi enviado antes da ativação do Cofre Local de PDFs (ou em outro dispositivo). Clique no botão abaixo para selecionar o PDF uma única vez — ele ficará salvo automaticamente no navegador mesmo se você fechar o app!`
+            `O arquivo "${activeAttachment.name}" ainda não está salvo no Cofre de PDFs (Local + Nuvem Supabase). Selecione-o uma única vez abaixo — ele ficará gravado permanentemente no navegador e no banco Supabase para abrir direto nas próximas vezes!`
           );
         }
         return;
@@ -237,19 +260,31 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
             setCurrentPage(1);
             setPageInput('1');
           }
-          return;
+        } else {
+          const result = await extractSinglePdfPageUrl(b64ToUse, currentPage);
+          activeUrl = result.blobUrl;
+
+          if (!isCancelled) {
+            setBlobUrl(result.blobUrl);
+            setTotalPages(result.totalPages);
+            if (result.actualPage !== currentPage) {
+              setCurrentPage(result.actualPage);
+              setPageInput(String(result.actualPage));
+            }
+          }
         }
 
-        const result = await extractSinglePdfPageUrl(b64ToUse, currentPage);
-        activeUrl = result.blobUrl;
-
-        if (!isCancelled) {
-          setBlobUrl(result.blobUrl);
-          setTotalPages(result.totalPages);
-          if (result.actualPage !== currentPage) {
-            setCurrentPage(result.actualPage);
-            setPageInput(String(result.actualPage));
-          }
+        if (
+          justRecoveredFromVault &&
+          !isCancelled &&
+          onRelinkAttachmentBinary
+        ) {
+          onRelinkAttachmentBinary(
+            activeAttachment.id,
+            b64ToUse,
+            activeAttachment.name,
+            activeAttachment.sizeBytes
+          );
         }
       } catch {
         if (!isCancelled) {
@@ -272,7 +307,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
         URL.revokeObjectURL(activeUrl);
       }
     };
-  }, [isOpen, activeAttachment, effectiveBase64, currentPage]);
+  }, [isOpen, activeAttachmentId, effectiveBase64, currentPage]);
 
   if (!isOpen) return null;
 
@@ -493,19 +528,27 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                       await saveAttachmentBinaryToVault({
                         id: activeAttachment.id,
                         name: activeAttachment.name,
-                        sizeBytes: activeAttachment.sizeBytes,
+                        sizeBytes: activeAttachment.sizeBytes || file.size,
                         base64Data: b64,
                       });
-                      await saveAttachmentBinaryToVault({
-                        id: activeAttachment.id,
-                        name: file.name,
-                        sizeBytes: file.size,
-                        base64Data: b64,
-                      });
+                      if (
+                        file.name.trim().toLowerCase() !==
+                        activeAttachmentNameKey
+                      ) {
+                        await saveAttachmentBinaryToVault({
+                          id: activeAttachment.id,
+                          name: file.name,
+                          sizeBytes: file.size,
+                          base64Data: b64,
+                        });
+                      }
                       setLocalRecoveredBase64((prev) => ({
                         ...prev,
                         [activeAttachment.id]: b64,
+                        [activeAttachmentNameKey]: b64,
+                        [file.name.trim().toLowerCase()]: b64,
                       }));
+                      setPageError(null);
                       if (onRelinkAttachmentBinary) {
                         onRelinkAttachmentBinary(
                           activeAttachment.id,
@@ -514,7 +557,6 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                           file.size
                         );
                       }
-                      setPageError(null);
                     }
                     setIsLoadingPage(false);
                   };
