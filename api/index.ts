@@ -1380,6 +1380,7 @@ const BACKUP_FILE_LIST = [
   'src/components/FaultQueryPanel.tsx',
   'src/components/DiagnosticReportView.tsx',
   'src/components/FaultChatPanel.tsx',
+  'src/components/PdfDeepLinkDrawer.tsx',
   'src/components/GitHubDeployModal.tsx',
 ];
 
