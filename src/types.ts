@@ -27,6 +27,7 @@ export interface ChatAttachmentPayload {
   sizeBytes?: number;
   categoryTag?: DiagramCategoryTag;
   panelName?: string;
+  previewDataUrl?: string;
 }
 
 export interface FaultChatMessage {
@@ -38,6 +39,7 @@ export interface FaultChatMessage {
   attachedImageName?: string;
   attachedFileCategory?: DiagramCategoryTag;
   attachedPanelName?: string;
+  attachedPreviewDataUrl?: string;
 }
 
 export interface DiagnosticTurn {
