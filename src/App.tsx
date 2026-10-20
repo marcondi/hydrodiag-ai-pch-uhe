@@ -23,6 +23,10 @@ import {
   Download,
   Database,
   RefreshCw,
+  PanelLeftOpen,
+  PanelLeftClose,
+  FileText,
+  PlusCircle,
 } from 'lucide-react';
 import {
   ChatAttachmentPayload,
@@ -179,6 +183,8 @@ export default function App() {
   const [chatProgressStep, setChatProgressStep] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const [sequenceModalOpen, setSequenceModalOpen] = useState<boolean>(false);
+  const [isLeftSidebarCollapsed, setIsLeftSidebarCollapsed] =
+    useState<boolean>(false);
 
   // History search & filter states
   const [historySearchQuery, setHistorySearchQuery] = useState<string>('');
@@ -471,6 +477,7 @@ export default function App() {
         };
 
         setTurns((prev) => [...prev, newTurn]);
+        setIsLeftSidebarCollapsed(true);
         return;
       }
 
@@ -592,6 +599,7 @@ export default function App() {
       };
 
       setTurns((prev) => [...prev, newTurn]);
+      setIsLeftSidebarCollapsed(true);
     } catch (err) {
       setError(
         err instanceof Error
@@ -1068,6 +1076,7 @@ export default function App() {
     setFieldResolutionNote('');
     setIsFavorite(false);
     setError(null);
+    setIsLeftSidebarCollapsed(false);
     setSafetyChecklist(
       INITIAL_SAFETY_CHECKLIST.map((item) => ({ ...item, checked: false }))
     );
@@ -1092,6 +1101,7 @@ export default function App() {
     );
     setQuery(saved.turns[saved.turns.length - 1]?.userQuery || '');
     setError(null);
+    setIsLeftSidebarCollapsed(true);
     setActiveNavTab('bancada');
   };
 
@@ -1365,99 +1375,131 @@ export default function App() {
       </div>
 
       {/* Main Content Container */}
-      <main className="flex-1 max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-6 flex flex-col gap-6">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-800/80 pb-4 no-print">
-          <div>
-            <h1 className="text-xl sm:text-2xl font-bold text-slate-100 tracking-tight">
-              Sistema de Diagnóstico Eletromecânico, Supervisório e Resolução de
-              Falhas (PCH / UHE)
-            </h1>
-            <p className="text-xs text-slate-400 mt-1">
-              Análise especialista de diagramas unifilares e multifilares{' '}
-              <code className="text-sky-300">/EL</code> · Réguas de bornes{' '}
-              <code className="text-sky-300">/RB</code> · Layout mecânico{' '}
-              <code className="text-sky-300">/ME</code> · Relação de materiais{' '}
-              <code className="text-sky-300">/RM</code>
-            </p>
-          </div>
-
-          <div className="flex items-center gap-3 text-xs text-slate-400 font-mono tabular-nums shrink-0">
-            <span>Barramentos 125 Vcc / 220 Vca</span>
-            <span aria-hidden="true">·</span>
-            <span>Normas WEG / IEC / ANSI</span>
-          </div>
-        </div>
-
-        {/* TAB 1: BANCADA DE DIAGNÓSTICO */}
+      <main className="flex-1 max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-3.5 flex flex-col gap-3.5">
+        {/* TAB 1: BANCADA DE DIAGNÓSTICO (SPLIT-WORKSPACE ZERO ROLAGEM VERTICAL EXCESSIVA) */}
         {activeNavTab === 'bancada' && (
-          <div className="flex flex-col gap-5">
-            {/* Quick Recent Faults Search & Recall Bar */}
-            {savedInvestigations.length > 0 && (
-              <div className="bg-[#111827] border border-slate-800 rounded-lg px-4 py-3 flex flex-col md:flex-row md:items-center justify-between gap-3 no-print">
-                <div className="flex items-center gap-2 shrink-0">
-                  <History className="w-4 h-4 text-sky-400" />
-                  <span className="text-xs font-semibold text-slate-200">
-                    Últimos Históricos de Falhas Salvos:
+          <div className="flex flex-col gap-3 flex-1">
+            {/* Unified Compact Workbench Command Bar: Context + Quick History + Active PDF Sequence */}
+            <div className="bg-[#111827] border border-slate-800 rounded-lg px-3.5 py-2 flex flex-wrap items-center justify-between gap-3 no-print">
+              <div className="flex flex-wrap items-center gap-2.5 min-w-0">
+                <button
+                  type="button"
+                  onClick={() => setIsLeftSidebarCollapsed((prev) => !prev)}
+                  className={`px-2.5 py-1.5 rounded-md border text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 ${
+                    isLeftSidebarCollapsed
+                      ? 'bg-sky-500/15 border-sky-500/40 text-sky-300 hover:bg-sky-500/25'
+                      : 'bg-[#0B111E] border-slate-700 text-slate-300 hover:text-white hover:bg-slate-800'
+                  }`}
+                  title={
+                    isLeftSidebarCollapsed
+                      ? 'Abrir coluna de Upload de PDFs e Consulta de Alarme'
+                      : 'Recolher coluna de entrada para expandir Laudo e Chat lado a lado em 100% da tela'
+                  }
+                >
+                  {isLeftSidebarCollapsed ? (
+                    <>
+                      <PanelLeftOpen className="w-3.5 h-3.5 text-sky-400" />
+                      <span>Entrada &amp; Upload ({attachments.length})</span>
+                    </>
+                  ) : (
+                    <>
+                      <PanelLeftClose className="w-3.5 h-3.5 text-slate-400" />
+                      <span>Recolher Entrada</span>
+                    </>
+                  )}
+                </button>
+
+                <span
+                  aria-hidden="true"
+                  className="text-slate-700 hidden sm:inline"
+                >
+                  |
+                </span>
+
+                {/* Active Attachments Inline Summary */}
+                <div className="flex items-center gap-1.5 text-xs text-slate-300 min-w-0">
+                  <FileText className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span className="truncate max-w-[260px] sm:max-w-[360px] text-slate-300">
+                    {attachments.length > 0
+                      ? attachments
+                          .map((a) => `#${a.sequenceIndex} ${a.name}`)
+                          .join(' · ')
+                      : 'Nenhum PDF anexado'}
                   </span>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-1.5 flex-1 min-w-0">
-                  {quickFilteredHistory.map((item) => {
-                    const isActive = item.id === sessionId && turns.length > 0;
-                    const chatCount = item.turns.reduce(
-                      (acc, t) => acc + (t.chatMessages?.length || 0),
-                      0
-                    );
-                    return (
-                      <button
-                        key={item.id}
-                        type="button"
-                        onClick={() => handleLoadInvestigation(item)}
-                        className={`px-2.5 py-1 rounded text-xs transition-colors flex items-center gap-1.5 cursor-pointer max-w-[260px] truncate border ${
-                          isActive
-                            ? 'bg-sky-500/20 border-sky-500/50 text-sky-200 font-medium'
-                            : 'bg-[#0B111E] border-slate-800 hover:border-slate-700 text-slate-300 hover:text-white'
-                        }`}
-                        title={`Reabrir diagnóstico: ${item.title}`}
-                      >
-                        {item.status === 'resolvida' && (
-                          <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
-                        )}
-                        <span className="truncate">{item.title}</span>
-                        {chatCount > 0 && (
-                          <span className="font-mono text-[10px] text-sky-400 shrink-0">
-                            ({chatCount} msg)
-                          </span>
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-
-                <div className="flex items-center gap-2 shrink-0">
-                  <div className="relative">
-                    <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
-                    <input
-                      type="text"
-                      value={quickBarSearch}
-                      onChange={(e) => setQuickBarSearch(e.target.value)}
-                      placeholder="Filtrar histórico rápido..."
-                      className="bg-[#0B111E] border border-slate-800 focus:border-sky-500 rounded-md pl-8 pr-2.5 py-1 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none w-44"
-                    />
-                  </div>
                   <button
                     type="button"
-                    onClick={() => setActiveNavTab('historico')}
-                    className="text-xs text-sky-400 hover:text-sky-300 font-medium whitespace-nowrap cursor-pointer"
+                    onClick={() => setSequenceModalOpen(true)}
+                    className="px-2 py-0.5 rounded bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 text-[11px] font-medium flex items-center gap-1 cursor-pointer transition-colors shrink-0"
+                    title="Anexar próximo desenho elétrico ou foto na sequência"
                   >
-                    Ver Todos ({savedInvestigations.length})
+                    <PlusCircle className="w-3 h-3" />
+                    <span>+ Desenho</span>
                   </button>
                 </div>
               </div>
-            )}
 
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-              <div className="lg:col-span-5 flex flex-col gap-5 no-print">
+              {/* Right Side of Command Bar: Quick Recent Faults Recall */}
+              <div className="flex flex-wrap items-center gap-2 min-w-0 ml-auto">
+                {savedInvestigations.length > 0 && (
+                  <>
+                    <div className="hidden xl:flex items-center gap-1.5 min-w-0">
+                      <History className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                      <span className="text-[11px] text-slate-400 shrink-0">
+                        Recentes:
+                      </span>
+                      {quickFilteredHistory.slice(0, 3).map((item) => {
+                        const isActive =
+                          item.id === sessionId && turns.length > 0;
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => handleLoadInvestigation(item)}
+                            className={`px-2 py-1 rounded text-[11px] transition-colors flex items-center gap-1 cursor-pointer max-w-[180px] truncate border ${
+                              isActive
+                                ? 'bg-sky-500/20 border-sky-500/50 text-sky-200 font-medium'
+                                : 'bg-[#0B111E] border-slate-800 hover:border-slate-700 text-slate-300 hover:text-white'
+                            }`}
+                            title={`Reabrir diagnóstico: ${item.title}`}
+                          >
+                            {item.status === 'resolvida' && (
+                              <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
+                            )}
+                            <span className="truncate">{item.title}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div className="relative">
+                      <Search className="w-3 h-3 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        value={quickBarSearch}
+                        onChange={(e) => setQuickBarSearch(e.target.value)}
+                        placeholder="Buscar falha salva..."
+                        className="bg-[#0B111E] border border-slate-800 focus:border-sky-500 rounded-md pl-7 pr-2 py-1 text-[11px] text-slate-200 placeholder:text-slate-500 focus:outline-none w-36 sm:w-44"
+                      />
+                    </div>
+                  </>
+                )}
+
+                <span className="hidden 2xl:inline text-[11px] text-slate-500 font-mono tabular-nums">
+                  125 Vcc / 220 Vca · WEG / IEC
+                </span>
+              </div>
+            </div>
+
+            {/* Split-Workspace Grid: Independent Scroll Columns on Desktop */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start flex-1">
+              {/* Left Input Drawer: Independent Scroll on Desktop so it never pushes the page down */}
+              <div
+                className={
+                  isLeftSidebarCollapsed
+                    ? 'hidden'
+                    : 'lg:col-span-4 xl:col-span-4 lg:max-h-[calc(100vh-128px)] lg:overflow-y-auto lg:pr-1 flex flex-col gap-3.5 no-print'
+                }
+              >
                 <DiagramUploadPanel
                   attachments={attachments}
                   onAddAttachments={handleAddAttachments}
@@ -1481,7 +1523,14 @@ export default function App() {
                 />
               </div>
 
-              <div ref={reportContainerRef} className="lg:col-span-7">
+              <div
+                ref={reportContainerRef}
+                className={
+                  isLeftSidebarCollapsed
+                    ? 'lg:col-span-12'
+                    : 'lg:col-span-8 xl:col-span-8'
+                }
+              >
                 <DiagnosticReportView
                   turns={turns}
                   attachments={attachments}
@@ -1504,6 +1553,10 @@ export default function App() {
                   onUpdateStatus={setInvestigationStatus}
                   fieldResolutionNote={fieldResolutionNote}
                   onUpdateResolutionNote={setFieldResolutionNote}
+                  isLeftSidebarCollapsed={isLeftSidebarCollapsed}
+                  onToggleLeftSidebar={() =>
+                    setIsLeftSidebarCollapsed((prev) => !prev)
+                  }
                 />
               </div>
             </div>
