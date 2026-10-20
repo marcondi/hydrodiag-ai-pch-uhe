@@ -18,6 +18,7 @@ import {
   Rows2,
   PanelLeftClose,
   PanelLeftOpen,
+  BookOpen,
 } from 'lucide-react';
 import {
   ChatAttachmentPayload,
@@ -26,7 +27,11 @@ import {
   InvestigationStatus,
 } from '../types';
 import { FaultChatPanel } from './FaultChatPanel';
-import { formatTechnicalSymbols } from '../utils/pdfClientEngine';
+import { PdfDeepLinkDrawer } from './PdfDeepLinkDrawer';
+import {
+  formatTechnicalSymbols,
+  linkifyPdfPageReferences,
+} from '../utils/pdfClientEngine';
 
 export type WorkspaceLayoutMode = 'split' | 'report' | 'chat' | 'stacked';
 
@@ -78,6 +83,13 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
   const [noteSavedToast, setNoteSavedToast] = useState(false);
   const [workspaceMode, setWorkspaceMode] =
     useState<WorkspaceLayoutMode>('split');
+  const [deepLinkOpen, setDeepLinkOpen] = useState<boolean>(false);
+  const [deepLinkPage, setDeepLinkPage] = useState<number>(1);
+
+  const handleOpenPdfDeepLink = (pageNumber: number) => {
+    setDeepLinkPage(Math.max(1, pageNumber));
+    setDeepLinkOpen(true);
+  };
 
   const activeTurnIndex =
     selectedTurnIndex !== null && selectedTurnIndex < turns.length
@@ -122,13 +134,26 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-1.5 text-xs text-emerald-400 font-mono shrink-0 no-print">
-          <BookmarkCheck className="w-4 h-4" />
-          <span>Salvo na Nuvem</span>
+        <div className="flex items-center gap-2 shrink-0 no-print">
+          {attachments.length > 0 && (
+            <button
+              type="button"
+              onClick={() => handleOpenPdfDeepLink(1)}
+              className="px-2.5 py-1 rounded bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/40 text-sky-300 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors"
+              title="Abrir Inspetor Interativo de Folhas do PDF"
+            >
+              <BookOpen className="w-3.5 h-3.5 text-sky-400" />
+              <span>Inspetor de Folhas PDF</span>
+            </button>
+          )}
+          <div className="flex items-center gap-1 text-xs text-emerald-400 font-mono">
+            <BookmarkCheck className="w-4 h-4" />
+            <span>Salvo na Nuvem</span>
+          </div>
         </div>
       </div>
 
-      {/* Markdown Content with Industrial Styling */}
+      {/* Markdown Content with Industrial Styling + Interactive PDF Page Deep-Links */}
       <div className="prose prose-invert max-w-none text-sm leading-relaxed text-slate-200 space-y-4">
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
@@ -181,6 +206,36 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
                 </code>
               );
             },
+            a: ({ href, children }) => {
+              if (href && href.startsWith('#pdf-page-')) {
+                const pageNum = parseInt(href.replace('#pdf-page-', ''), 10);
+                return (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!isNaN(pageNum)) {
+                        handleOpenPdfDeepLink(pageNum);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1 px-1.5 py-0.5 mx-0.5 rounded bg-sky-500/15 hover:bg-sky-500/30 border border-sky-500/40 text-sky-300 font-mono text-xs tabular-nums transition-colors cursor-pointer align-baseline no-print"
+                    title={`Clique para abrir e inspecionar a Página ${pageNum} do PDF em alta resolução`}
+                  >
+                    <FileSearch className="w-3 h-3 text-sky-400 shrink-0" />
+                    <span>{children}</span>
+                  </button>
+                );
+              }
+              return (
+                <a
+                  href={href}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-sky-400 underline"
+                >
+                  {children}
+                </a>
+              );
+            },
             table: ({ children }) => (
               <div className="overflow-x-auto my-4 border border-slate-800 rounded-md">
                 <table className="w-full text-left border-collapse text-xs">
@@ -210,7 +265,9 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
             ),
           }}
         >
-          {formatTechnicalSymbols(turn.markdownResponse)}
+          {linkifyPdfPageReferences(
+            formatTechnicalSymbols(turn.markdownResponse)
+          )}
         </ReactMarkdown>
       </div>
 
@@ -608,6 +665,7 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
                     onSendChatMessage(activeTurn.id, text, attachment)
                   }
                   onOpenSequenceUpload={onOpenSequenceUpload}
+                  onOpenPdfDeepLink={handleOpenPdfDeepLink}
                   isSending={isChatSending}
                   chatProgressStep={chatProgressStep}
                   fillHeight={true}
@@ -633,6 +691,7 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
                   onSendChatMessage(activeTurn.id, text, attachment)
                 }
                 onOpenSequenceUpload={onOpenSequenceUpload}
+                onOpenPdfDeepLink={handleOpenPdfDeepLink}
                 isSending={isChatSending}
                 chatProgressStep={chatProgressStep}
                 fillHeight={true}
@@ -651,6 +710,7 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
                   onSendChatMessage(activeTurn.id, text, attachment)
                 }
                 onOpenSequenceUpload={onOpenSequenceUpload}
+                onOpenPdfDeepLink={handleOpenPdfDeepLink}
                 isSending={isChatSending}
                 chatProgressStep={chatProgressStep}
                 fillHeight={false}
@@ -659,6 +719,29 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
           )}
         </div>
       )}
+
+      {/* Interactive PDF Sheet Deep-Link Drawer */}
+      <PdfDeepLinkDrawer
+        isOpen={deepLinkOpen}
+        onClose={() => setDeepLinkOpen(false)}
+        attachments={attachments}
+        initialPage={deepLinkPage}
+        onAskAboutCurrentPage={
+          activeTurn
+            ? (pageNum, attName) => {
+                onSendChatMessage(
+                  activeTurn.id,
+                  `Inspecionei a Página ${pageNum} do arquivo "${attName}" no Inspetor Deep-Link. Detalhe os bornes de medição (+ / -), contatos NA/NF e referências cruzadas visíveis nesta folha para isolar a falha.`
+                );
+              }
+            : undefined
+        }
+        onRequestReupload={() => {
+          if (onToggleLeftSidebar && isLeftSidebarCollapsed) {
+            onToggleLeftSidebar();
+          }
+        }}
+      />
     </section>
   );
 };
