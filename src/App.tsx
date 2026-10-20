@@ -595,6 +595,7 @@ export default function App() {
 
     const isNewPdfInChat = chatAttachment?.mimeType === 'application/pdf';
     let workingAttachments = [...attachments];
+    let newlyAddedPdfItem: DiagramAttachment | null = null;
 
     if (chatAttachment && isNewPdfInChat) {
       const nextSeq = workingAttachments.length + 1;
@@ -618,6 +619,7 @@ export default function App() {
         serverUploadStatus: 'synced',
         uploadProgress: 100,
       };
+      newlyAddedPdfItem = newPdfItem;
       workingAttachments = [...workingAttachments, newPdfItem];
       setAttachments(workingAttachments);
 
@@ -633,6 +635,7 @@ export default function App() {
       attachedImageName: chatAttachment?.name,
       attachedFileCategory: chatAttachment?.categoryTag,
       attachedPanelName: chatAttachment?.panelName?.trim() || undefined,
+      attachedPreviewDataUrl: chatAttachment?.previewDataUrl,
     };
 
     const updatedHistory = [...(targetTurn.chatMessages || []), userMsg];
@@ -656,51 +659,80 @@ export default function App() {
     setChatProgressStep(
       isNewPdfInChat
         ? `Indexando e inspecionando o novo PDF "${chatAttachment?.name}" anexado no chat...`
-        : 'Consultando diagramas e histórico da falha para responder no chat...'
+        : chatAttachment
+          ? `Processando foto "${chatAttachment.name}" enviada no chat...`
+          : 'Consultando diagramas e histórico da falha para responder no chat...'
     );
     setError(null);
 
     try {
       const canUseStatelessServerless =
+        Boolean(chatAttachment?.base64) ||
         workingAttachments.length === 0 ||
         workingAttachments.some((a) => Boolean(a.base64Data));
 
       if (canUseStatelessServerless) {
         const preparedParts: unknown[] = [];
+        const latestAttachmentParts: unknown[] = [];
         const allSelectedPages: number[] = [];
 
-        const totalWithBase64 = workingAttachments.filter((a) =>
+        const attachmentsWithBase64 = workingAttachments.filter((a) =>
           Boolean(a.base64Data)
-        ).length;
+        );
+        const totalWithBase64 = attachmentsWithBase64.length;
 
         for (let idx = 0; idx < workingAttachments.length; idx++) {
           const att = workingAttachments[idx];
-          if (att.base64Data) {
-            const isLatestAttachment = idx === workingAttachments.length - 1;
-            const maxPagesForThisPdf =
-              totalWithBase64 <= 1 ? 8 : isLatestAttachment ? 6 : 3;
+          if (!att.base64Data) continue;
 
-            preparedParts.push({
-              text: `[ARQUIVO NA SEQUÊNCIA #${att.sequenceIndex} | Categoria: ${att.categoryTag} | Painel: ${att.panelName || 'Não informado'} | Nome: "${att.name}"]`,
-            });
+          const isJustAttachedInThisMsg =
+            newlyAddedPdfItem !== null && att.id === newlyAddedPdfItem.id;
+          const isLatestInSequence = idx === workingAttachments.length - 1;
+          const maxPagesForThisPdf = isJustAttachedInThisMsg
+            ? 8
+            : totalWithBase64 <= 1
+              ? 8
+              : isLatestInSequence
+                ? 6
+                : 3;
 
-            const { parts, selectedPages } =
-              await prepareClientSmartAttachmentParts(
-                att,
-                `${targetTurn.userQuery || ''} - ${messageText}`,
-                targetTurn.markdownResponse
-                  ? targetTurn.markdownResponse.slice(0, 600)
-                  : '',
-                (msg) => setChatProgressStep(msg),
-                maxPagesForThisPdf
-              );
-            preparedParts.push(...parts);
-            allSelectedPages.push(...selectedPages);
+          // Important: Do NOT pass previous markdownResponse as focusTopic here,
+          // because old page numbers in markdownResponse would bias page selection on new PDFs!
+          const selectorQuery = isJustAttachedInThisMsg
+            ? `${messageText} | Painel: ${att.panelName || att.name} | Alarme: ${targetTurn.userQuery || ''}`
+            : `${messageText} (${targetTurn.userQuery || ''})`;
+          const selectorFocus = `${att.categoryTag || ''} ${att.panelName || ''} ${targetTurn.focusTopic || ''}`.trim();
+
+          const headerPart = {
+            text: isJustAttachedInThisMsg
+              ? `📎 [NOVO CADERNO PDF ANEXADO NESTA MENSAGEM DO CHAT PELO OPERADOR -> Sequência #${att.sequenceIndex} | Categoria: ${att.categoryTag} | Painel: ${att.panelName || 'Ver desenho'} | Arquivo: "${att.name}"]`
+              : `[ARQUIVO DA SEQUÊNCIA #${att.sequenceIndex} | Categoria: ${att.categoryTag} | Painel: ${att.panelName || 'Não informado'} | Nome: "${att.name}"]`,
+          };
+
+          const { parts, selectedPages } =
+            await prepareClientSmartAttachmentParts(
+              att,
+              selectorQuery,
+              selectorFocus,
+              (msg) => setChatProgressStep(msg),
+              maxPagesForThisPdf
+            );
+
+          if (isJustAttachedInThisMsg) {
+            latestAttachmentParts.push(headerPart, ...parts);
+          } else {
+            preparedParts.push(headerPart, ...parts);
+          }
+
+          for (const p of selectedPages) {
+            if (!allSelectedPages.includes(p)) {
+              allSelectedPages.push(p);
+            }
           }
         }
 
         setChatProgressStep(
-          'Analisando circuito e formulando resposta técnica do especialista...'
+          'Analisando circuito e anexo enviado para formular resposta técnica...'
         );
 
         const stepResp = await fetch('/api/serverless-step', {
@@ -709,6 +741,10 @@ export default function App() {
           body: JSON.stringify({
             action: 'chat',
             preparedParts,
+            latestAttachmentParts,
+            chatAttachmentName: chatAttachment?.name,
+            chatAttachmentMimeType: chatAttachment?.mimeType,
+            chatAttachmentPanel: chatAttachment?.panelName,
             message: messageText,
             alarmTitle: targetTurn.userQuery,
             diagnosticMarkdown: targetTurn.markdownResponse,
@@ -761,6 +797,10 @@ export default function App() {
       }
 
       // Fallback when session was reopened from history without local base64Data
+      if (newlyAddedPdfItem) {
+        await uploadAttachmentInChunks(newlyAddedPdfItem);
+      }
+
       const startResp = await fetch('/api/chat-fault', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -778,6 +818,7 @@ export default function App() {
             mimeType: att.mimeType,
             sizeBytes: att.sizeBytes,
           })),
+          chatAttachmentName: chatAttachment?.name,
           inlineImageBase64:
             !isNewPdfInChat && chatAttachment
               ? chatAttachment.base64
