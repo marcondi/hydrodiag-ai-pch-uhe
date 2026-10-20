@@ -27,6 +27,8 @@ import {
   PanelLeftClose,
   FileText,
   PlusCircle,
+  Sun,
+  ArrowRight,
 } from 'lucide-react';
 import {
   ChatAttachmentPayload,
@@ -45,7 +47,10 @@ import {
 import { FaultQueryPanel } from './components/FaultQueryPanel';
 import { DiagnosticReportView } from './components/DiagnosticReportView';
 import { GitHubDeployPanel } from './components/GitHubDeployModal';
-import { prepareClientSmartAttachmentParts } from './utils/pdfClientEngine';
+import {
+  extractSignalChainFromContext,
+  prepareClientSmartAttachmentParts,
+} from './utils/pdfClientEngine';
 
 const STORAGE_KEY = 'hydrodiag_saved_investigations_v2';
 const BASE64_CHUNK_SIZE = 1500 * 1024;
@@ -202,6 +207,29 @@ export default function App() {
     'supabase' | 'local'
   >('local');
   const [isSyncingCloud, setIsSyncingCloud] = useState<boolean>(false);
+  const [fieldContrastMode, setFieldContrastMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('hydrodiag_field_contrast') === '1';
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    if (fieldContrastMode) {
+      document.documentElement.classList.add('field-contrast-mode');
+    } else {
+      document.documentElement.classList.remove('field-contrast-mode');
+    }
+    try {
+      localStorage.setItem(
+        'hydrodiag_field_contrast',
+        fieldContrastMode ? '1' : '0'
+      );
+    } catch {
+      // Ignore storage error
+    }
+  }, [fieldContrastMode]);
 
   const handleSyncHistoryWithCloud = async (
     itemsOverride?: SavedInvestigationSummary[]
@@ -1293,21 +1321,43 @@ export default function App() {
           </a>
         </nav>
 
-        <div className="flex items-center gap-2.5 shrink-0">
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => setFieldContrastMode((prev) => !prev)}
+            title="Alternar Modo Alto Contraste de Campo (Casa de Força / Painel)"
+            className={`px-3 py-2 text-xs font-medium rounded-md border transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+              fieldContrastMode
+                ? 'bg-amber-400 text-slate-950 border-amber-300 font-semibold'
+                : 'bg-[#111827] hover:bg-slate-800 text-slate-200 border-slate-700'
+            }`}
+          >
+            <Sun
+              className={`w-3.5 h-3.5 ${
+                fieldContrastMode ? 'text-slate-950' : 'text-amber-400'
+              }`}
+            />
+            <span className="hidden lg:inline">
+              {fieldContrastMode
+                ? 'Modo Casa de Força: ON'
+                : 'Alto Contraste (Campo)'}
+            </span>
+          </button>
+
           <a
             href="/api/backup/download-zip"
             download
             title="Baixar cópia completa do código-fonte em .ZIP"
-            className="px-3.5 py-2 text-xs font-semibold text-emerald-200 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+            className="px-3 py-2 text-xs font-semibold text-emerald-200 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
           >
             <Download className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Baixar Backup (.ZIP)</span>
+            <span className="hidden sm:inline">Backup (.ZIP)</span>
           </a>
 
           <button
             type="button"
             onClick={handleNewInvestigation}
-            className="px-4 py-2 text-xs font-medium text-white bg-sky-600 hover:bg-sky-500 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+            className="px-3.5 py-2 text-xs font-medium text-white bg-sky-600 hover:bg-sky-500 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
           >
             <Plus className="w-3.5 h-3.5" />
             <span>Nova Investigação</span>
@@ -1787,6 +1837,40 @@ export default function App() {
               >
                 Adicionar Próximo Desenho na Sequência
               </button>
+            </div>
+
+            {/* Visual Signal Chain Diagram in Sequence Tab */}
+            <div className="p-4 rounded-lg bg-[#0B111E] border border-slate-800 flex flex-col gap-3">
+              <span className="text-xs font-semibold text-slate-200">
+                Topologia Típica de Rastreamento de Sinal na Usina (Cadeia de
+                Painéis):
+              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                {extractSignalChainFromContext(
+                  attachments,
+                  turns[turns.length - 1]?.markdownResponse ||
+                    'UHLM PCPG1 CLP-SASE QDCC'
+                ).map((node, idx) => (
+                  <React.Fragment
+                    key={`seq_tab_${node.stepNumber}_${node.panelOrStage}`}
+                  >
+                    {idx > 0 && (
+                      <ArrowRight className="w-4 h-4 text-sky-400 shrink-0" />
+                    )}
+                    <div className="px-3 py-2 rounded-md bg-[#111827] border border-slate-700 flex flex-col gap-0.5 min-w-[155px]">
+                      <span className="text-[10px] font-mono text-sky-400">
+                        Etapa #{node.stepNumber} · {node.categoryTag}
+                      </span>
+                      <span className="text-xs font-mono font-semibold text-slate-100">
+                        {node.panelOrStage}
+                      </span>
+                      <span className="text-[11px] text-slate-400 truncate max-w-[200px]">
+                        {node.detailOrTerminals}
+                      </span>
+                    </div>
+                  </React.Fragment>
+                ))}
+              </div>
             </div>
 
             {attachments.length === 0 ? (

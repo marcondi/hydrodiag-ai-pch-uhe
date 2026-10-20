@@ -67,3 +67,43 @@
     box-shadow: none !important;
   }
 }
+
+/* ==========================================================================
+   MODO "ALTO CONTRASTE DE CAMPO" (CASA DE FORÇA / SUBESTAÇÃO / PAINEL)
+   Aumenta contraste óptico, nitidez de bornes/TAGs e visibilidade sob
+   iluminação industrial forte ou uso com EPIs em campo.
+   ========================================================================== */
+html.field-contrast-mode body {
+  background-color: #000000 !important;
+  color: #FFFFFF !important;
+  font-size: 104%;
+}
+
+html.field-contrast-mode .bg-\[\#0B111E\] {
+  background-color: #000000 !important;
+}
+
+html.field-contrast-mode .bg-\[\#111827\] {
+  background-color: #070B14 !important;
+}
+
+html.field-contrast-mode .border-slate-800,
+html.field-contrast-mode .border-slate-800\/80,
+html.field-contrast-mode .border-slate-700 {
+  border-color: #38BDF8 !important;
+}
+
+html.field-contrast-mode .text-slate-400,
+html.field-contrast-mode .text-slate-300,
+html.field-contrast-mode .text-slate-200 {
+  color: #F8FAFC !important;
+}
+
+html.field-contrast-mode code {
+  background-color: #082F49 !important;
+  border: 1px solid #38BDF8 !important;
+  color: #7DD3FC !important;
+  font-weight: 600 !important;
+  padding: 0.12rem 0.4rem !important;
+}
+

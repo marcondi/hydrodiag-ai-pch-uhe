@@ -21,6 +21,8 @@ import {
   BookOpen,
   Activity,
   Zap,
+  GitCommitHorizontal,
+  ArrowRight,
 } from 'lucide-react';
 import {
   ChatAttachmentPayload,
@@ -32,6 +34,7 @@ import { FaultChatPanel } from './FaultChatPanel';
 import { PdfDeepLinkDrawer } from './PdfDeepLinkDrawer';
 import {
   extractProbeSummaryFromMarkdown,
+  extractSignalChainFromContext,
   formatTechnicalSymbols,
   linkifyPdfPageReferences,
 } from '../utils/pdfClientEngine';
@@ -119,6 +122,10 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
 
   const renderReportPaneContent = (turn: DiagnosticTurn) => {
     const probeSummary = extractProbeSummaryFromMarkdown(turn.markdownResponse);
+    const signalChain = extractSignalChainFromContext(
+      attachments,
+      turn.markdownResponse
+    );
 
     return (
       <div className="flex flex-col gap-4">
@@ -160,6 +167,83 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
             </div>
           </div>
         </div>
+
+        {/* ITEM 5: LINHA DO TEMPO VISUAL DE RASTREAMENTO ENTRE PAINÉIS ("CADEIA DE SINAL") */}
+        {signalChain.length > 0 && (
+          <div
+            aria-label="Linha do Tempo de Rastreamento entre Painéis"
+            className="rounded-lg bg-[#0B111E] border border-slate-800 px-3.5 py-2.5 flex flex-col gap-2 no-print"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
+                <GitCommitHorizontal className="w-4 h-4 text-sky-400 shrink-0" />
+                <span>
+                  Linha do Tempo de Rastreamento entre Painéis (Cadeia de Sinal)
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={onOpenSequenceUpload}
+                className="text-[11px] font-medium text-amber-300 hover:text-amber-200 flex items-center gap-1 cursor-pointer"
+                title="Anexar próximo caderno de painel na sequência"
+              >
+                <PlusCircle className="w-3 h-3" />
+                <span>+ Anexar Próximo Painel na Cadeia</span>
+              </button>
+            </div>
+
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+              {signalChain.map((node, idx) => {
+                const isNextTarget = node.status === 'next_target';
+                const isCurrent = node.status === 'current';
+                return (
+                  <React.Fragment key={`${node.stepNumber}_${node.panelOrStage}`}>
+                    {idx > 0 && (
+                      <ArrowRight className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (isNextTarget) {
+                          onOpenSequenceUpload();
+                        } else if (attachments.length > 0) {
+                          handleOpenPdfDeepLink(probeSummary?.locationPage || 1);
+                        }
+                      }}
+                      className={`px-2.5 py-1.5 rounded-md border text-left transition-colors shrink-0 cursor-pointer flex flex-col gap-0.5 min-w-[135px] max-w-[210px] ${
+                        isNextTarget
+                          ? 'bg-amber-950/30 border-dashed border-amber-500/50 hover:bg-amber-900/40'
+                          : isCurrent
+                            ? 'bg-sky-950/40 border-sky-500/60 hover:bg-sky-900/50'
+                            : 'bg-[#111827] border-slate-800 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2 text-[10px] font-mono tabular-nums">
+                        <span
+                          className={
+                            isNextTarget
+                              ? 'text-amber-300 font-semibold'
+                              : isCurrent
+                                ? 'text-sky-300 font-semibold'
+                                : 'text-slate-400'
+                          }
+                        >
+                          Etapa #{node.stepNumber} · {node.categoryTag}
+                        </span>
+                      </div>
+                      <p className="text-xs font-mono font-semibold text-slate-100 truncate">
+                        {node.panelOrStage}
+                      </p>
+                      <p className="text-[10px] text-slate-400 truncate">
+                        {node.detailOrTerminals}
+                      </p>
+                    </button>
+                  </React.Fragment>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* ITEM 3: PAINEL VISUAL DE "PONTA DE PROVA" (RESUMO RÁPIDO NO TOPO DO LAUDO) */}
         {probeSummary && (

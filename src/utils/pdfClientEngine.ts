@@ -659,5 +659,115 @@ export function extractProbeSummaryFromMarkdown(
   };
 }
 
+export interface SignalChainNode {
+  stepNumber: number;
+  panelOrStage: string;
+  categoryTag: string;
+  detailOrTerminals: string;
+  fileName?: string;
+  status: 'verified' | 'current' | 'next_target';
+}
+
+/**
+ * Constrói a Linha do Tempo Visual de Rastreamento entre Painéis ("Cadeia de Sinal",
+ * ex: PCPG1 → CLP-SASE → QDCC → UHLM) combinando os arquivos PDF anexados na sequência
+ * e os painéis/bornes detectados no texto do Laudo Técnico.
+ */
+export function extractSignalChainFromContext(
+  attachments: DiagramAttachment[],
+  rawMarkdown?: string
+): SignalChainNode[] {
+  const nodes: SignalChainNode[] = [];
+  const cleanMd = rawMarkdown
+    ? formatTechnicalSymbols(rawMarkdown).replace(/\*\*/g, '').replace(/`/g, '')
+    : '';
+
+  // 1. Adicionar nós correspondentes aos cadernos/desenhos anexados na sequência
+  attachments.forEach((att, idx) => {
+    const inferredPanel =
+      att.panelName?.trim() ||
+      (att.name.match(
+        /\b(PCPG[12]?|CLP-SASE|SASE|QDCC|QDSA|QDF|QGBT|UHLM|UCR|CSG[12]?|GMG|SRV|RV)\b/i
+      )?.[0]?.toUpperCase() ??
+        `Desenho #${att.sequenceIndex}`);
+
+    nodes.push({
+      stepNumber: idx + 1,
+      panelOrStage: inferredPanel,
+      categoryTag: att.categoryTag,
+      detailOrTerminals: att.name,
+      fileName: att.name,
+      status: idx === attachments.length - 1 ? 'current' : 'verified',
+    });
+  });
+
+  // 2. Extrair painéis e réguas citados no Laudo Técnico que complementam a cadeia
+  if (cleanMd) {
+    const knownPanelOrder = [
+      {
+        tag: 'UHLM / Campo',
+        regex: /\b(?:UHLM|Pressostato|Sensor de Campo| solenoide|63[A-Z0-9]*|PT100)\b/i,
+        cat: '/EL · Campo',
+        desc: 'Instrumentação / Dispositivo de Campo',
+      },
+      {
+        tag: 'PCPG1 / PCPG2',
+        regex: /\b(?:PCPG[12]?|Painel de Controle e Prote[çc][ãa]o)\b/i,
+        cat: '/EL · /RB',
+        desc: 'Painel de Proteção e Controle da UG',
+      },
+      {
+        tag: 'CLP-SASE / XED',
+        regex: /\b(?:CLP-SASE|SASE|XED\d*|XSD\d*|Cart[ãa]o de Entrada|Supervis[óo]rio)\b/i,
+        cat: '/EL · Automação',
+        desc: 'Aquisição Digital CLP / SCADA',
+      },
+      {
+        tag: 'QDCC / QDSA (125 Vcc)',
+        regex: /\b(?:QDCC|QDSA|QDF|QGBT|CSG[12]?|125\s*Vcc|24\s*Vcc)\b/i,
+        cat: '/EL · Auxiliares',
+        desc: 'Alimentação de Comando / Serviços Auxiliares',
+      },
+    ];
+
+    for (const kp of knownPanelOrder) {
+      const alreadyInNodes = nodes.some((n) =>
+        n.panelOrStage.toUpperCase().includes(kp.tag.split(' ')[0].toUpperCase())
+      );
+      if (!alreadyInNodes && kp.regex.test(cleanMd) && nodes.length < 5) {
+        nodes.push({
+          stepNumber: nodes.length + 1,
+          panelOrStage: kp.tag,
+          categoryTag: kp.cat,
+          detailOrTerminals: kp.desc,
+          status: nodes.length === 0 ? 'current' : 'verified',
+        });
+      }
+    }
+
+    // 3. Verificar se a Seção 5 sugere um próximo documento/painel externo
+    const sec5Match = cleanMd.match(
+      /Pr[óo]ximo Desenho na Sequ[êe]ncia[\s\S]*$/i
+    );
+    if (sec5Match) {
+      const docMatch = sec5Match[0].match(
+        /\b(\d{8,12}-[A-Z0-9]+|PCPG[12]?|CLP-SASE|QDCC|QDSA|Folha\s+\d+)\b/i
+      );
+      if (docMatch && nodes.length < 6) {
+        nodes.push({
+          stepNumber: nodes.length + 1,
+          panelOrStage: `Próximo: ${docMatch[1]}`,
+          categoryTag: 'Continuidade',
+          detailOrTerminals: 'Anexar próximo desenho sugerido',
+          status: 'next_target',
+        });
+      }
+    }
+  }
+
+  return nodes;
+}
+
+
 
 
