@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   GitBranch,
   CheckCircle2,
@@ -13,7 +13,70 @@ import {
   KeyRound,
   Download,
   FileCode,
+  Archive,
+  FolderArchive,
+  FileText,
+  Eye,
+  Database,
+  RefreshCw,
 } from 'lucide-react';
+
+interface BackupFileEntry {
+  path: string;
+  sizeBytes: number;
+  content: string;
+}
+
+interface SourceBundleResponse {
+  generatedAt: string;
+  projectName: string;
+  totalFiles: number;
+  totalBytes: number;
+  files: BackupFileEntry[];
+}
+
+interface SupabaseStatusInfo {
+  configured: boolean;
+  connected: boolean;
+  tableReady: boolean;
+  projectName: string;
+  tableName: string;
+  count?: number;
+  message: string;
+}
+
+export const SUPABASE_SQL_SCHEMA = `-- ============================================================================
+-- HYDRODIAG AI — TABELA ISOLADA PARA O PROJETO SUPABASE: "Agenda Financeira youware"
+-- ============================================================================
+-- Cole este código no menu "SQL Editor" do projeto "Agenda Financeira youware" e clique em "Run".
+-- Esta tabela é 100% isolada e NÃO interfere nas tabelas da sua Agenda Financeira.
+
+CREATE TABLE IF NOT EXISTS public.hydrodiag_investigations (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'em_investigacao',
+  is_favorite BOOLEAN NOT NULL DEFAULT false,
+  field_resolution_note TEXT DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  attachment_metadata JSONB NOT NULL DEFAULT '[]'::jsonb,
+  turns JSONB NOT NULL DEFAULT '[]'::jsonb,
+  raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_hydrodiag_investigations_updated_at
+  ON public.hydrodiag_investigations (updated_at DESC);
+
+ALTER TABLE public.hydrodiag_investigations ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow full access to hydrodiag_investigations" ON public.hydrodiag_investigations;
+
+CREATE POLICY "Allow full access to hydrodiag_investigations"
+  ON public.hydrodiag_investigations
+  FOR ALL
+  TO anon, authenticated, service_role
+  USING (true)
+  WITH CHECK (true);`;
 
 const VERCEL_JSON_CONTENT = `{
   "version": 2,
@@ -56,6 +119,11 @@ function downloadTextFile(filename: string, content: string) {
   URL.revokeObjectURL(url);
 }
 
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  return `${(bytes / 1024).toFixed(1)} KB`;
+}
+
 export const GitHubDeployPanel: React.FC = () => {
   const [githubUsername, setGithubUsername] = useState('marcondi');
   const [repoName, setRepoName] = useState('hydrodiag-ai-pch-uhe');
@@ -78,6 +146,123 @@ export const GitHubDeployPanel: React.FC = () => {
   const [copiedEnvKey, setCopiedEnvKey] = useState(false);
   const [copiedVercelJson, setCopiedVercelJson] = useState(false);
   const [copiedApiIndex, setCopiedApiIndex] = useState(false);
+  const [copiedSupabaseSql, setCopiedSupabaseSql] = useState(false);
+
+  // Supabase status state
+  const [supabaseStatus, setSupabaseStatus] =
+    useState<SupabaseStatusInfo | null>(null);
+  const [isCheckingSupabase, setIsCheckingSupabase] = useState(false);
+
+  // Backup state
+  const [backupBundle, setBackupBundle] = useState<SourceBundleResponse | null>(
+    null
+  );
+  const [isLoadingBundle, setIsLoadingBundle] = useState(false);
+  const [selectedFilePreview, setSelectedFilePreview] =
+    useState<BackupFileEntry | null>(null);
+  const [copiedFilePath, setCopiedFilePath] = useState<string | null>(null);
+
+  const checkSupabaseConnection = async () => {
+    setIsCheckingSupabase(true);
+    try {
+      const res = await fetch('/api/supabase/status');
+      if (res.ok) {
+        const data = (await res.json()) as SupabaseStatusInfo;
+        setSupabaseStatus(data);
+      }
+    } catch {
+      // Ignore
+    } finally {
+      setIsCheckingSupabase(false);
+    }
+  };
+
+  useEffect(() => {
+    let active = true;
+    setIsLoadingBundle(true);
+    fetch('/api/backup/source-bundle')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: SourceBundleResponse | null) => {
+        if (active && data && Array.isArray(data.files)) {
+          setBackupBundle(data);
+        }
+      })
+      .catch(() => {
+        // Ignore
+      })
+      .finally(() => {
+        if (active) setIsLoadingBundle(false);
+      });
+
+    checkSupabaseConnection();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const handleCopySupabaseSql = async () => {
+    try {
+      await navigator.clipboard.writeText(SUPABASE_SQL_SCHEMA);
+      setCopiedSupabaseSql(true);
+      setTimeout(() => setCopiedSupabaseSql(false), 2500);
+    } catch {
+      // Ignore
+    }
+  };
+
+  const handleDownloadUnifiedTextBackup = () => {
+    if (!backupBundle) return;
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const lines: string[] = [
+      '================================================================================',
+      'HYDRODIAG AI — BACKUP COMPLETO DO CÓDIGO-FONTE (UNIFICADO)',
+      `Gerado em: ${new Date().toLocaleString('pt-BR')}`,
+      `Total de Arquivos: ${backupBundle.totalFiles} | Tamanho Total: ${formatSize(backupBundle.totalBytes)}`,
+      '================================================================================',
+      '',
+    ];
+
+    for (const file of backupBundle.files) {
+      lines.push(
+        `// ============================================================================`,
+        `// ARQUIVO: ${file.path} (${formatSize(file.sizeBytes)})`,
+        `// ============================================================================`,
+        file.content,
+        '',
+        ''
+      );
+    }
+
+    downloadTextFile(
+      `hydrodiag-ai-codigo-completo-${dateStr}.txt`,
+      lines.join('\n')
+    );
+  };
+
+  const handleDownloadJsonFullBackup = () => {
+    if (!backupBundle) return;
+    const dateStr = new Date().toISOString().slice(0, 10);
+    let localInvestigations: unknown = [];
+    try {
+      const raw =
+        localStorage.getItem('hydrodiag_saved_investigations_v2') ||
+        localStorage.getItem('hydrodiag_saved_investigations_v1');
+      if (raw) localInvestigations = JSON.parse(raw);
+    } catch {
+      // Ignore
+    }
+
+    const fullPayload = {
+      ...backupBundle,
+      savedInvestigationsLocalStorage: localInvestigations,
+    };
+
+    downloadTextFile(
+      `hydrodiag-ai-backup-sistema-completo-${dateStr}.json`,
+      JSON.stringify(fullPayload, null, 2)
+    );
+  };
 
   const handleTokenChange = (val: string) => {
     setGithubToken(val);
@@ -135,7 +320,7 @@ export const GitHubDeployPanel: React.FC = () => {
   };
 
   const gitCommands = `git add .
-git commit -m "feat: suporte completo a Vercel Serverless (vercel.json + api/index.ts)"
+git commit -m "feat: suporte completo a Vercel Serverless + Supabase (Agenda Financeira youware)"
 git branch -M main
 git push -u origin main`;
 
@@ -161,6 +346,394 @@ git push -u origin main`;
 
   return (
     <section className="bg-[#111827] border border-slate-800 rounded-lg p-6 flex flex-col gap-6">
+      {/* ==================================================================== */}
+      {/* 0. BANCO DE DADOS EM NUVEM SUPABASE ("Agenda Financeira youware")    */}
+      {/* ==================================================================== */}
+      <div className="bg-[#0B111E] border-2 border-sky-500/40 rounded-lg p-5 flex flex-col gap-4">
+        <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-800 pb-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <Database className="w-5 h-5 text-sky-400" />
+              <h2 className="text-base font-bold text-slate-100">
+                Banco de Dados em Nuvem Supabase — Projeto:{' '}
+                <span className="text-sky-400">Agenda Financeira youware</span>
+              </h2>
+            </div>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              O código já está preparado para salvar e sincronizar todos os
+              diagnósticos, laudos e conversas do chat técnico na tabela isolada{' '}
+              <code>public.hydrodiag_investigations</code> dentro do seu projeto{' '}
+              <strong>Agenda Financeira youware</strong> (sem interferir em
+              nenhuma tabela existente da sua agenda financeira).
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <span
+              className={`px-3 py-1.5 rounded text-xs font-mono border ${
+                supabaseStatus?.connected
+                  ? 'bg-emerald-950/50 border-emerald-600/50 text-emerald-300'
+                  : supabaseStatus?.configured
+                    ? 'bg-amber-950/50 border-amber-600/50 text-amber-300'
+                    : 'bg-slate-900 border-slate-700 text-slate-300'
+              }`}
+            >
+              {supabaseStatus?.connected
+                ? `ONLINE · ${supabaseStatus.count ?? 0} diagnóstico(s) na nuvem`
+                : supabaseStatus?.configured
+                  ? 'AGUARDANDO TABELA SQL'
+                  : 'MODO HÍBRIDO (AGUARDANDO CHAVES NA VERCEL)'}
+            </span>
+            <button
+              type="button"
+              onClick={checkSupabaseConnection}
+              disabled={isCheckingSupabase}
+              className="p-2 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 cursor-pointer"
+              title="Testar conexão com Supabase"
+            >
+              <RefreshCw
+                className={`w-3.5 h-3.5 ${isCheckingSupabase ? 'animate-spin text-sky-400' : ''}`}
+              />
+            </button>
+          </div>
+        </div>
+
+        {/* Passo a passo para ativar no Agenda Financeira youware */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="bg-[#111827] border border-slate-800 rounded-md p-4 space-y-3">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-sky-400">
+              Passo 1: Criar a Tabela no &quot;Agenda Financeira youware&quot;
+            </h3>
+            <ol className="text-xs text-slate-300 space-y-2 list-decimal list-inside leading-relaxed">
+              <li>
+                No painel do Supabase, clique no seu projeto{' '}
+                <strong className="text-white">
+                  Agenda Financeira youware
+                </strong>
+                .
+              </li>
+              <li>
+                No menu lateral esquerdo, clique em{' '}
+                <strong className="text-white">SQL Editor</strong> &rarr;{' '}
+                <strong className="text-white">+ New query</strong>.
+              </li>
+              <li>
+                Clique em <strong>Copiar Script SQL</strong> ao lado, cole lá e
+                aperte o botão verde{' '}
+                <strong className="text-emerald-400">Run</strong>.
+              </li>
+            </ol>
+
+            <div className="pt-1 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleCopySupabaseSql}
+                className="px-3.5 py-2 rounded-md bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs flex items-center gap-2 cursor-pointer transition-colors"
+              >
+                {copiedSupabaseSql ? (
+                  <>
+                    <Check className="w-4 h-4 text-emerald-200" />
+                    <span>Script SQL Copiado!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-4 h-4" />
+                    <span>
+                      Copiar Script SQL (Tabela hydrodiag_investigations)
+                    </span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  downloadTextFile(
+                    'supabase_hydrodiag_schema.sql',
+                    SUPABASE_SQL_SCHEMA
+                  )
+                }
+                className="px-3 py-2 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5 text-sky-400" />
+                <span>Baixar .SQL</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-[#111827] border border-slate-800 rounded-md p-4 space-y-3">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-400">
+              Passo 2: Conectar na Vercel (Para Abrir em Qualquer PC)
+            </h3>
+            <ol className="text-xs text-slate-300 space-y-2 list-decimal list-inside leading-relaxed">
+              <li>
+                Dentro do projeto{' '}
+                <strong className="text-white">
+                  Agenda Financeira youware
+                </strong>{' '}
+                no Supabase, vá em{' '}
+                <strong className="text-white">
+                  Project Settings &rarr; API
+                </strong>
+                .
+              </li>
+              <li>
+                Na <strong>Vercel</strong> (em{' '}
+                <em>Settings &rarr; Environment Variables</em>), adicione estas
+                2 variáveis junto com a sua <code>GEMINI_API_KEY</code>:
+                <ul className="mt-1.5 ml-4 space-y-1 font-mono text-[11px] text-slate-200">
+                  <li>
+                    • <span className="text-sky-300">SUPABASE_URL</span> ={' '}
+                    <span className="text-slate-400">
+                      Project URL (ex: https://xxxx.supabase.co)
+                    </span>
+                  </li>
+                  <li>
+                    • <span className="text-sky-300">SUPABASE_ANON_KEY</span> ={' '}
+                    <span className="text-slate-400">
+                      Project API Key (anon / public)
+                    </span>
+                  </li>
+                </ul>
+              </li>
+              <li>
+                Pronto! Qualquer diagnóstico salvo em um PC aparecerá
+                automaticamente em todos os outros computadores e celulares.
+              </li>
+            </ol>
+          </div>
+        </div>
+
+        {/* Preview do SQL */}
+        <details className="bg-[#111827] border border-slate-800 rounded-md">
+          <summary className="px-4 py-2.5 text-xs font-mono text-slate-300 cursor-pointer hover:text-white flex items-center justify-between">
+            <span>
+              Ver código SQL completo da tabela{' '}
+              <code>public.hydrodiag_investigations</code>
+            </span>
+            <span className="text-[11px] text-sky-400">Clique para abrir</span>
+          </summary>
+          <pre className="p-4 border-t border-slate-800 text-[11px] font-mono text-emerald-300 overflow-x-auto leading-relaxed">
+            {SUPABASE_SQL_SCHEMA}
+          </pre>
+        </details>
+      </div>
+
+      {/* ==================================================================== */}
+      {/* 1. CENTRAL DE BACKUP COMPLETO DO CÓDIGO-FONTE (DOWNLOAD DIRETO)      */}
+      {/* ==================================================================== */}
+      <div className="bg-[#0B111E] border-2 border-emerald-500/40 rounded-lg p-5 flex flex-col gap-5">
+        <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-800 pb-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <FolderArchive className="w-5 h-5 text-emerald-400" />
+              <h2 className="text-base font-bold text-slate-100">
+                Backup Completo do Código-Fonte — Guardar Cópia Local (.ZIP)
+              </h2>
+            </div>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Baixe agora uma cópia integral de todos os arquivos do sistema (
+              <code>server.ts</code>, <code>api/index.ts</code>,{' '}
+              <code>supabase_hydrodiag_schema.sql</code>,{' '}
+              <code>src/App.tsx</code>, componentes, motor PDF,{' '}
+              <code>package.json</code> e <code>vercel.json</code>) pronta para
+              guardar no seu computador, rodar localmente ou publicar.
+            </p>
+          </div>
+
+          {backupBundle && (
+            <div className="px-3 py-1.5 rounded bg-emerald-950/50 border border-emerald-700/50 text-xs font-mono text-emerald-300 shrink-0">
+              {backupBundle.totalFiles} arquivos ·{' '}
+              {formatSize(backupBundle.totalBytes)} verificados
+            </div>
+          )}
+        </div>
+
+        {/* 3 Main Download Buttons */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <a
+            href="/api/backup/download-zip"
+            download
+            className="p-4 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex flex-col justify-between gap-3 transition-colors shadow-sm cursor-pointer"
+          >
+            <div className="flex items-center justify-between">
+              <span className="font-mono text-[11px] uppercase tracking-wider text-emerald-100">
+                RECOMENDADO · PACOTE .ZIP
+              </span>
+              <Archive className="w-5 h-5 text-white" />
+            </div>
+            <div className="space-y-1">
+              <div className="text-sm font-bold flex items-center gap-2">
+                <Download className="w-4 h-4 shrink-0" />
+                <span>Baixar Backup Completo (.ZIP)</span>
+              </div>
+              <p className="text-[11px] text-emerald-100/90 font-normal leading-relaxed">
+                Contém todas as pastas (<code>src/</code>, <code>api/</code>) e
+                arquivos prontos para descompactar e rodar{' '}
+                <code>npm install</code>.
+              </p>
+            </div>
+          </a>
+
+          <button
+            type="button"
+            onClick={handleDownloadUnifiedTextBackup}
+            disabled={!backupBundle || isLoadingBundle}
+            className="p-4 rounded-lg bg-[#111827] hover:bg-slate-800/90 disabled:opacity-50 border border-sky-500/40 text-left text-xs flex flex-col justify-between gap-3 transition-colors cursor-pointer"
+          >
+            <div className="flex items-center justify-between w-full">
+              <span className="font-mono text-[11px] uppercase tracking-wider text-sky-400">
+                ARQUIVO ÚNICO · LEITURA DIRETA
+              </span>
+              <FileText className="w-5 h-5 text-sky-400" />
+            </div>
+            <div className="space-y-1">
+              <div className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                <Download className="w-4 h-4 text-sky-400 shrink-0" />
+                <span>Baixar Todo o Código em 1 Arquivo (.TXT)</span>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Todos os arquivos do projeto concatenados e organizados em um
+                único documento de texto para consulta rápida.
+              </p>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleDownloadJsonFullBackup}
+            disabled={!backupBundle || isLoadingBundle}
+            className="p-4 rounded-lg bg-[#111827] hover:bg-slate-800/90 disabled:opacity-50 border border-amber-500/40 text-left text-xs flex flex-col justify-between gap-3 transition-colors cursor-pointer"
+          >
+            <div className="flex items-center justify-between w-full">
+              <span className="font-mono text-[11px] uppercase tracking-wider text-amber-400">
+                CÓDIGO + HISTÓRICO DE FALHAS
+              </span>
+              <FileCode className="w-5 h-5 text-amber-400" />
+            </div>
+            <div className="space-y-1">
+              <div className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                <Download className="w-4 h-4 text-amber-400 shrink-0" />
+                <span>Baixar Snapshot Completo (.JSON)</span>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Inclui todo o código-fonte + o banco de dados de investigações e
+                histórico de falhas salvos.
+              </p>
+            </div>
+          </button>
+        </div>
+
+        {/* Interactive File List inside Backup */}
+        {backupBundle && (
+          <div className="border border-slate-800 rounded-lg overflow-hidden bg-[#111827]">
+            <div className="px-4 py-2.5 bg-[#0B111E] border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-slate-200">
+                Arquivos Incluídos no Backup ({backupBundle.files.length}{' '}
+                arquivos do sistema)
+              </span>
+              <span className="text-[11px] text-slate-400">
+                Clique em qualquer arquivo para visualizar, copiar ou baixar
+                individualmente
+              </span>
+            </div>
+
+            <div className="max-h-64 overflow-y-auto divide-y divide-slate-800/70 text-xs">
+              {backupBundle.files.map((file) => (
+                <div
+                  key={file.path}
+                  className="px-4 py-2 flex items-center justify-between gap-3 hover:bg-slate-900/60 transition-colors"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <FileCode className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                    <span className="font-mono text-slate-200 truncate">
+                      {file.path}
+                    </span>
+                    <span className="text-[11px] font-mono text-slate-500 shrink-0">
+                      ({formatSize(file.sizeBytes)})
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSelectedFilePreview(
+                          selectedFilePreview?.path === file.path ? null : file
+                        )
+                      }
+                      className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 flex items-center gap-1 cursor-pointer"
+                    >
+                      <Eye className="w-3 h-3" />
+                      <span>
+                        {selectedFilePreview?.path === file.path
+                          ? 'Ocultar'
+                          : 'Ver Código'}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        await navigator.clipboard.writeText(file.content);
+                        setCopiedFilePath(file.path);
+                        setTimeout(() => setCopiedFilePath(null), 2000);
+                      }}
+                      className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 flex items-center gap-1 cursor-pointer"
+                    >
+                      {copiedFilePath === file.path ? (
+                        <>
+                          <Check className="w-3 h-3 text-emerald-400" />
+                          <span className="text-emerald-300">Copiado</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3 h-3" />
+                          <span>Copiar</span>
+                        </>
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const baseName =
+                          file.path.split('/').pop() || file.path;
+                        downloadTextFile(baseName, file.content);
+                      }}
+                      className="px-2 py-1 rounded bg-sky-600/20 hover:bg-sky-600/30 border border-sky-500/30 text-sky-300 flex items-center gap-1 cursor-pointer"
+                    >
+                      <Download className="w-3 h-3" />
+                      <span>Baixar</span>
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {selectedFilePreview && (
+              <div className="border-t border-slate-800 bg-[#0B111E] p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-mono font-semibold text-sky-400">
+                    Visualizando: {selectedFilePreview.path}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedFilePreview(null)}
+                    className="text-xs text-slate-400 hover:text-slate-200 cursor-pointer"
+                  >
+                    Fechar visualização
+                  </button>
+                </div>
+                <pre className="max-h-80 overflow-auto p-3 rounded bg-[#111827] border border-slate-800 text-[11px] font-mono text-slate-200">
+                  <code>{selectedFilePreview.content}</code>
+                </pre>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
         <div>
           <h2 className="text-base font-semibold text-slate-100 flex items-center gap-2">
