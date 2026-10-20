@@ -124,28 +124,28 @@ export const DiagramUploadPanel: React.FC<DiagramUploadPanelProps> = ({
   return (
     <section
       aria-label="Caixa de Upload de Diagramas"
-      className="bg-[#111827] border border-slate-800 rounded-lg p-5 flex flex-col gap-4"
+      className="bg-[#111827] border border-slate-800 rounded-lg p-4 flex flex-col gap-3"
     >
       {/* Header */}
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex items-start justify-between gap-2">
         <div>
-          <h2 className="text-base font-semibold text-slate-100">
-            1. Caixa de Upload de Diagramas (PDF ou Foto)
+          <h2 className="text-sm font-semibold text-slate-100">
+            1. Upload de Diagramas (PDF ou Foto)
           </h2>
-          <p className="text-xs text-slate-400 mt-1">
-            Cadernos funcionais <code className="text-sky-300">/EL</code> · Régua
-            de bornes <code className="text-sky-300">/RB</code> · Mecânico{' '}
+          <p className="text-[11px] text-slate-400 mt-0.5">
+            Cadernos <code className="text-sky-300">/EL</code> · Bornes{' '}
+            <code className="text-sky-300">/RB</code> · Mecânico{' '}
             <code className="text-sky-300">/ME</code> · Materiais{' '}
-            <code className="text-sky-300">/RM</code> · Fotos de campo
+            <code className="text-sky-300">/RM</code>
           </p>
         </div>
-        <span className="text-xs font-mono tabular-nums text-slate-400 shrink-0">
+        <span className="text-[11px] font-mono tabular-nums text-sky-400 shrink-0">
           {attachments.length}{' '}
           {attachments.length === 1 ? 'arquivo' : 'arquivos'}
         </span>
       </div>
 
-      {/* Dropzone */}
+      {/* Compact Dropzone */}
       <div
         onDragOver={(e) => {
           e.preventDefault();
@@ -153,7 +153,7 @@ export const DiagramUploadPanel: React.FC<DiagramUploadPanelProps> = ({
         }}
         onDragLeave={() => setIsDragging(false)}
         onDrop={handleDrop}
-        className={`border border-dashed rounded-lg p-4 transition-colors flex flex-col items-center justify-center text-center gap-2.5 ${
+        className={`border border-dashed rounded-lg p-3 transition-colors flex flex-col items-center justify-center text-center gap-2 ${
           isDragging
             ? 'border-sky-400 bg-sky-500/10'
             : 'border-slate-700 bg-[#0B111E]/70 hover:border-slate-600'
@@ -168,54 +168,44 @@ export const DiagramUploadPanel: React.FC<DiagramUploadPanelProps> = ({
           className="hidden"
         />
 
-        <div className="w-9 h-9 rounded-md bg-slate-800/80 border border-slate-700 flex items-center justify-center text-sky-400">
-          <Upload className="w-4 h-4" />
-        </div>
-
-        <div className="space-y-1">
+        <div className="flex items-center gap-2">
+          <Upload className="w-4 h-4 text-sky-400 shrink-0" />
           <p className="text-xs font-medium text-slate-200">
-            Arraste diagramas PDF ou fotos de painéis elétricos aqui
-          </p>
-          <p className="text-xs text-slate-400">
-            Suporta PDF multipágina (WEG / IEC / ANSI) e imagens JPG / PNG
+            Arraste PDFs ou fotos de painéis aqui
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+        <div className="flex flex-wrap items-center justify-center gap-1.5">
           <button
             type="button"
             disabled={isUploading}
             onClick={() => initialInputRef.current?.click()}
-            className="px-3.5 py-1.5 text-xs font-medium text-slate-100 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+            className="px-3 py-1.5 text-xs font-medium text-slate-100 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
           >
-            {isUploading
-              ? 'Sincronizando em Blocos...'
-              : 'Selecionar PDF / Foto'}
+            {isUploading ? 'Sincronizando...' : 'Selecionar PDF / Foto'}
           </button>
 
           <button
             type="button"
             disabled={isUploading}
             onClick={() => setSequenceModalOpen(true)}
-            className="px-3.5 py-1.5 text-xs font-medium text-sky-300 bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/30 rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+            className="px-2.5 py-1.5 text-xs font-medium text-sky-300 bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/30 rounded-md transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
           >
             <PlusCircle className="w-3.5 h-3.5" />
-            <span>Adicionar Próximo Desenho na Sequência</span>
+            <span>+ Na Sequência</span>
           </button>
         </div>
       </div>
 
       {/* Compact Attachment List */}
       {attachments.length > 0 ? (
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center justify-between text-xs text-slate-400 border-b border-slate-800 pb-1.5">
-            <span>Cadeia Sequencial de Desenhos Anexados</span>
-            <span className="font-mono tabular-nums">
-              Ordem de Rastreamento
-            </span>
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center justify-between text-[11px] text-slate-400">
+            <span>Cadeia Sequencial Anexada</span>
+            <span className="font-mono tabular-nums">Ordem</span>
           </div>
 
-          <div className="flex flex-col divide-y divide-slate-800/80 border border-slate-800 rounded-md bg-[#0B111E]/60 max-h-60 overflow-y-auto">
+          <div className="flex flex-col divide-y divide-slate-800/80 border border-slate-800 rounded-md bg-[#0B111E]/60 max-h-44 overflow-y-auto">
             {attachments.map((item) => {
               const isPdf = item.mimeType === 'application/pdf';
               return (
