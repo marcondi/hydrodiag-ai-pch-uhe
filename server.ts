@@ -5,6 +5,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import zlib from 'zlib';
 import { PDFDocument } from 'pdf-lib';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 
@@ -191,6 +192,199 @@ function writeHistoryDb(items: unknown[]) {
     fs.writeFileSync(HISTORY_DB_PATH, JSON.stringify(items, null, 2), 'utf-8');
   } catch (err) {
     console.warn('Erro ao salvar histórico em disco:', err);
+  }
+}
+
+// ============================================================================
+// SUPABASE CLOUD PERSISTENCE ENGINE (Project: "Agenda Financeira youware")
+// Table: public.hydrodiag_investigations
+// ============================================================================
+const SUPABASE_TABLE = 'hydrodiag_investigations';
+const SUPABASE_PROJECT_LABEL = 'Agenda Financeira youware';
+
+function normalizeSupabaseUrl(inputUrl: string): string {
+  const trimmed = inputUrl.trim().replace(/\/+$/, '');
+  if (!trimmed || trimmed.includes('SEU_PROJECT_ID')) {
+    return 'https://oooegbbvrwifilavlvgt.supabase.co';
+  }
+  const dashMatch = trimmed.match(
+    /supabase\.com\/dashboard\/project\/([a-z0-9]+)/i
+  );
+  if (dashMatch && dashMatch[1]) {
+    return `https://${dashMatch[1]}.supabase.co`;
+  }
+  if (/^[a-z0-9]{15,30}$/i.test(trimmed)) {
+    return `https://${trimmed}.supabase.co`;
+  }
+  return trimmed;
+}
+
+function getSupabaseConfig(): { url: string; key: string } | null {
+  const rawUrl =
+    process.env.SUPABASE_URL ||
+    process.env.VITE_SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    'https://oooegbbvrwifilavlvgt.supabase.co';
+  const rawKey =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    process.env.SUPABASE_KEY ||
+    process.env.VITE_SUPABASE_ANON_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    '';
+
+  const url = normalizeSupabaseUrl(rawUrl);
+  const key = rawKey.trim();
+
+  if (!url || !key || key.includes('SUA_CHAVE')) {
+    return null;
+  }
+  return { url, key };
+}
+
+function getSupabaseHeaders(key: string, extra?: Record<string, string>) {
+  return {
+    apikey: key,
+    Authorization: `Bearer ${key}`,
+    'Content-Type': 'application/json',
+    ...extra,
+  };
+}
+
+function investigationToSupabaseRow(record: Record<string, unknown>) {
+  const nowIso = new Date().toISOString();
+  return {
+    id: String(record.id || `inv_${Date.now()}`),
+    title: String(record.title || 'Diagnóstico Eletromecânico PCH/UHE'),
+    status: String(record.status || 'em_investigacao'),
+    is_favorite: Boolean(record.isFavorite),
+    field_resolution_note: String(record.fieldResolutionNote || ''),
+    created_at: String(record.createdAt || nowIso),
+    updated_at: String(record.updatedAt || nowIso),
+    attachment_metadata: Array.isArray(record.attachmentMetadata)
+      ? record.attachmentMetadata
+      : [],
+    turns: Array.isArray(record.turns) ? record.turns : [],
+    raw_payload: record,
+  };
+}
+
+function supabaseRowToInvestigation(
+  row: Record<string, unknown>
+): Record<string, unknown> {
+  const rawPayload =
+    row.raw_payload && typeof row.raw_payload === 'object'
+      ? (row.raw_payload as Record<string, unknown>)
+      : {};
+
+  return {
+    ...rawPayload,
+    id: String(row.id || rawPayload.id || ''),
+    title: String(
+      row.title || rawPayload.title || 'Diagnóstico Eletromecânico PCH/UHE'
+    ),
+    status: String(row.status || rawPayload.status || 'em_investigacao'),
+    isFavorite:
+      typeof row.is_favorite === 'boolean'
+        ? row.is_favorite
+        : Boolean(rawPayload.isFavorite),
+    fieldResolutionNote: String(
+      row.field_resolution_note ?? rawPayload.fieldResolutionNote ?? ''
+    ),
+    createdAt: String(
+      row.created_at || rawPayload.createdAt || new Date().toISOString()
+    ),
+    updatedAt: String(
+      row.updated_at || rawPayload.updatedAt || new Date().toISOString()
+    ),
+    attachmentMetadata: Array.isArray(row.attachment_metadata)
+      ? row.attachment_metadata
+      : Array.isArray(rawPayload.attachmentMetadata)
+        ? rawPayload.attachmentMetadata
+        : [],
+    turns: Array.isArray(row.turns)
+      ? row.turns
+      : Array.isArray(rawPayload.turns)
+        ? rawPayload.turns
+        : [],
+  };
+}
+
+async function fetchHistoryFromSupabase(): Promise<{
+  ok: boolean;
+  items: Array<Record<string, unknown>>;
+  error?: string;
+}> {
+  const cfg = getSupabaseConfig();
+  if (!cfg) return { ok: false, items: [] };
+
+  try {
+    const res = await fetch(
+      `${cfg.url}/rest/v1/${SUPABASE_TABLE}?select=*&order=updated_at.desc&limit=100`,
+      {
+        method: 'GET',
+        headers: getSupabaseHeaders(cfg.key),
+      }
+    );
+
+    if (!res.ok) {
+      const errText = await res.text();
+      return { ok: false, items: [], error: errText.slice(0, 200) };
+    }
+
+    const rows = (await res.json()) as Array<Record<string, unknown>>;
+    const items = Array.isArray(rows)
+      ? rows.map(supabaseRowToInvestigation)
+      : [];
+    return { ok: true, items };
+  } catch (err) {
+    return {
+      ok: false,
+      items: [],
+      error: err instanceof Error ? err.message : 'Erro de rede no Supabase',
+    };
+  }
+}
+
+async function upsertHistoryToSupabase(
+  records: Array<Record<string, unknown>>
+): Promise<boolean> {
+  const cfg = getSupabaseConfig();
+  if (!cfg || records.length === 0) return false;
+
+  try {
+    const rows = records.map(investigationToSupabaseRow);
+    const res = await fetch(
+      `${cfg.url}/rest/v1/${SUPABASE_TABLE}?on_conflict=id`,
+      {
+        method: 'POST',
+        headers: getSupabaseHeaders(cfg.key, {
+          Prefer: 'resolution=merge-duplicates,return=minimal',
+        }),
+        body: JSON.stringify(rows),
+      }
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function deleteHistoryFromSupabase(id: string): Promise<boolean> {
+  const cfg = getSupabaseConfig();
+  if (!cfg || !id) return false;
+
+  try {
+    const res = await fetch(
+      `${cfg.url}/rest/v1/${SUPABASE_TABLE}?id=eq.${encodeURIComponent(id)}`,
+      {
+        method: 'DELETE',
+        headers: getSupabaseHeaders(cfg.key),
+      }
+    );
+    return res.ok;
+  } catch {
+    return false;
   }
 }
 
@@ -836,10 +1030,75 @@ Responda em Markdown técnico claro, objetivo e direto, analisando integralmente
   });
 
   // ============================================================================
-  // 1. PERSISTENT FAULT HISTORY DATABASE API (/api/history)
+  // 1. PERSISTENT FAULT HISTORY DATABASE API (/api/history + Supabase Cloud Sync)
   // ============================================================================
-  app.get('/api/history', (req, res) => {
-    const items = readHistoryDb() as Array<Record<string, unknown>>;
+  app.get('/api/supabase/status', async (_req, res) => {
+    const cfg = getSupabaseConfig();
+    if (!cfg) {
+      return res.json({
+        configured: false,
+        connected: false,
+        tableReady: false,
+        projectName: SUPABASE_PROJECT_LABEL,
+        tableName: SUPABASE_TABLE,
+        message:
+          'Variáveis SUPABASE_URL e SUPABASE_ANON_KEY ainda não configuradas no ambiente.',
+      });
+    }
+
+    const supRes = await fetchHistoryFromSupabase();
+    if (!supRes.ok) {
+      const isMissingTable =
+        supRes.error?.includes('42P01') ||
+        supRes.error?.includes('PGRST205') ||
+        supRes.error?.toLowerCase().includes('does not exist') ||
+        supRes.error?.toLowerCase().includes('could not find the table');
+
+      return res.json({
+        configured: true,
+        connected: false,
+        tableReady: !isMissingTable,
+        projectName: SUPABASE_PROJECT_LABEL,
+        tableName: SUPABASE_TABLE,
+        message: isMissingTable
+          ? `Conectado ao projeto "${SUPABASE_PROJECT_LABEL}", mas falta executar o script SQL para criar a tabela "${SUPABASE_TABLE}".`
+          : `Erro ao consultar Supabase (${SUPABASE_PROJECT_LABEL}): ${supRes.error}`,
+      });
+    }
+
+    return res.json({
+      configured: true,
+      connected: true,
+      tableReady: true,
+      projectName: SUPABASE_PROJECT_LABEL,
+      tableName: SUPABASE_TABLE,
+      count: supRes.items.length,
+      message: `Sincronizado em tempo real com Supabase (${SUPABASE_PROJECT_LABEL} • tabela ${SUPABASE_TABLE}).`,
+    });
+  });
+
+  app.get('/api/history', async (req, res) => {
+    const localItems = readHistoryDb() as Array<Record<string, unknown>>;
+    let items: Array<Record<string, unknown>> = localItems;
+    let storageMode: 'supabase' | 'local' = 'local';
+
+    const supRes = await fetchHistoryFromSupabase();
+    if (supRes.ok) {
+      storageMode = 'supabase';
+      const supIds = new Set(supRes.items.map((i) => String(i.id)));
+      const unsyncedLocal = localItems.filter(
+        (l) => l.id && !supIds.has(String(l.id))
+      );
+
+      if (unsyncedLocal.length > 0) {
+        await upsertHistoryToSupabase(unsyncedLocal);
+        items = [...unsyncedLocal, ...supRes.items].slice(0, 100);
+      } else {
+        items = supRes.items;
+      }
+      writeHistoryDb(items);
+    }
+
     const search = String(req.query.q || '')
       .trim()
       .toLowerCase();
@@ -856,63 +1115,172 @@ Responda em Markdown técnico claro, objetivo e direto, analisando integralmente
       return blob.includes(search);
     });
 
-    return res.json({ items: filtered });
+    return res.json({
+      items: filtered,
+      storageMode,
+      supabaseProject: SUPABASE_PROJECT_LABEL,
+      supabaseTable: SUPABASE_TABLE,
+    });
   });
 
-  app.post('/api/history', (req, res) => {
+  app.post('/api/history', async (req, res) => {
     try {
       const record = req.body;
       if (!record || !record.id) {
         return res.status(400).json({ error: 'Registro inválido.' });
       }
+      const nowIso = new Date().toISOString();
+      const normalizedRecord: Record<string, unknown> = {
+        status: 'em_investigacao',
+        isFavorite: false,
+        ...record,
+        updatedAt: nowIso,
+      };
+
       const items = readHistoryDb() as Array<Record<string, unknown>>;
       const existingIndex = items.findIndex((i) => i.id === record.id);
       if (existingIndex >= 0) {
         items[existingIndex] = {
           ...items[existingIndex],
-          ...record,
-          updatedAt: new Date().toISOString(),
+          ...normalizedRecord,
         };
       } else {
-        items.unshift({
-          status: 'em_investigacao',
-          isFavorite: false,
-          ...record,
-          updatedAt: new Date().toISOString(),
-        });
+        items.unshift(normalizedRecord);
       }
       const trimmed = items.slice(0, 100);
       writeHistoryDb(trimmed);
-      return res.json({ status: 'saved', items: trimmed });
+
+      const syncedToSupabase = await upsertHistoryToSupabase([
+        existingIndex >= 0 ? items[existingIndex] : normalizedRecord,
+      ]);
+
+      return res.json({
+        status: 'saved',
+        storageMode: syncedToSupabase ? 'supabase' : 'local',
+        items: trimmed,
+      });
     } catch (err) {
       console.error('Erro ao salvar histórico:', err);
       return res.status(500).json({ error: 'Erro ao salvar histórico.' });
     }
   });
 
-  app.patch('/api/history/:id', (req, res) => {
+  app.post('/api/history/sync', async (req, res) => {
+    try {
+      const clientItems = Array.isArray(req.body?.items)
+        ? (req.body.items as Array<Record<string, unknown>>)
+        : [];
+      const localItems = readHistoryDb() as Array<Record<string, unknown>>;
+
+      const mergedMap = new Map<string, Record<string, unknown>>();
+      for (const item of [...localItems, ...clientItems]) {
+        if (item && item.id) {
+          mergedMap.set(String(item.id), item);
+        }
+      }
+
+      const supRes = await fetchHistoryFromSupabase();
+      if (supRes.ok) {
+        for (const supItem of supRes.items) {
+          if (supItem && supItem.id) {
+            const idStr = String(supItem.id);
+            const existing = mergedMap.get(idStr);
+            if (!existing) {
+              mergedMap.set(idStr, supItem);
+            } else {
+              const supTime = new Date(String(supItem.updatedAt || 0)).getTime();
+              const locTime = new Date(
+                String(existing.updatedAt || 0)
+              ).getTime();
+              if (supTime >= locTime) {
+                mergedMap.set(idStr, supItem);
+              }
+            }
+          }
+        }
+      }
+
+      const mergedList = Array.from(mergedMap.values())
+        .sort(
+          (a, b) =>
+            new Date(String(b.updatedAt || 0)).getTime() -
+            new Date(String(a.updatedAt || 0)).getTime()
+        )
+        .slice(0, 100);
+
+      writeHistoryDb(mergedList);
+      const synced = await upsertHistoryToSupabase(mergedList);
+
+      return res.json({
+        status: 'synced',
+        storageMode: synced || supRes.ok ? 'supabase' : 'local',
+        supabaseProject: SUPABASE_PROJECT_LABEL,
+        items: mergedList,
+      });
+    } catch (err) {
+      return res.status(500).json({
+        error:
+          err instanceof Error
+            ? err.message
+            : 'Erro ao sincronizar histórico.',
+      });
+    }
+  });
+
+  app.patch('/api/history/:id', async (req, res) => {
     const { id } = req.params;
     const updates = req.body || {};
     const items = readHistoryDb() as Array<Record<string, unknown>>;
     const idx = items.findIndex((i) => i.id === id);
-    if (idx === -1) {
+
+    let updatedRecord: Record<string, unknown> | null = null;
+    if (idx !== -1) {
+      items[idx] = {
+        ...items[idx],
+        ...updates,
+        updatedAt: new Date().toISOString(),
+      };
+      updatedRecord = items[idx];
+      writeHistoryDb(items);
+    } else {
+      const supRes = await fetchHistoryFromSupabase();
+      const foundInSup = supRes.items.find((i) => String(i.id) === id);
+      if (foundInSup) {
+        const nextRec: Record<string, unknown> = {
+          ...foundInSup,
+          ...updates,
+          updatedAt: new Date().toISOString(),
+        };
+        updatedRecord = nextRec;
+        items.unshift(nextRec);
+        writeHistoryDb(items.slice(0, 100));
+      }
+    }
+
+    if (!updatedRecord) {
       return res.status(404).json({ error: 'Registro não encontrado.' });
     }
-    items[idx] = {
-      ...items[idx],
-      ...updates,
-      updatedAt: new Date().toISOString(),
-    };
-    writeHistoryDb(items);
-    return res.json({ status: 'updated', item: items[idx], items });
+
+    const synced = await upsertHistoryToSupabase([updatedRecord]);
+    return res.json({
+      status: 'updated',
+      storageMode: synced ? 'supabase' : 'local',
+      item: updatedRecord,
+      items,
+    });
   });
 
-  app.delete('/api/history/:id', (req, res) => {
+  app.delete('/api/history/:id', async (req, res) => {
     const { id } = req.params;
     const items = readHistoryDb() as Array<Record<string, unknown>>;
     const next = items.filter((i) => i.id !== id);
     writeHistoryDb(next);
-    return res.json({ status: 'deleted', items: next });
+    const deletedFromSupabase = await deleteHistoryFromSupabase(id);
+    return res.json({
+      status: 'deleted',
+      storageMode: deletedFromSupabase ? 'supabase' : 'local',
+      items: next,
+    });
   });
 
   // ============================================================================
@@ -1401,6 +1769,7 @@ Responda em Markdown técnico claro, objetivo e direto para auxiliar o operador 
         'metadata.json',
         '.env.example',
         '.gitignore',
+        'supabase_hydrodiag_schema.sql',
         'server.ts',
         'src/main.tsx',
         'src/index.css',
@@ -1422,14 +1791,16 @@ Sistema especialista multimodal desenvolvido para engenharia de manutenção, pr
 - **Leitura Multimodal de Cadernos Elétricos (100+ páginas):** Indexação automática e recorte cirúrgico de diagramas funcionais (\`/EL\`), réguas de bornes (\`/RB\`), layout mecânico (\`/ME\`) e relação de materiais (\`/RM\`) no padrão WEG / IEC / ANSI.
 - **Guia Prático de Ponta de Prova (Multímetro):** Indicação exata de réguas de bornes (\`1X2\`, \`2X2\`, \`3XD\`, \`XED\`), terminais (\`13-14\`, \`21-22\`) e tensões esperadas (\`125 Vcc\`, \`24 Vcc\`, \`220 Vca\`).
 - **Chat Técnico Contínuo com o Especialista Gemini:** Converse em tempo real sobre a falha, envie fotos de medições em campo e peça análise de folhas complementares sem perder o contexto.
-- **Banco de Dados Persistente de Histórico de Falhas:** Busque rapidamente diagnósticos anteriores, registre a solução confirmada em campo e exporte Ordens de Serviço.
+- **Banco de Dados em Nuvem Supabase (Projeto: Agenda Financeira youware):** Sincronização em tempo real dos diagnósticos entre múltiplos computadores usando a tabela isolada \`hydrodiag_investigations\`.
 
-## ☁️ Como Publicar na Vercel (Acesso em Qualquer PC)
-1. Acesse [https://vercel.com/new](https://vercel.com/new) e importe este repositório (\`hydrodiag-ai-pch-uhe\`).
-2. Em **Environment Variables**, adicione:
-   - Nome: \`GEMINI_API_KEY\`
-   - Valor: Sua chave da API do Google Gemini (obtenha gratuitamente em [https://aistudio.google.com/apikey](https://aistudio.google.com/apikey)).
-3. Clique em **Deploy**. O arquivo \`vercel.json\` e a função serverless \`api/index.ts\` já configuram automaticamente o backend e o frontend!
+## ☁️ Como Publicar na Vercel + Conectar ao Supabase (Acesso em Qualquer PC)
+1. No painel do **Supabase**, abra o projeto **\`Agenda Financeira youware\`**, clique em **SQL Editor** e execute o arquivo \`supabase_hydrodiag_schema.sql\`.
+2. Acesse [https://vercel.com/new](https://vercel.com/new) e importe este repositório (\`hydrodiag-ai-pch-uhe\`).
+3. Em **Environment Variables** da Vercel, adicione:
+   - \`GEMINI_API_KEY\`: Sua chave da API do Google Gemini
+   - \`SUPABASE_URL\`: A URL do seu projeto \`Agenda Financeira youware\` (em *Project Settings -> API*)
+   - \`SUPABASE_ANON_KEY\`: A chave \`anon public\` do seu projeto \`Agenda Financeira youware\` (em *Project Settings -> API*)
+4. Clique em **Deploy**. O arquivo \`vercel.json\` e a função serverless \`api/index.ts\` já configuram automaticamente o backend e o frontend!
 `;
 
       const uploadedFiles: string[] = [];
@@ -1464,7 +1835,7 @@ Sistema especialista multimodal desenvolvido para engenharia de manutenção, pr
             method: 'PUT',
             headers,
             body: JSON.stringify({
-              message: `feat: update ${relPath} for Gemini 3.8 Flash & Vercel`,
+              message: `feat: update ${relPath} for Gemini 3.8 Flash & Supabase Cloud Sync`,
               content: contentBase64,
               ...(existingSha ? { sha: existingSha } : {}),
             }),
@@ -1501,6 +1872,277 @@ Sistema especialista multimodal desenvolvido para engenharia de manutenção, pr
           err instanceof Error
             ? err.message
             : 'Erro ao publicar arquivos no GitHub.',
+      });
+    }
+  });
+
+  // ============================================================================
+  // 7. COMPLETE SOURCE CODE BACKUP & ZIP DOWNLOAD (/api/backup/*)
+  // ============================================================================
+  const BACKUP_FILE_LIST = [
+    'package.json',
+    'vercel.json',
+    'api/index.ts',
+    'tsconfig.json',
+    'vite.config.ts',
+    'index.html',
+    'metadata.json',
+    '.env.example',
+    '.gitignore',
+    'supabase_hydrodiag_schema.sql',
+    'server.ts',
+    'src/main.tsx',
+    'src/index.css',
+    'src/types.ts',
+    'src/App.tsx',
+    'src/utils/pdfClientEngine.ts',
+    'src/components/DiagramUploadPanel.tsx',
+    'src/components/FaultQueryPanel.tsx',
+    'src/components/DiagnosticReportView.tsx',
+    'src/components/FaultChatPanel.tsx',
+    'src/components/GitHubDeployModal.tsx',
+  ];
+
+  const BACKUP_README_CONTENT = `# ⚡ HydroDiag AI — Backup Completo do Código-Fonte (PCH / UHE)
+
+Sistema especialista multimodal para Engenharia Elétrica de Manutenção, Proteção, Automação e Supervisão de **Pequenas Centrais Hidrelétricas (PCH)** e **Usinas Hidrelétricas (UHE)**.
+
+## 📦 Como Restaurar e Rodar Este Backup no Seu Computador
+1. Extraia todos os arquivos deste pacote mantendo a estrutura de pastas (\`src/\`, \`src/components/\`, \`src/utils/\`, \`api/\`).
+2. Crie um arquivo \`.env\` na raiz (ou copie o \`.env.example\`) e adicione sua chave da API Gemini:
+   \`\`\`env
+   GEMINI_API_KEY=sua_chave_aqui
+   \`\`\`
+3. Instale as dependências no terminal:
+   \`\`\`bash
+   npm install
+   \`\`\`
+4. Inicie o servidor completo (Frontend + Backend Express na porta 3000):
+   \`\`\`bash
+   npm run dev
+   \`\`\`
+
+## ☁️ Como Publicar na Vercel
+- Este backup já inclui \`vercel.json\` e \`api/index.ts\`.
+- Basta importar a pasta/repositório na Vercel e configurar a variável de ambiente \`GEMINI_API_KEY\`.
+`;
+
+  // Precomputed CRC32 table for standard PKZIP archive generation
+  const CRC32_TABLE = (() => {
+    const table = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let k = 0; k < 8; k++) {
+        c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      }
+      table[i] = c >>> 0;
+    }
+    return table;
+  })();
+
+  function crc32(buf: Buffer): number {
+    let crc = 0xffffffff;
+    for (let i = 0; i < buf.length; i++) {
+      crc = CRC32_TABLE[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+    }
+    return (crc ^ 0xffffffff) >>> 0;
+  }
+
+  function buildZipBuffer(
+    entries: Array<{ name: string; data: Buffer }>
+  ): Buffer {
+    const localParts: Buffer[] = [];
+    const centralParts: Buffer[] = [];
+    let offset = 0;
+
+    for (const entry of entries) {
+      const nameBuf = Buffer.from(entry.name.replace(/\\/g, '/'), 'utf-8');
+      const uncompressed = entry.data;
+      const compressed = zlib.deflateRawSync(uncompressed);
+      const fileCrc = crc32(uncompressed);
+
+      // Local file header (30 bytes + filename)
+      const localHeader = Buffer.alloc(30);
+      localHeader.writeUInt32LE(0x04034b50, 0); // signature
+      localHeader.writeUInt16LE(20, 4); // version needed
+      localHeader.writeUInt16LE(0x0800, 6); // UTF-8 flag
+      localHeader.writeUInt16LE(8, 8); // method: deflate
+      localHeader.writeUInt16LE(0, 10); // mod time
+      localHeader.writeUInt16LE(0x5421, 12); // mod date
+      localHeader.writeUInt32LE(fileCrc, 14);
+      localHeader.writeUInt32LE(compressed.length, 18);
+      localHeader.writeUInt32LE(uncompressed.length, 22);
+      localHeader.writeUInt16LE(nameBuf.length, 26);
+      localHeader.writeUInt16LE(0, 28); // extra len
+
+      localParts.push(localHeader, nameBuf, compressed);
+
+      // Central directory header (46 bytes + filename)
+      const centralHeader = Buffer.alloc(46);
+      centralHeader.writeUInt32LE(0x02014b50, 0); // signature
+      centralHeader.writeUInt16LE(20, 4); // version made by
+      centralHeader.writeUInt16LE(20, 6); // version needed
+      centralHeader.writeUInt16LE(0x0800, 8); // UTF-8 flag
+      centralHeader.writeUInt16LE(8, 10); // method: deflate
+      centralHeader.writeUInt16LE(0, 12); // mod time
+      centralHeader.writeUInt16LE(0x5421, 14); // mod date
+      centralHeader.writeUInt32LE(fileCrc, 16);
+      centralHeader.writeUInt32LE(compressed.length, 20);
+      centralHeader.writeUInt32LE(uncompressed.length, 24);
+      centralHeader.writeUInt16LE(nameBuf.length, 28);
+      centralHeader.writeUInt16LE(0, 30); // extra len
+      centralHeader.writeUInt16LE(0, 32); // comment len
+      centralHeader.writeUInt16LE(0, 34); // disk number
+      centralHeader.writeUInt16LE(0, 36); // internal attrs
+      centralHeader.writeUInt32LE(0, 38); // external attrs
+      centralHeader.writeUInt32LE(offset, 42); // local header offset
+
+      centralParts.push(centralHeader, nameBuf);
+      offset += localHeader.length + nameBuf.length + compressed.length;
+    }
+
+    const centralDirBuf = Buffer.concat(centralParts);
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0); // EOCD signature
+    eocd.writeUInt16LE(0, 4); // disk number
+    eocd.writeUInt16LE(0, 6); // start disk
+    eocd.writeUInt16LE(entries.length, 8);
+    eocd.writeUInt16LE(entries.length, 10);
+    eocd.writeUInt32LE(centralDirBuf.length, 12);
+    eocd.writeUInt32LE(offset, 16);
+    eocd.writeUInt16LE(0, 20); // comment len
+
+    return Buffer.concat([...localParts, centralDirBuf, eocd]);
+  }
+
+  function collectProjectBackupFiles(): Array<{
+    path: string;
+    sizeBytes: number;
+    content: string;
+    buffer: Buffer;
+  }> {
+    const collected: Array<{
+      path: string;
+      sizeBytes: number;
+      content: string;
+      buffer: Buffer;
+    }> = [];
+
+    const readmeBuf = Buffer.from(BACKUP_README_CONTENT, 'utf-8');
+    collected.push({
+      path: 'README.md',
+      sizeBytes: readmeBuf.length,
+      content: BACKUP_README_CONTENT,
+      buffer: readmeBuf,
+    });
+
+    for (const relPath of BACKUP_FILE_LIST) {
+      const absPath = path.join(__dirname, relPath);
+      if (fs.existsSync(absPath)) {
+        const rawBuf = fs.readFileSync(absPath);
+        collected.push({
+          path: relPath,
+          sizeBytes: rawBuf.length,
+          content: rawBuf.toString('utf-8'),
+          buffer: rawBuf,
+        });
+      }
+    }
+
+    if (fs.existsSync(HISTORY_DB_PATH)) {
+      try {
+        const histBuf = fs.readFileSync(HISTORY_DB_PATH);
+        collected.push({
+          path: 'data/fault_history_db.json',
+          sizeBytes: histBuf.length,
+          content: histBuf.toString('utf-8'),
+          buffer: histBuf,
+        });
+      } catch {
+        // Ignore if unreadable
+      }
+    }
+
+    return collected;
+  }
+
+  // Save a ready-to-download ZIP snapshot in public/ on server startup
+  try {
+    const publicDir = path.join(__dirname, 'public');
+    if (!fs.existsSync(publicDir)) {
+      fs.mkdirSync(publicDir, { recursive: true });
+    }
+    const initialFiles = collectProjectBackupFiles();
+    const zipBuf = buildZipBuffer(
+      initialFiles.map((f) => ({ name: f.path, data: f.buffer }))
+    );
+    fs.writeFileSync(
+      path.join(publicDir, 'hydrodiag-ai-backup-completo.zip'),
+      zipBuf
+    );
+  } catch {
+    // Ignore on read-only environments
+  }
+
+  app.get('/api/backup/source-bundle', (_req, res) => {
+    try {
+      const files = collectProjectBackupFiles();
+      const totalBytes = files.reduce((acc, f) => acc + f.sizeBytes, 0);
+      return res.json({
+        generatedAt: new Date().toISOString(),
+        projectName: 'hydrodiag-ai-pch-uhe',
+        totalFiles: files.length,
+        totalBytes,
+        files: files.map((f) => ({
+          path: f.path,
+          sizeBytes: f.sizeBytes,
+          content: f.content,
+        })),
+      });
+    } catch (err) {
+      return res.status(500).json({
+        error:
+          err instanceof Error
+            ? err.message
+            : 'Erro ao gerar pacote de backup do código-fonte.',
+      });
+    }
+  });
+
+  app.get('/api/backup/download-zip', (_req, res) => {
+    try {
+      const files = collectProjectBackupFiles();
+      const zipBuffer = buildZipBuffer(
+        files.map((f) => ({ name: f.path, data: f.buffer }))
+      );
+      const dateTag = new Date().toISOString().slice(0, 10);
+      const filename = `hydrodiag-ai-codigo-completo-backup-${dateTag}.zip`;
+
+      // Also refresh static copy in public/ if writable
+      try {
+        const publicZipPath = path.join(
+          __dirname,
+          'public',
+          'hydrodiag-ai-backup-completo.zip'
+        );
+        fs.writeFileSync(publicZipPath, zipBuffer);
+      } catch {
+        // Ignore
+      }
+
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="${filename}"`
+      );
+      res.setHeader('Content-Length', String(zipBuffer.length));
+      return res.send(zipBuffer);
+    } catch (err) {
+      return res.status(500).json({
+        error:
+          err instanceof Error
+            ? err.message
+            : 'Erro ao gerar arquivo ZIP de backup.',
       });
     }
   });
