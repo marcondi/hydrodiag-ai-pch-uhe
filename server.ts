@@ -108,11 +108,24 @@ FORMATO OBRIGATÓRIO DE RESPOSTA:
 Caso haja novas dúvidas ou falhas, forneça o próximo diagrama detalhado.`;
 
 export const CHAT_SYSTEM_INSTRUCTION = `Você é o Copiloto Especialista em Manutenção Eletromecânica e Automação de Usinas Hidrelétricas (PCH/UHE), conversando em tempo real com o operador/eletricista sobre uma falha em investigação.
-Você tem acesso ao índice completo do caderno elétrico em PDF anexado, às páginas recortadas em alta resolução do diagrama (/EL, /RB, /ME, /RM) e ao histórico do diagnóstico.
-DIRETRIZES DO CHAT INTERATIVO:
-- Responda de forma direta, técnica, prática e altamente precisa (citando Folha, Página do PDF, Coordenada Linha/Coluna, Régua de Bornes, terminais NA/NF, tensões 125Vcc/24Vcc/220Vca e códigos da lista de materiais /RM).
-- Se o operador pedir para analisar outra Folha específica do mesmo PDF (ex: "Analise a Folha 27", "Veja a Folha 31"), examine minuciosamente as páginas recortadas fornecidas neste turno e entregue todos os detalhes de circuito, bornes e componentes.
-- Se o operador relatar o resultado de uma medição em campo (ex: "Medi 0Vcc no borne XED:217" ou "O disjuntor está armado mas o LED apagado"), raciocine sobre o circuito elétrico passo a passo e indique o próximo ponto exato de teste com as pontas de prova (+) e (-).`;
+Você tem acesso direto a TODOS os arquivos anexados na requisição multimodal:
+1. O(s) índice(s) completo(s) de páginas e os recortes em alta resolução dos cadernos elétricos em PDF (\`/EL\`, \`/RB\`, \`/ME\`, \`/RM\`), incluindo novos PDFs que o operador anexar durante a conversa no chat;
+2. Qualquer foto de campo, medição de multímetro, disjuntor, régua de bornes ou cartão de CLP (\`inlineData\` de imagem) anexada pelo operador no chat;
+3. O histórico do diagnóstico e da conversa.
+
+REGRA CRÍTICA SOBRE ARQUIVOS E FOTOS ENVIADOS NO CHAT:
+- **JAMAIS** diga que "o arquivo não veio anexado", "a foto não apareceu anexada no fluxo da conversa" ou "a interface do chat ocultou o arquivo".
+- Sempre que houver um bloco \`inlineData\` (imagem ou PDF) ou um \`ÍNDICE COMPLETO DAS PÁGINAS\` na requisição, o arquivo JÁ ESTÁ PRESENTE E VISÍVEL para você! Analise-o imediatamente em detalhes (lendo componentes, bornes, cabos, portas de switch, ponteiras de multímetro, disjuntores, etc.).
+- Responda de forma direta, técnica, prática e altamente precisa (citando Folha, Página do PDF, Coordenada Linha/Coluna, Régua de Bornes, terminais NA/NF, tensões 125Vcc/24Vcc/220Vca e códigos da lista de materiais /RM).`;
+
+function sanitizeChatHistoryItem(content: string): string {
+  return content
+    .replace(/[^\n]*n[ãa]o veio anexad[oa][^\n]*/gi, '')
+    .replace(/[^\n]*foto n[ãa]o apareceu anexada[^\n]*/gi, '')
+    .replace(/[^\n]*interface do chat [àa]s vezes pode ocultar[^\n]*/gi, '')
+    .replace(/[^\n]*sistema de chat [àa]s vezes n[ãa]o carrega[^\n]*/gi, '')
+    .trim();
+}
 
 function getGeminiClient() {
   const apiKey =
@@ -699,6 +712,10 @@ Retorne APENAS os números das páginas do PDF separados por vírgula (exemplo: 
       if (action === 'chat') {
         const {
           preparedParts,
+          latestAttachmentParts,
+          chatAttachmentName,
+          chatAttachmentMimeType,
+          chatAttachmentPanel,
           message,
           alarmTitle,
           diagnosticMarkdown,
@@ -711,9 +728,41 @@ Retorne APENAS os números das páginas do PDF separados por vírgula (exemplo: 
           ? [...preparedParts]
           : [];
 
+        const formattedChatHistory = Array.isArray(chatHistory)
+          ? chatHistory
+              .map((m: { role: string; content: string }) => {
+                const cleaned =
+                  m.role === 'assistant'
+                    ? sanitizeChatHistoryItem(String(m.content || ''))
+                    : String(m.content || '');
+                if (!cleaned) return '';
+                return `${m.role === 'user' ? 'OPERADOR EM CAMPO' : 'ENGENHEIRO ESPECIALISTA (IA)'}: ${cleaned}`;
+              })
+              .filter(Boolean)
+              .join('\n\n')
+          : '';
+
+        parts.push({
+          text: `CONTEXTO DO LAUDO TÉCNICO ATUAL (Alarme: "${alarmTitle || 'Em investigação'}"):
+${diagnosticMarkdown || 'Sem laudo inicial.'}
+
+${formattedChatHistory ? `HISTÓRICO DA CONVERSA NO CHAT:\n${formattedChatHistory}\n` : ''}`,
+        });
+
+        // Inject newly attached PDF or field photo RIGHT NEXT to the operator's new message so Gemini unmistakably sees it
+        if (
+          Array.isArray(latestAttachmentParts) &&
+          latestAttachmentParts.length > 0
+        ) {
+          parts.push({
+            text: `🚨 [ATENÇÃO: O OPERADOR ACABOU DE ANEXAR UM NOVO ARQUIVO PDF NESTA MENSAGEM DO CHAT: "${chatAttachmentName || 'Novo Desenho.pdf'}"${chatAttachmentPanel ? ` (Painel: ${chatAttachmentPanel})` : ''}. O ÍNDICE COMPLETO E AS PÁGINAS EM ALTA RESOLUÇÃO DESTE NOVO ARQUIVO ESTÃO IMEDIATAMENTE ABAIXO — ANALISE-OS AGORA!]:`,
+          });
+          parts.push(...latestAttachmentParts);
+        }
+
         if (inlineImageBase64 && inlineImageMimeType) {
           parts.push({
-            text: '[FOTO DE CAMPO / MEDIÇÃO ENVIADA PELO OPERADOR NO CHAT]:',
+            text: `🚨 [ATENÇÃO: O OPERADOR ACABOU DE ANEXAR UMA FOTO DE CAMPO / IMAGEM NESTA MENSAGEM DO CHAT ("${chatAttachmentName || 'foto_campo.jpg'}"). A IMAGEM ESTÁ IMEDIATAMENTE ABAIXO — EXAMINE VISUALMENTE TODOS OS DETALHES DA FOTO (DISJUNTOR, MULTÍMETRO, BORNES, FIOS, TAGS) E RESPONDA DIRETAMENTE SOBRE ELA!]:`,
           });
           parts.push({
             inlineData: {
@@ -723,24 +772,11 @@ Retorne APENAS os números das páginas do PDF separados por vírgula (exemplo: 
           });
         }
 
-        const formattedChatHistory = Array.isArray(chatHistory)
-          ? chatHistory
-              .map(
-                (m: { role: string; content: string }) =>
-                  `${m.role === 'user' ? 'OPERADOR EM CAMPO' : 'ENGENHEIRO ESPECIALISTA (IA)'}: ${m.content}`
-              )
-              .join('\n\n')
-          : '';
-
         parts.push({
-          text: `CONTEXTO DO LAUDO TÉCNICO ATUAL (Alarme: "${alarmTitle || 'Em investigação'}"):
-${diagnosticMarkdown || 'Sem laudo inicial.'}
-
-${formattedChatHistory ? `HISTÓRICO DA CONVERSA NO CHAT:\n${formattedChatHistory}\n` : ''}
-NOVA MENSAGEM DO OPERADOR EM CAMPO:
+          text: `NOVA MENSAGEM DO OPERADOR EM CAMPO${chatAttachmentName ? ` (enviada junto com o arquivo anexado "${chatAttachmentName}" [${chatAttachmentMimeType || 'anexo'}])` : ''}:
 "${message}"
 
-Responda em Markdown técnico claro, objetivo e direto para auxiliar o operador em campo.`,
+Responda em Markdown técnico claro, objetivo e direto, analisando integralmente o arquivo/foto anexado (se presente) para auxiliar o operador em campo.`,
         });
 
         const result = await callGeminiFast(
@@ -1169,9 +1205,30 @@ Responda em Markdown técnico claro, objetivo e direto para auxiliar o operador 
             }
           }
 
+          const formattedChatHistory = Array.isArray(chatHistory)
+            ? chatHistory
+                .map((m: { role: string; content: string }) => {
+                  const cleaned =
+                    m.role === 'assistant'
+                      ? sanitizeChatHistoryItem(String(m.content || ''))
+                      : String(m.content || '');
+                  if (!cleaned) return '';
+                  return `${m.role === 'user' ? 'OPERADOR EM CAMPO' : 'ENGENHEIRO ESPECIALISTA (IA)'}: ${cleaned}`;
+                })
+                .filter(Boolean)
+                .join('\n\n')
+            : '';
+
+          parts.push({
+            text: `CONTEXTO DO LAUDO TÉCNICO ATUAL (Alarme: "${alarmTitle || 'Em investigação'}"):
+${diagnosticMarkdown || 'Sem laudo inicial.'}
+
+${formattedChatHistory ? `HISTÓRICO DA CONVERSA NO CHAT:\n${formattedChatHistory}\n` : ''}`,
+          });
+
           if (inlineImageBase64 && inlineImageMimeType) {
             parts.push({
-              text: '[FOTO DE CAMPO / MEDIÇÃO ENVIADA PELO OPERADOR NO CHAT]:',
+              text: '🚨 [ATENÇÃO: FOTO DE CAMPO / MEDIÇÃO ANEXADA NESTA MENSAGEM PELO OPERADOR — EXAMINE A IMAGEM IMEDIATAMENTE ABAIXO!]:',
             });
             parts.push({
               inlineData: {
@@ -1181,21 +1238,8 @@ Responda em Markdown técnico claro, objetivo e direto para auxiliar o operador 
             });
           }
 
-          const formattedChatHistory = Array.isArray(chatHistory)
-            ? chatHistory
-                .map(
-                  (m: { role: string; content: string }) =>
-                    `${m.role === 'user' ? 'OPERADOR EM CAMPO' : 'ENGENHEIRO ESPECIALISTA (IA)'}: ${m.content}`
-                )
-                .join('\n\n')
-            : '';
-
           parts.push({
-            text: `CONTEXTO DO LAUDO TÉCNICO ATUAL (Alarme: "${alarmTitle || 'Em investigação'}"):
-${diagnosticMarkdown || 'Sem laudo inicial.'}
-
-${formattedChatHistory ? `HISTÓRICO DA CONVERSA NO CHAT:\n${formattedChatHistory}\n` : ''}
-NOVA MENSAGEM DO OPERADOR EM CAMPO:
+            text: `NOVA MENSAGEM DO OPERADOR EM CAMPO:
 "${message}"
 
 Responda em Markdown técnico claro, objetivo e direto para auxiliar o operador em campo.`,
