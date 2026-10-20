@@ -79,6 +79,77 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
+async function normalizeImageForChat(file: File): Promise<{
+  base64: string;
+  mimeType: string;
+  previewDataUrl: string;
+}> {
+  const rawBase64 = await fileToBase64(file);
+  const rawMime = file.type && file.type.startsWith('image/') ? file.type : 'image/jpeg';
+  const rawDataUrl = `data:${rawMime};base64,${rawBase64}`;
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const maxDim = 1600;
+        let width = img.naturalWidth || img.width || 1200;
+        let height = img.naturalHeight || img.height || 900;
+
+        if (width > maxDim || height > maxDim) {
+          if (width >= height) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          } else {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve({
+            base64: rawBase64,
+            mimeType: rawMime,
+            previewDataUrl: rawDataUrl,
+          });
+          return;
+        }
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.86);
+        const compressedBase64 = compressedDataUrl.includes(',')
+          ? compressedDataUrl.split(',')[1]
+          : rawBase64;
+        resolve({
+          base64: compressedBase64,
+          mimeType: 'image/jpeg',
+          previewDataUrl: compressedDataUrl,
+        });
+      } catch {
+        resolve({
+          base64: rawBase64,
+          mimeType: rawMime,
+          previewDataUrl: rawDataUrl,
+        });
+      }
+    };
+    img.onerror = () => {
+      resolve({
+        base64: rawBase64,
+        mimeType: rawMime,
+        previewDataUrl: rawDataUrl,
+      });
+    };
+    img.src = rawDataUrl;
+  });
+}
+
 export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
   alarmTitle,
   messages,
@@ -92,9 +163,7 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
     useState<ChatAttachmentPayload | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isPlusMenuOpen, setIsPlusMenuOpen] = useState(false);
-  const [fileAcceptMode, setFileAcceptMode] = useState<string>(
-    '.pdf,application/pdf,image/jpeg,image/png,image/webp'
-  );
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -118,40 +187,83 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
     };
   }, [isPlusMenuOpen]);
 
+  const processSelectedFile = async (file: File) => {
+    try {
+      const isPdf =
+        file.type === 'application/pdf' ||
+        file.name.toLowerCase().endsWith('.pdf');
+
+      if (isPdf) {
+        const base64 = await fileToBase64(file);
+        const defaultCategory = inferCategoryFromFilename(file.name);
+        setAttachedFile({
+          base64,
+          mimeType: 'application/pdf',
+          name: file.name || 'desenho_anexado.pdf',
+          sizeBytes: file.size,
+          categoryTag: defaultCategory,
+          panelName: '',
+        });
+      } else {
+        const { base64, mimeType, previewDataUrl } =
+          await normalizeImageForChat(file);
+        setAttachedFile({
+          base64,
+          mimeType,
+          name: file.name || `foto_campo_${Date.now()}.jpg`,
+          sizeBytes: file.size,
+          categoryTag: 'FOTO CAMPO',
+          panelName: '',
+          previewDataUrl,
+        });
+      }
+      setTimeout(() => {
+        textareaRef.current?.focus();
+      }, 40);
+    } catch {
+      // Ignore file read error
+    }
+  };
+
   const triggerFilePicker = (accept: string) => {
-    setFileAcceptMode(accept);
     setIsPlusMenuOpen(false);
-    setTimeout(() => {
-      fileInputRef.current?.click();
-    }, 20);
+    if (fileInputRef.current) {
+      fileInputRef.current.accept = accept;
+      fileInputRef.current.value = '';
+      fileInputRef.current.click();
+    }
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    try {
-      const base64 = await fileToBase64(file);
-      const isPdf =
-        file.type === 'application/pdf' ||
-        file.name.toLowerCase().endsWith('.pdf');
-      const mimeType = isPdf ? 'application/pdf' : file.type || 'image/jpeg';
-      const defaultCategory = inferCategoryFromFilename(file.name);
-
-      setAttachedFile({
-        base64,
-        mimeType,
-        name: file.name,
-        sizeBytes: file.size,
-        categoryTag: defaultCategory,
-        panelName: '',
-      });
-      setTimeout(() => {
-        textareaRef.current?.focus();
-      }, 50);
-    } catch {
-      // Ignore file error
-    }
+    await processSelectedFile(file);
     e.target.value = '';
+  };
+
+  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.kind === 'file') {
+        const file = item.getAsFile();
+        if (file) {
+          e.preventDefault();
+          await processSelectedFile(file);
+          return;
+        }
+      }
+    }
+  };
+
+  const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDraggingOver(false);
+    const file = e.dataTransfer?.files?.[0];
+    if (file) {
+      await processSelectedFile(file);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -163,7 +275,7 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
       ? `Anexei o novo caderno PDF "${attachedFile?.name}"${
           attachedFile?.panelName ? ` (Painel ${attachedFile.panelName})` : ''
         } para continuarmos a investigação desta falha. Analise este diagrama em conjunto com o contexto atual.`
-      : 'Analise esta foto de medição/campo em relação à falha atual.';
+      : 'Analise esta foto de medição/campo anexada em relação à falha atual.';
 
     const textToSend = inputText.trim() || defaultPrompt;
     const fileToSend = attachedFile || undefined;
@@ -180,7 +292,9 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
 
   const handleSuggestionClick = async (suggestion: string) => {
     if (isSending) return;
-    await onSendMessage(suggestion);
+    const fileToSend = attachedFile || undefined;
+    setAttachedFile(null);
+    await onSendMessage(suggestion, fileToSend);
     setTimeout(() => {
       chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     }, 100);
@@ -324,22 +438,31 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
                   </div>
 
                   {msg.attachedImageName && (
-                    <div className="mb-2.5 flex flex-wrap items-center gap-2 text-xs font-mono text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded-md px-2.5 py-1.5">
-                      {msg.attachedImageName.toLowerCase().endsWith('.pdf') ? (
-                        <FileText className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                      ) : (
-                        <Camera className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                      )}
-                      <span>Arquivo anexado no chat: {msg.attachedImageName}</span>
-                      {msg.attachedFileCategory && (
-                        <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px]">
-                          {msg.attachedFileCategory}
-                        </span>
-                      )}
-                      {msg.attachedPanelName && (
-                        <span className="px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 text-[10px]">
-                          Painel: {msg.attachedPanelName}
-                        </span>
+                    <div className="mb-2.5 flex flex-col gap-2 text-xs font-mono text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded-md px-2.5 py-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {msg.attachedImageName.toLowerCase().endsWith('.pdf') ? (
+                          <FileText className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                        ) : (
+                          <Camera className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                        )}
+                        <span>Arquivo enviado: {msg.attachedImageName}</span>
+                        {msg.attachedFileCategory && (
+                          <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px]">
+                            {msg.attachedFileCategory}
+                          </span>
+                        )}
+                        {msg.attachedPanelName && (
+                          <span className="px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 text-[10px]">
+                            Painel: {msg.attachedPanelName}
+                          </span>
+                        )}
+                      </div>
+                      {msg.attachedPreviewDataUrl && (
+                        <img
+                          src={msg.attachedPreviewDataUrl}
+                          alt={msg.attachedImageName}
+                          className="max-h-44 w-auto rounded border border-slate-700 object-contain self-start bg-slate-950"
+                        />
                       )}
                     </div>
                   )}
@@ -429,37 +552,57 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
         <input
           ref={fileInputRef}
           type="file"
-          accept={fileAcceptMode}
+          accept=".pdf,application/pdf,image/jpeg,image/png,image/webp,image/*"
           onChange={handleFileChange}
           className="hidden"
         />
 
         {/* Unified Pill/Rounded Container */}
-        <div className="relative bg-[#161F30] border border-slate-700/90 focus-within:border-sky-500/80 rounded-3xl px-3.5 py-2.5 shadow-inner transition-colors flex flex-col gap-2.5">
+        <div
+          onDragOver={(e) => {
+            e.preventDefault();
+            setIsDraggingOver(true);
+          }}
+          onDragLeave={() => setIsDraggingOver(false)}
+          onDrop={handleDrop}
+          className={`relative bg-[#161F30] border rounded-3xl px-3.5 py-2.5 shadow-inner transition-colors flex flex-col gap-2.5 ${
+            isDraggingOver
+              ? 'border-sky-400 bg-sky-950/30'
+              : 'border-slate-700/90 focus-within:border-sky-500/80'
+          }`}
+        >
           {/* Attached File Preview Chip inside Composer */}
           {attachedFile && (
             <div className="flex flex-col gap-2 bg-[#0B111E]/90 border border-sky-500/40 rounded-2xl p-3 text-xs">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2.5 min-w-0">
-                  <div className="w-8 h-8 rounded-xl bg-sky-500/15 border border-sky-500/30 flex items-center justify-center shrink-0">
-                    {attachedFile.mimeType === 'application/pdf' ? (
-                      <FileText className="w-4 h-4 text-sky-400" />
-                    ) : (
-                      <Camera className="w-4 h-4 text-amber-400" />
-                    )}
-                  </div>
+                  {attachedFile.previewDataUrl ? (
+                    <img
+                      src={attachedFile.previewDataUrl}
+                      alt={attachedFile.name}
+                      className="w-11 h-11 rounded-xl border border-amber-500/40 object-cover shrink-0 bg-slate-950"
+                    />
+                  ) : (
+                    <div className="w-9 h-9 rounded-xl bg-sky-500/15 border border-sky-500/30 flex items-center justify-center shrink-0">
+                      {attachedFile.mimeType === 'application/pdf' ? (
+                        <FileText className="w-4 h-4 text-sky-400" />
+                      ) : (
+                        <Camera className="w-4 h-4 text-amber-400" />
+                      )}
+                    </div>
+                  )}
                   <div className="min-w-0">
                     <div className="font-mono font-semibold text-slate-100 truncate">
                       {attachedFile.name}
                     </div>
-                    <div className="text-[11px] text-slate-400 flex items-center gap-2">
+                    <div className="text-[11px] text-emerald-400 flex items-center gap-2">
                       <span>
                         {attachedFile.mimeType === 'application/pdf'
-                          ? 'Documento PDF Técnico'
-                          : 'Imagem / Foto de Campo'}
+                          ? '✓ PDF pronto para enviar e indexar no chat'
+                          : '✓ Foto anexada pronta para análise visual'}
                       </span>
                       {attachedFile.sizeBytes && (
-                        <span className="font-mono">
+                        <span className="font-mono text-slate-400">
                           • {(attachedFile.sizeBytes / (1024 * 1024)).toFixed(2)}{' '}
                           MB
                         </span>
@@ -550,7 +693,7 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
                     type="button"
                     onClick={() =>
                       triggerFilePicker(
-                        '.pdf,application/pdf,image/jpeg,image/png,image/webp'
+                        '.pdf,application/pdf,image/jpeg,image/png,image/webp,image/*'
                       )
                     }
                     className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl hover:bg-slate-800/90 text-left transition-colors cursor-pointer group"
@@ -585,7 +728,7 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
                   <button
                     type="button"
                     onClick={() =>
-                      triggerFilePicker('image/jpeg,image/png,image/webp')
+                      triggerFilePicker('image/jpeg,image/png,image/webp,image/*')
                     }
                     className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl hover:bg-slate-800/90 text-left transition-colors cursor-pointer group"
                   >
@@ -676,13 +819,14 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
               rows={1}
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
+              onPaste={handlePaste}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
                   handleSubmit(e);
                 }
               }}
-              placeholder="Pergunte qualquer coisa ou clique no + para anexar PDFs e fotos..."
+              placeholder="Pergunte qualquer coisa, cole (Ctrl+V) uma print/foto ou clique no + para anexar PDF..."
               className="flex-1 bg-transparent border-0 px-1 py-1.5 text-sm text-slate-100 placeholder:text-slate-400 focus:outline-none resize-none max-h-32 overflow-y-auto leading-relaxed"
             />
 
