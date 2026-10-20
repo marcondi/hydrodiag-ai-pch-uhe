@@ -97,25 +97,24 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
   return (
     <section
       aria-label="Caixa de Consulta de Falha ou Alarme"
-      className="bg-[#111827] border border-slate-800 rounded-lg p-5 flex flex-col gap-4"
+      className="bg-[#111827] border border-slate-800 rounded-lg p-4 flex flex-col gap-3"
     >
       <div>
-        <h2 className="text-base font-semibold text-slate-100">
-          2. Caixa de Consulta de Falha / Alarme
+        <h2 className="text-sm font-semibold text-slate-100">
+          2. Consulta de Falha / Alarme
         </h2>
-        <p className="text-xs text-slate-400 mt-1">
-          Descreva o alarme do supervisório (SCADA) ou sintoma observado em
-          campo na PCH/UHE
+        <p className="text-[11px] text-slate-400 mt-0.5">
+          Descreva o alarme do supervisório (SCADA) ou sintoma em campo
         </p>
       </div>
 
-      <form onSubmit={handleSubmit} className="flex flex-col gap-3.5">
-        <div className="flex flex-col gap-1.5">
+      <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+        <div className="flex flex-col gap-1">
           <label
             htmlFor="fault-query-input"
             className="text-xs font-medium text-slate-300 flex items-center justify-between"
           >
-            <span>Alarme do Supervisório ou Sintoma em Campo</span>
+            <span>Alarme ou Sintoma</span>
             {query && (
               <button
                 type="button"
@@ -126,47 +125,47 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
                 className="text-[11px] text-slate-400 hover:text-slate-200 flex items-center gap-1 cursor-pointer"
               >
                 <RotateCcw className="w-3 h-3" />
-                <span>Limpar texto</span>
+                <span>Limpar</span>
               </button>
             )}
           </label>
 
           <textarea
             id="fault-query-input"
-            rows={3}
+            rows={2}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder='Ex: "Está sinalizando no supervisório baixa pressão de óleo na UHLM", "Falta de tensão 125Vcc no CSG2", "Fusível queimado na folha 4"...'
-            className="w-full bg-[#0B111E] border border-slate-700 focus:border-sky-500 rounded-md p-3 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none transition-colors resize-y"
+            placeholder='Ex: "Baixa pressão de óleo na UHLM", "Falta de tensão 125Vcc no CSG2"...'
+            className="w-full bg-[#0B111E] border border-slate-700 focus:border-sky-500 rounded-md p-2.5 text-xs sm:text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none transition-colors resize-y"
           />
         </div>
 
         {/* Example quick-fill prompts */}
-        <div className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-1">
           <span className="text-[11px] text-slate-400">
-            Exemplos frequentes de campo (clique para preencher):
+            Exemplos rápidos (clique para preencher):
           </span>
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex flex-wrap gap-1">
             {EXAMPLE_ALARMS.map((example) => (
               <button
                 key={example}
                 type="button"
                 onClick={() => setQuery(example)}
-                className="text-left text-[11px] text-slate-300 hover:text-sky-300 bg-[#0B111E] hover:bg-slate-800/90 border border-slate-800 hover:border-slate-700 rounded px-2 py-1 transition-colors cursor-pointer truncate max-w-full"
+                className="text-left text-[11px] text-slate-300 hover:text-sky-300 bg-[#0B111E] hover:bg-slate-800/90 border border-slate-800 hover:border-slate-700 rounded px-2 py-0.5 transition-colors cursor-pointer truncate max-w-full"
               >
-                "{example}"
+                &quot;{example}&quot;
               </button>
             ))}
           </div>
         </div>
 
-        {/* 4 Mandatory Quick Support Buttons */}
-        <div className="flex flex-col gap-2 pt-1 border-t border-slate-800/80">
-          <span className="text-xs font-medium text-slate-300">
-            Botões Rápidos de Apoio Técnico:
+        {/* 4 Mandatory Quick Support Buttons in Compact 2x2 Grid */}
+        <div className="flex flex-col gap-1.5 pt-1 border-t border-slate-800/80">
+          <span className="text-[11px] font-medium text-slate-300">
+            Foco Técnico Rápido:
           </span>
 
-          <div className="grid grid-cols-1 gap-2">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
             {QUICK_SUPPORT_BUTTONS.map((btn) => {
               const isSelected = activeFocusTopic === btn.focusPrompt;
               return (
@@ -175,19 +174,15 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
                   type="button"
                   disabled={isAnalyzing}
                   onClick={() => handleQuickButtonClick(btn)}
-                  className={`w-full text-left px-3 py-2 rounded-md border text-xs font-medium transition-colors flex items-center justify-between gap-2 cursor-pointer disabled:opacity-50 ${
+                  title={btn.label}
+                  className={`w-full text-left px-2.5 py-2 rounded-md border text-xs font-medium transition-colors flex items-center gap-2 cursor-pointer disabled:opacity-50 ${
                     isSelected
                       ? 'bg-sky-500/15 border-sky-500/50 text-sky-200'
                       : 'bg-[#0B111E] border-slate-800 hover:border-slate-700 text-slate-200 hover:bg-slate-800/70'
                   }`}
                 >
-                  <div className="flex items-center gap-2 min-w-0">
-                    {btn.icon}
-                    <span className="truncate">{btn.label}</span>
-                  </div>
-                  <span className="text-[11px] font-mono text-slate-400 shrink-0">
-                    {isSelected ? 'Ativo' : 'Consultar'}
-                  </span>
+                  {btn.icon}
+                  <span className="truncate text-[11px]">{btn.label}</span>
                 </button>
               );
             })}
@@ -197,15 +192,15 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
         <button
           type="submit"
           disabled={isAnalyzing || (!query.trim() && !activeFocusTopic)}
-          className="mt-1 w-full py-2.5 px-4 bg-sky-600 hover:bg-sky-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-medium text-xs rounded-md transition-colors flex items-center justify-center gap-2 cursor-pointer whitespace-nowrap shrink-0"
+          className="w-full py-2.5 px-4 bg-sky-600 hover:bg-sky-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-medium text-xs rounded-md transition-colors flex items-center justify-center gap-2 cursor-pointer whitespace-nowrap shrink-0"
         >
           <Send className="w-3.5 h-3.5" />
           <span>
             {isAnalyzing
               ? 'Varrendo Diagramas (/EL, /RB, /ME, /RM)...'
               : hasPreviousTurns
-              ? 'Executar Nova Consulta na Sequência'
-              : 'Executar Diagnóstico Eletromecânico'}
+                ? 'Executar Nova Consulta na Sequência'
+                : 'Executar Diagnóstico Eletromecânico'}
           </span>
         </button>
       </form>
