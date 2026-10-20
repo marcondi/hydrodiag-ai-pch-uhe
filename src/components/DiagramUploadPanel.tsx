@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   FileText,
   Image as ImageIcon,
@@ -65,6 +65,24 @@ export const DiagramUploadPanel: React.FC<DiagramUploadPanelProps> = ({
   const [seqNote, setSeqNote] = useState('');
   const [previewAttachment, setPreviewAttachment] =
     useState<DiagramAttachment | null>(null);
+
+  useEffect(() => {
+    if (!sequenceModalOpen && !previewAttachment) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' || e.key === 'Esc') {
+        e.preventDefault();
+        if (previewAttachment) {
+          setPreviewAttachment(null);
+        } else if (sequenceModalOpen) {
+          setSequenceModalOpen(false);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown, true);
+    };
+  }, [sequenceModalOpen, previewAttachment, setSequenceModalOpen]);
 
   const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();

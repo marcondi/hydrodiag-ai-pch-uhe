@@ -193,11 +193,18 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
         setIsPlusMenuOpen(false);
       }
     };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' || event.key === 'Esc') {
+        setIsPlusMenuOpen(false);
+      }
+    };
     if (isPlusMenuOpen) {
       document.addEventListener('mousedown', handleClickOutside);
+      window.addEventListener('keydown', handleKeyDown, true);
     }
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
+      window.removeEventListener('keydown', handleKeyDown, true);
     };
   }, [isPlusMenuOpen]);
 

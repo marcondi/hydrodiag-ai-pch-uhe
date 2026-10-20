@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   FileText,
   ChevronLeft,
@@ -35,6 +35,9 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
   onAskAboutCurrentPage,
   onRequestReupload,
 }) => {
+  const drawerRef = useRef<HTMLElement | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+
   const pdfAttachments = attachments.filter(
     (a) =>
       a.mimeType === 'application/pdf' ||
@@ -55,6 +58,61 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [isLoadingPage, setIsLoadingPage] = useState<boolean>(false);
   const [pageError, setPageError] = useState<string | null>(null);
+
+  // Close drawer with ESC key (and navigate pages with ArrowLeft / ArrowRight when not typing in input)
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const focusTimer = setTimeout(() => {
+      drawerRef.current?.focus({ preventScroll: true });
+    }, 30);
+
+    // Periodically reclaim keyboard focus if Chrome's PDF plugin inside the iframe captures it on click
+    const focusGuardInterval = setInterval(() => {
+      if (
+        iframeRef.current &&
+        document.activeElement === iframeRef.current
+      ) {
+        drawerRef.current?.focus({ preventScroll: true });
+      }
+    }, 250);
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' || e.key === 'Esc') {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+        return;
+      }
+
+      const activeTag = document.activeElement?.tagName.toLowerCase();
+      const isTyping =
+        activeTag === 'input' ||
+        activeTag === 'textarea' ||
+        activeTag === 'select';
+
+      if (!isTyping && !isLoadingPage) {
+        if (e.key === 'ArrowLeft' && currentPage > 1) {
+          e.preventDefault();
+          const prev = Math.max(1, currentPage - 1);
+          setCurrentPage(prev);
+          setPageInput(String(prev));
+        } else if (e.key === 'ArrowRight' && currentPage < totalPages) {
+          e.preventDefault();
+          const next = Math.min(totalPages, currentPage + 1);
+          setCurrentPage(next);
+          setPageInput(String(next));
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => {
+      clearTimeout(focusTimer);
+      clearInterval(focusGuardInterval);
+      window.removeEventListener('keydown', handleKeyDown, true);
+    };
+  }, [isOpen, onClose, currentPage, totalPages, isLoadingPage]);
 
   useEffect(() => {
     if (isOpen) {
@@ -183,8 +241,19 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
 
       {/* Slide-over Inspector Panel */}
       <aside
+        ref={drawerRef}
+        tabIndex={-1}
+        onMouseMove={() => {
+          // If Chrome's PDF plugin inside the iframe stole keyboard focus, restore focus to the drawer so ESC always works immediately
+          if (
+            document.activeElement &&
+            document.activeElement === iframeRef.current
+          ) {
+            drawerRef.current?.focus();
+          }
+        }}
         aria-label="Visualizador Interativo de Folha do PDF (Deep-Link)"
-        className="w-full max-w-4xl bg-[#0B111E] border-l border-slate-800 h-full flex flex-col shadow-2xl"
+        className="w-full max-w-4xl bg-[#0B111E] border-l border-slate-800 h-full flex flex-col shadow-2xl focus:outline-none"
       >
         {/* Top Control Bar */}
         <div className="px-4 py-3 bg-[#111827] border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 shrink-0">
@@ -237,7 +306,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                 disabled={currentPage <= 1 || isLoadingPage}
                 onClick={() => handleGoToPage(currentPage - 1)}
                 className="p-1 text-slate-300 hover:text-white hover:bg-slate-800 disabled:opacity-40 rounded cursor-pointer"
-                title="Página Anterior"
+                title="Página Anterior (Seta Esquerda)"
               >
                 <ChevronLeft className="w-4 h-4" />
               </button>
@@ -265,7 +334,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                 disabled={currentPage >= totalPages || isLoadingPage}
                 onClick={() => handleGoToPage(currentPage + 1)}
                 className="p-1 text-slate-300 hover:text-white hover:bg-slate-800 disabled:opacity-40 rounded cursor-pointer"
-                title="Próxima Página"
+                title="Próxima Página (Seta Direita)"
               >
                 <ChevronRight className="w-4 h-4" />
               </button>
@@ -301,9 +370,10 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-md transition-colors cursor-pointer"
-              title="Fechar Inspetor (Esc)"
+              className="px-2 py-1.5 text-slate-300 hover:text-white bg-slate-800/80 hover:bg-rose-600/30 border border-slate-700 hover:border-rose-500/50 rounded-md transition-colors cursor-pointer flex items-center gap-1"
+              title="Fechar Inspetor (Tecla Esc)"
             >
+              <span className="text-[10px] font-mono text-slate-400">ESC</span>
               <X className="w-4 h-4" />
             </button>
           </div>
@@ -353,9 +423,27 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
             <div className="flex-1 flex flex-col min-h-0 rounded-lg overflow-hidden border border-slate-800 bg-slate-950">
               {activeAttachment?.mimeType === 'application/pdf' ? (
                 <iframe
+                  ref={iframeRef}
                   key={`${activeAttachment.id}_p_${currentPage}`}
                   title={`Página ${currentPage} - ${activeAttachment.name}`}
                   src={`${blobUrl}#toolbar=1&navpanes=0&view=FitH`}
+                  onLoad={() => {
+                    drawerRef.current?.focus();
+                    try {
+                      iframeRef.current?.contentWindow?.addEventListener(
+                        'keydown',
+                        (ev: KeyboardEvent) => {
+                          if (ev.key === 'Escape' || ev.key === 'Esc') {
+                            ev.preventDefault();
+                            onClose();
+                          }
+                        },
+                        true
+                      );
+                    } catch {
+                      // Ignore cross-context restriction if browser PDF plugin isolates contentWindow
+                    }
+                  }}
                   className="w-full h-full flex-1 border-0"
                 />
               ) : (
