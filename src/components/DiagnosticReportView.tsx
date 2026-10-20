@@ -20,6 +20,7 @@ import {
   InvestigationStatus,
 } from '../types';
 import { FaultChatPanel } from './FaultChatPanel';
+import { formatTechnicalSymbols } from '../utils/pdfClientEngine';
 
 interface DiagnosticReportViewProps {
   turns: DiagnosticTurn[];
@@ -73,7 +74,9 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
 
   const handleCopyMarkdown = async (turn: DiagnosticTurn) => {
     try {
-      await navigator.clipboard.writeText(turn.markdownResponse);
+      await navigator.clipboard.writeText(
+        formatTechnicalSymbols(turn.markdownResponse)
+      );
       setCopiedTurnId(turn.id);
       setTimeout(() => setCopiedTurnId(null), 2000);
     } catch {
@@ -411,7 +414,7 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
                 ),
               }}
             >
-              {activeTurn.markdownResponse}
+              {formatTechnicalSymbols(activeTurn.markdownResponse)}
             </ReactMarkdown>
           </div>
 
