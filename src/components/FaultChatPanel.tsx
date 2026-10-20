@@ -26,7 +26,10 @@ import {
   DiagramCategoryTag,
   FaultChatMessage,
 } from '../types';
-import { formatTechnicalSymbols } from '../utils/pdfClientEngine';
+import {
+  formatTechnicalSymbols,
+  linkifyPdfPageReferences,
+} from '../utils/pdfClientEngine';
 
 interface FaultChatPanelProps {
   alarmTitle: string;
@@ -38,6 +41,7 @@ interface FaultChatPanelProps {
   isSending: boolean;
   chatProgressStep?: string;
   onOpenSequenceUpload?: () => void;
+  onOpenPdfDeepLink?: (pageNumber: number) => void;
   fillHeight?: boolean;
 }
 
@@ -162,6 +166,7 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
   isSending,
   chatProgressStep,
   onOpenSequenceUpload,
+  onOpenPdfDeepLink,
   fillHeight = false,
 }) => {
   const [inputText, setInputText] = useState('');
@@ -550,9 +555,44 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
                               {children}
                             </code>
                           ),
+                          a: ({ href, children }) => {
+                            if (href && href.startsWith('#pdf-page-')) {
+                              const pageNum = parseInt(
+                                href.replace('#pdf-page-', ''),
+                                10
+                              );
+                              return (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (onOpenPdfDeepLink && !isNaN(pageNum)) {
+                                      onOpenPdfDeepLink(pageNum);
+                                    }
+                                  }}
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 mx-0.5 rounded bg-sky-500/15 hover:bg-sky-500/30 border border-sky-500/40 text-sky-300 font-mono text-xs tabular-nums transition-colors cursor-pointer align-baseline"
+                                  title={`Abrir Inspetor Deep-Link na Página ${pageNum} do PDF`}
+                                >
+                                  <FileSearch className="w-3 h-3 text-sky-400 shrink-0" />
+                                  <span>{children}</span>
+                                </button>
+                              );
+                            }
+                            return (
+                              <a
+                                href={href}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-sky-400 underline"
+                              >
+                                {children}
+                              </a>
+                            );
+                          },
                         }}
                       >
-                        {formatTechnicalSymbols(msg.content)}
+                        {linkifyPdfPageReferences(
+                          formatTechnicalSymbols(msg.content)
+                        )}
                       </ReactMarkdown>
                     </div>
                   )}
@@ -560,9 +600,22 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
                   {!isUser &&
                     msg.inspectedPages &&
                     msg.inspectedPages.length > 0 && (
-                      <div className="mt-3 pt-2 border-t border-slate-800/80 text-[11px] font-mono tabular-nums text-slate-400">
-                        Páginas do PDF inspecionadas nesta resposta:{' '}
-                        {msg.inspectedPages.join(', ')}
+                      <div className="mt-3 pt-2 border-t border-slate-800/80 flex flex-wrap items-center gap-1.5 text-[11px] font-mono tabular-nums text-slate-400">
+                        <span>Páginas inspecionadas (clique para abrir):</span>
+                        {msg.inspectedPages.map((pg) => (
+                          <button
+                            key={pg}
+                            type="button"
+                            onClick={() =>
+                              onOpenPdfDeepLink && onOpenPdfDeepLink(pg)
+                            }
+                            className="px-2 py-0.5 rounded bg-slate-800 hover:bg-sky-500/20 border border-slate-700 hover:border-sky-500/40 text-sky-300 transition-colors cursor-pointer flex items-center gap-1"
+                            title={`Abrir Página ${pg} do PDF no Inspetor Interativo`}
+                          >
+                            <FileText className="w-3 h-3 text-sky-400" />
+                            <span>Pág. {pg}</span>
+                          </button>
+                        ))}
                       </div>
                     )}
                 </div>
