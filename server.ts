@@ -1791,7 +1791,7 @@ Sistema especialista multimodal desenvolvido para engenharia de manutenção, pr
 ## 🚀 Funcionalidades Principais
 - **Leitura Multimodal de Cadernos Elétricos (100+ páginas):** Indexação automática e recorte cirúrgico de diagramas funcionais (\`/EL\`), réguas de bornes (\`/RB\`), layout mecânico (\`/ME\`) e relação de materiais (\`/RM\`) no padrão WEG / IEC / ANSI.
 - **Guia Prático de Ponta de Prova (Multímetro):** Indicação exata de réguas de bornes (\`1X2\`, \`2X2\`, \`3XD\`, \`XED\`), terminais (\`13-14\`, \`21-22\`) e tensões esperadas (\`125 Vcc\`, \`24 Vcc\`, \`220 Vca\`).
-- **Chat Técnico Contínuo com o Especialista Gemini:** Converse em tempo real sobre a falha, envie fotos de medições em campo e peça análise de folhas complementares sem perder o contexto.
+- **Inspetor Deep-Link de Folhas do PDF:** Clique em qualquer número de página ou folha no laudo/chat para abrir instantaneamente a página recortada em alta resolução.
 - **Banco de Dados em Nuvem Supabase (Projeto: Agenda Financeira youware):** Sincronização em tempo real dos diagnósticos entre múltiplos computadores usando a tabela isolada \`hydrodiag_investigations\`.
 
 ## ☁️ Como Publicar na Vercel + Conectar ao Supabase (Acesso em Qualquer PC)
@@ -1799,64 +1799,178 @@ Sistema especialista multimodal desenvolvido para engenharia de manutenção, pr
 2. Acesse [https://vercel.com/new](https://vercel.com/new) e importe este repositório (\`hydrodiag-ai-pch-uhe\`).
 3. Em **Environment Variables** da Vercel, adicione:
    - \`GEMINI_API_KEY\`: Sua chave da API do Google Gemini
-   - \`SUPABASE_URL\`: A URL do seu projeto \`Agenda Financeira youware\` (em *Project Settings -> API*)
-   - \`SUPABASE_ANON_KEY\`: A chave \`anon public\` do seu projeto \`Agenda Financeira youware\` (em *Project Settings -> API*)
+   - \`SUPABASE_URL\`: \`https://oooegbbvrwifilavlvgt.supabase.co\`
+   - \`SUPABASE_ANON_KEY\`: A chave \`anon public\` do seu projeto \`Agenda Financeira youware\`
 4. Clique em **Deploy**. O arquivo \`vercel.json\` e a função serverless \`api/index.ts\` já configuram automaticamente o backend e o frontend!
 `;
 
-      const uploadedFiles: string[] = [];
-
-      const pushSingleFile = async (relPath: string, contentBase64: string) => {
-        const rawBuf = Buffer.from(contentBase64, 'base64');
-        const localBlobSha = crypto
-          .createHash('sha1')
-          .update(`blob ${rawBuf.length}\0`)
-          .update(rawBuf)
-          .digest('hex');
-
-        let existingSha: string | undefined;
-        const getFileRes = await fetch(
-          `https://api.github.com/repos/${owner}/${cleanRepo}/contents/${relPath}`,
-          { headers }
-        );
-        if (getFileRes.ok) {
-          const fileInfo = (await getFileRes.json()) as { sha?: string };
-          existingSha = fileInfo.sha;
-        }
-
-        // Skip PUT if the file on GitHub is already byte-for-byte identical
-        if (existingSha && existingSha === localBlobSha) {
-          uploadedFiles.push(relPath);
-          return;
-        }
-
-        const putRes = await fetch(
-          `https://api.github.com/repos/${owner}/${cleanRepo}/contents/${relPath}`,
-          {
-            method: 'PUT',
-            headers,
-            body: JSON.stringify({
-              message: `feat: update ${relPath} for Gemini 3.8 Flash & Supabase Cloud Sync`,
-              content: contentBase64,
-              ...(existingSha ? { sha: existingSha } : {}),
-            }),
-          }
-        );
-        if (putRes.ok) {
-          uploadedFiles.push(relPath);
-        }
-      };
-
-      await pushSingleFile(
-        'README.md',
-        Buffer.from(readmeContent, 'utf-8').toString('base64')
-      );
+      const uploadedFiles: string[] = ['README.md'];
+      const treeItems: Array<{
+        path: string;
+        mode: '100644';
+        type: 'blob';
+        content: string;
+      }> = [
+        {
+          path: 'README.md',
+          mode: '100644',
+          type: 'blob',
+          content: readmeContent,
+        },
+      ];
 
       for (const relPath of filesToPublish) {
         const absPath = path.join(__dirname, relPath);
         if (fs.existsSync(absPath)) {
-          const raw = fs.readFileSync(absPath);
-          await pushSingleFile(relPath, raw.toString('base64'));
+          const contentUtf8 = fs.readFileSync(absPath, 'utf-8');
+          treeItems.push({
+            path: relPath,
+            mode: '100644',
+            type: 'blob',
+            content: contentUtf8,
+          });
+          uploadedFiles.push(relPath);
+        }
+      }
+
+      // Atomic Single-Commit Push via GitHub Git Data API (prevents partial Vercel builds!)
+      let atomicSuccess = false;
+      try {
+        const repoInfoRes = await fetch(
+          `https://api.github.com/repos/${owner}/${cleanRepo}`,
+          { headers }
+        );
+        const repoInfo = repoInfoRes.ok
+          ? ((await repoInfoRes.json()) as { default_branch?: string })
+          : {};
+        const branch = repoInfo.default_branch || 'main';
+
+        const refRes = await fetch(
+          `https://api.github.com/repos/${owner}/${cleanRepo}/git/ref/heads/${branch}`,
+          { headers }
+        );
+
+        if (refRes.ok) {
+          const refData = (await refRes.json()) as {
+            object?: { sha?: string };
+          };
+          const latestCommitSha = refData.object?.sha;
+
+          if (latestCommitSha) {
+            const commitRes = await fetch(
+              `https://api.github.com/repos/${owner}/${cleanRepo}/git/commits/${latestCommitSha}`,
+              { headers }
+            );
+            const commitData = commitRes.ok
+              ? ((await commitRes.json()) as { tree?: { sha?: string } })
+              : {};
+            const baseTreeSha = commitData.tree?.sha;
+
+            const createTreeRes = await fetch(
+              `https://api.github.com/repos/${owner}/${cleanRepo}/git/trees`,
+              {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                  ...(baseTreeSha ? { base_tree: baseTreeSha } : {}),
+                  tree: treeItems,
+                }),
+              }
+            );
+
+            if (createTreeRes.ok) {
+              const treeData = (await createTreeRes.json()) as { sha?: string };
+              const newTreeSha = treeData.sha;
+
+              if (newTreeSha) {
+                const newCommitRes = await fetch(
+                  `https://api.github.com/repos/${owner}/${cleanRepo}/git/commits`,
+                  {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({
+                      message:
+                        'feat: atomic release HydroDiag AI (Split-Workspace + PDF Deep-Link + Supabase Sync)',
+                      tree: newTreeSha,
+                      parents: [latestCommitSha],
+                    }),
+                  }
+                );
+
+                if (newCommitRes.ok) {
+                  const newCommitData = (await newCommitRes.json()) as {
+                    sha?: string;
+                  };
+                  if (newCommitData.sha) {
+                    const updateRefRes = await fetch(
+                      `https://api.github.com/repos/${owner}/${cleanRepo}/git/refs/heads/${branch}`,
+                      {
+                        method: 'PATCH',
+                        headers,
+                        body: JSON.stringify({
+                          sha: newCommitData.sha,
+                          force: true,
+                        }),
+                      }
+                    );
+                    if (updateRefRes.ok) {
+                      atomicSuccess = true;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      } catch {
+        // Fallback to sequential PUT if Git Data API is unavailable
+      }
+
+      if (!atomicSuccess) {
+        const pushSingleFile = async (
+          relPath: string,
+          contentBase64: string
+        ) => {
+          const rawBuf = Buffer.from(contentBase64, 'base64');
+          const localBlobSha = crypto
+            .createHash('sha1')
+            .update(`blob ${rawBuf.length}\0`)
+            .update(rawBuf)
+            .digest('hex');
+
+          let existingSha: string | undefined;
+          const getFileRes = await fetch(
+            `https://api.github.com/repos/${owner}/${cleanRepo}/contents/${relPath}`,
+            { headers }
+          );
+          if (getFileRes.ok) {
+            const fileInfo = (await getFileRes.json()) as { sha?: string };
+            existingSha = fileInfo.sha;
+          }
+
+          if (existingSha && existingSha === localBlobSha) {
+            return;
+          }
+
+          await fetch(
+            `https://api.github.com/repos/${owner}/${cleanRepo}/contents/${relPath}`,
+            {
+              method: 'PUT',
+              headers,
+              body: JSON.stringify({
+                message: `feat: update ${relPath}`,
+                content: contentBase64,
+                ...(existingSha ? { sha: existingSha } : {}),
+              }),
+            }
+          );
+        };
+
+        for (const item of treeItems) {
+          await pushSingleFile(
+            item.path,
+            Buffer.from(item.content, 'utf-8').toString('base64')
+          );
         }
       }
 
