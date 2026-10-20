@@ -19,6 +19,8 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   BookOpen,
+  Activity,
+  Zap,
 } from 'lucide-react';
 import {
   ChatAttachmentPayload,
@@ -29,6 +31,7 @@ import {
 import { FaultChatPanel } from './FaultChatPanel';
 import { PdfDeepLinkDrawer } from './PdfDeepLinkDrawer';
 import {
+  extractProbeSummaryFromMarkdown,
   formatTechnicalSymbols,
   linkifyPdfPageReferences,
 } from '../utils/pdfClientEngine';
@@ -114,44 +117,139 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
     window.print();
   };
 
-  const renderReportPaneContent = (turn: DiagnosticTurn) => (
-    <div className="flex flex-col gap-5">
-      {/* Active Query Context Summary Box */}
-      <div className="p-3.5 rounded-md bg-[#0B111E] border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-        <div className="space-y-1 min-w-0">
-          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400 font-mono tabular-nums">
-            <Clock className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-            <span>{new Date(turn.timestamp).toLocaleString('pt-BR')}</span>
-            <span>·</span>
-            <span className="truncate">
-              {turn.attachedFileNames.length > 0
-                ? turn.attachedFileNames.join(', ')
-                : 'Consulta técnica direta'}
-            </span>
+  const renderReportPaneContent = (turn: DiagnosticTurn) => {
+    const probeSummary = extractProbeSummaryFromMarkdown(turn.markdownResponse);
+
+    return (
+      <div className="flex flex-col gap-4">
+        {/* Active Query Context Summary Box */}
+        <div className="p-3 rounded-md bg-[#0B111E] border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+          <div className="space-y-1 min-w-0">
+            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400 font-mono tabular-nums">
+              <Clock className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+              <span>{new Date(turn.timestamp).toLocaleString('pt-BR')}</span>
+              <span>·</span>
+              <span className="truncate">
+                {turn.attachedFileNames.length > 0
+                  ? turn.attachedFileNames.join(', ')
+                  : 'Consulta técnica direta'}
+              </span>
+            </div>
+            <p className="text-sm font-semibold text-slate-100">
+              Alarme / Consulta: &quot;{turn.userQuery}&quot;
+            </p>
           </div>
-          <p className="text-sm font-semibold text-slate-100">
-            Alarme / Consulta: &quot;{turn.userQuery}&quot;
-          </p>
+
+          <div className="flex items-center gap-2 shrink-0 no-print">
+            {attachments.length > 0 && (
+              <button
+                type="button"
+                onClick={() =>
+                  handleOpenPdfDeepLink(probeSummary?.locationPage || 1)
+                }
+                className="px-2.5 py-1 rounded bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/40 text-sky-300 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors"
+                title="Abrir Inspetor Interativo de Folhas do PDF"
+              >
+                <BookOpen className="w-3.5 h-3.5 text-sky-400" />
+                <span>Inspetor de Folhas PDF</span>
+              </button>
+            )}
+            <div className="flex items-center gap-1 text-xs text-emerald-400 font-mono">
+              <BookmarkCheck className="w-4 h-4" />
+              <span>Salvo na Nuvem</span>
+            </div>
+          </div>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0 no-print">
-          {attachments.length > 0 && (
-            <button
-              type="button"
-              onClick={() => handleOpenPdfDeepLink(1)}
-              className="px-2.5 py-1 rounded bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/40 text-sky-300 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors"
-              title="Abrir Inspetor Interativo de Folhas do PDF"
-            >
-              <BookOpen className="w-3.5 h-3.5 text-sky-400" />
-              <span>Inspetor de Folhas PDF</span>
-            </button>
-          )}
-          <div className="flex items-center gap-1 text-xs text-emerald-400 font-mono">
-            <BookmarkCheck className="w-4 h-4" />
-            <span>Salvo na Nuvem</span>
+        {/* ITEM 3: PAINEL VISUAL DE "PONTA DE PROVA" (RESUMO RÁPIDO NO TOPO DO LAUDO) */}
+        {probeSummary && (
+          <div
+            aria-label="Painel Visual de Ponta de Prova"
+            className="rounded-lg bg-[#0B111E] border border-slate-800 p-3.5 flex flex-col gap-3"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 pb-2">
+              <div className="flex items-center gap-2">
+                <Activity className="w-4 h-4 text-sky-400 shrink-0" />
+                <span className="text-xs font-semibold text-slate-100">
+                  Painel Rápido de Ponta de Prova (Multímetro em Campo)
+                </span>
+                <span aria-hidden="true" className="text-slate-600">
+                  ·
+                </span>
+                <span className="text-xs font-mono tabular-nums text-sky-300">
+                  Régua / Bornes: {probeSummary.terminalStrip}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-mono tabular-nums text-slate-400">
+                  Terminais: {probeSummary.contactsOrComponent}
+                </span>
+                {probeSummary.locationPage && attachments.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleOpenPdfDeepLink(probeSummary.locationPage!)
+                    }
+                    className="px-2 py-0.5 rounded bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/40 text-sky-300 font-mono text-[11px] tabular-nums flex items-center gap-1 cursor-pointer transition-colors no-print"
+                    title={`Abrir ${probeSummary.locationLabel} no Inspetor Deep-Link`}
+                  >
+                    <FileSearch className="w-3 h-3 text-sky-400" />
+                    <span>{probeSummary.locationLabel}</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              {/* Ponta de Prova Vermelha (+) */}
+              <div className="p-2.5 rounded-md bg-rose-950/25 border border-rose-800/50 flex flex-col gap-1">
+                <div className="flex items-center justify-between gap-1.5">
+                  <span className="text-[11px] font-mono font-semibold text-rose-300">
+                    PONTA VERMELHA (+)
+                  </span>
+                  <span className="text-[10px] font-mono text-rose-400/90">
+                    Sinal / Positivo
+                  </span>
+                </div>
+                <p className="text-xs font-mono tabular-nums text-slate-100 leading-snug">
+                  {probeSummary.redProbe}
+                </p>
+              </div>
+
+              {/* Ponta de Prova Preta (-) */}
+              <div className="p-2.5 rounded-md bg-slate-900/90 border border-slate-700/80 flex flex-col gap-1">
+                <div className="flex items-center justify-between gap-1.5">
+                  <span className="text-[11px] font-mono font-semibold text-slate-300">
+                    PONTA PRETA (-)
+                  </span>
+                  <span className="text-[10px] font-mono text-slate-400">
+                    Comum / Referência
+                  </span>
+                </div>
+                <p className="text-xs font-mono tabular-nums text-slate-200 leading-snug">
+                  {probeSummary.blackProbe}
+                </p>
+              </div>
+
+              {/* Leitura Esperada no Multímetro */}
+              <div className="p-2.5 rounded-md bg-emerald-950/25 border border-emerald-800/50 flex flex-col gap-1">
+                <div className="flex items-center justify-between gap-1.5">
+                  <span className="text-[11px] font-mono font-semibold text-emerald-300 flex items-center gap-1">
+                    <Zap className="w-3 h-3 text-amber-400 shrink-0" />
+                    <span>LEITURA ESPERADA</span>
+                  </span>
+                  <span className="text-[10px] font-mono text-emerald-400/90">
+                    Escala Vcc / Vca / Ω
+                  </span>
+                </div>
+                <p className="text-xs font-mono tabular-nums font-semibold text-emerald-200 leading-snug">
+                  {probeSummary.expectedValue}
+                </p>
+              </div>
+            </div>
           </div>
-        </div>
-      </div>
+        )}
 
       {/* Markdown Content with Industrial Styling + Interactive PDF Page Deep-Links */}
       <div className="prose prose-invert max-w-none text-sm leading-relaxed text-slate-200 space-y-4">
@@ -343,7 +441,8 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
         />
       </div>
     </div>
-  );
+    );
+  };
 
   return (
     <section
