@@ -18,6 +18,8 @@ import {
   Compass,
   Telescope,
   ArrowUp,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import {
   ChatAttachmentPayload,
@@ -36,6 +38,7 @@ interface FaultChatPanelProps {
   isSending: boolean;
   chatProgressStep?: string;
   onOpenSequenceUpload?: () => void;
+  fillHeight?: boolean;
 }
 
 const TACTICAL_CHAT_SUGGESTIONS = [
@@ -159,6 +162,7 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
   isSending,
   chatProgressStep,
   onOpenSequenceUpload,
+  fillHeight = false,
 }) => {
   const [inputText, setInputText] = useState('');
   const [attachedFile, setAttachedFile] =
@@ -166,6 +170,9 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isPlusMenuOpen, setIsPlusMenuOpen] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const [showSuggestions, setShowSuggestions] = useState<boolean>(
+    () => messages.length === 0
+  );
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -296,6 +303,7 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
     if (isSending) return;
     const fileToSend = attachedFile || undefined;
     setAttachedFile(null);
+    setShowSuggestions(false);
     await onSendMessage(suggestion, fileToSend);
     setTimeout(() => {
       chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -313,61 +321,95 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
   };
 
   return (
-    <div className="mt-6 border border-sky-500/30 rounded-lg bg-[#0B111E] flex flex-col no-print">
+    <div
+      className={`bg-[#0B111E] flex flex-col no-print ${
+        fillHeight
+          ? 'h-full min-h-0 flex-1'
+          : 'mt-4 border border-sky-500/30 rounded-lg'
+      }`}
+    >
       {/* Header */}
-      <div className="px-5 py-3.5 bg-slate-900/90 border-b border-slate-800 rounded-t-lg flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-md bg-sky-500/15 border border-sky-500/30 flex items-center justify-center text-sky-400">
+      <div
+        className={`px-4 py-2.5 bg-slate-900/90 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2 shrink-0 ${
+          fillHeight ? '' : 'rounded-t-lg'
+        }`}
+      >
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="w-7 h-7 rounded-md bg-sky-500/15 border border-sky-500/30 flex items-center justify-center text-sky-400 shrink-0">
             <MessageSquare className="w-4 h-4" />
           </div>
-          <div>
-            <h3 className="text-sm font-semibold text-slate-100 flex items-center gap-2">
-              <span>
-                Engenheiro Eletricista Sênior — Instalações Hidrelétricas (PCH / UHE)
-              </span>
+          <div className="min-w-0">
+            <h3 className="text-xs sm:text-sm font-semibold text-slate-100 truncate">
+              Eng. Eletricista Sênior — Chat Técnico em Tempo Real
             </h3>
-            <p className="text-xs text-slate-400">
-              Tomada de decisão técnica em tempo real sobre{' '}
-              <span className="text-sky-300 font-medium">"{alarmTitle}"</span>{' '}
-              • Clique no botão <strong>+</strong> para anexar fotos de campo ou
-              novos diagramas (<code>CLP-SASE</code>, <code>QDCC</code>, <code>PCPG</code>)
+            <p className="text-[11px] text-slate-400 truncate">
+              Alarme:{' '}
+              <span className="text-sky-300 font-medium">
+                &quot;{alarmTitle}&quot;
+              </span>{' '}
+              · Botão <strong>+</strong> anexa PDF ou Foto
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-2.5">
-          <span className="text-xs font-mono tabular-nums text-slate-400">
-            {messages.length}{' '}
-            {messages.length === 1 ? 'interação' : 'interações'}
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => setShowSuggestions((prev) => !prev)}
+            className="px-2.5 py-1 rounded text-[11px] font-medium bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 flex items-center gap-1 cursor-pointer transition-colors"
+          >
+            <Sparkles className="w-3 h-3 text-sky-400" />
+            <span>Perguntas Rápidas</span>
+            {showSuggestions ? (
+              <ChevronUp className="w-3 h-3" />
+            ) : (
+              <ChevronDown className="w-3 h-3" />
+            )}
+          </button>
+
+          <span className="text-[11px] font-mono tabular-nums text-slate-400">
+            {messages.length} msg
           </span>
         </div>
       </div>
 
-      {/* Tactical 1-Click Field Suggestions */}
-      <div className="px-5 py-3 bg-[#111827]/70 border-b border-slate-800/80 flex flex-col gap-2">
-        <div className="flex items-center gap-1.5 text-[11px] font-medium text-sky-300">
-          <Sparkles className="w-3.5 h-3.5" />
-          <span>
-            Perguntas Rápidas de Bancada e Campo (clique para enviar):
-          </span>
-        </div>
-        <div className="flex flex-wrap gap-1.5">
-          {TACTICAL_CHAT_SUGGESTIONS.map((sug) => (
+      {/* Collapsible Tactical 1-Click Field Suggestions */}
+      {showSuggestions && (
+        <div className="px-4 py-2.5 bg-[#111827]/80 border-b border-slate-800/80 flex flex-col gap-1.5 shrink-0">
+          <div className="flex items-center justify-between text-[11px] font-medium text-sky-300">
+            <span>
+              Perguntas Rápidas de Bancada e Campo (clique para enviar):
+            </span>
             <button
-              key={sug}
               type="button"
-              disabled={isSending}
-              onClick={() => handleSuggestionClick(sug)}
-              className="text-left text-xs text-slate-300 hover:text-sky-200 bg-[#0B111E] hover:bg-sky-500/15 border border-slate-800 hover:border-sky-500/40 rounded-md px-2.5 py-1.5 transition-colors cursor-pointer disabled:opacity-50"
+              onClick={() => setShowSuggestions(false)}
+              className="text-slate-400 hover:text-slate-200 text-[10px] cursor-pointer"
             >
-              {sug}
+              Ocultar
             </button>
-          ))}
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-36 overflow-y-auto pr-1">
+            {TACTICAL_CHAT_SUGGESTIONS.map((sug) => (
+              <button
+                key={sug}
+                type="button"
+                disabled={isSending}
+                onClick={() => handleSuggestionClick(sug)}
+                className="text-left text-[11px] text-slate-300 hover:text-sky-200 bg-[#0B111E] hover:bg-sky-500/15 border border-slate-800 hover:border-sky-500/40 rounded px-2.5 py-1.5 transition-colors cursor-pointer disabled:opacity-50 line-clamp-2"
+              >
+                {sug}
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Conversation History Stream */}
-      <div className="p-5 flex flex-col gap-4 max-h-[540px] overflow-y-auto">
+      <div
+        className={`p-4 flex flex-col gap-4 overflow-y-auto ${
+          fillHeight ? 'flex-1 min-h-0' : 'max-h-[520px]'
+        }`}
+      >
         {messages.length === 0 && !isSending ? (
           <div className="py-6 text-center space-y-2">
             <p className="text-xs text-slate-300 font-medium">
