@@ -24,6 +24,7 @@ import {
   DiagramCategoryTag,
   FaultChatMessage,
 } from '../types';
+import { formatTechnicalSymbols } from '../utils/pdfClientEngine';
 
 interface FaultChatPanelProps {
   alarmTitle: string;
@@ -38,11 +39,12 @@ interface FaultChatPanelProps {
 }
 
 const TACTICAL_CHAT_SUGGESTIONS = [
-  'Analise detalhadamente a folha complementar citada na seção 5 do diagnóstico',
-  'Medi 0 Vcc no borne indicado pelo guia. Qual o ponto a montante para testar agora?',
-  'A tensão no borne está normal, mas o alarme persiste no supervisório. Como validar o cartão XED/CLP?',
-  'Detalhe os terminais da bobina (A1-A2) e contatos NA/NF deste circuito na folha funcional',
-  'Gere um resumo executivo desta falha e da solução para registro na Ordem de Serviço (OS)',
+  'Monte uma árvore de decisão passo a passo para isolar este defeito sem risco de Trip (86/52G) na Unidade Geradora',
+  'Medi 0 Vcc no borne indicado. Qual a sua decisão técnica sobre o trecho a montante e qual borne medir agora?',
+  'Como testar e isolar possível fuga à terra ou curto à massa neste circuito de comando 125 Vcc / 24 Vcc?',
+  'A tensão chega no borne, mas o supervisório não atua. Como validar o cartão XED/CLP e o relé auxiliar (A1-A2)?',
+  'Analise a interligação entre o painel atual e os serviços auxiliares (QDCC/QDSA/UHLM) e indique a manobra segura',
+  'Emita o parecer técnico de Engenharia Elétrica com causa raiz e solução para fechamento da Ordem de Serviço (OS)',
 ];
 
 function inferCategoryFromFilename(filename: string): DiagramCategoryTag {
@@ -302,7 +304,7 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
 
   const handleCopy = async (msg: FaultChatMessage) => {
     try {
-      await navigator.clipboard.writeText(msg.content);
+      await navigator.clipboard.writeText(formatTechnicalSymbols(msg.content));
       setCopiedId(msg.id);
       setTimeout(() => setCopiedId(null), 2000);
     } catch {
@@ -321,14 +323,14 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
           <div>
             <h3 className="text-sm font-semibold text-slate-100 flex items-center gap-2">
               <span>
-                Chat Técnico Interativo com Especialista Gemini (Tempo Real)
+                Engenheiro Eletricista Sênior — Instalações Hidrelétricas (PCH / UHE)
               </span>
             </h3>
             <p className="text-xs text-slate-400">
-              Continue perguntando sobre{' '}
+              Tomada de decisão técnica em tempo real sobre{' '}
               <span className="text-sky-300 font-medium">"{alarmTitle}"</span>{' '}
-              ou clique no botão <strong>+</strong> abaixo para adicionar fotos e
-              novos PDFs (ex: <code>CLP-SASE</code>, <code>QDCC</code>)
+              • Clique no botão <strong>+</strong> para anexar fotos de campo ou
+              novos diagramas (<code>CLP-SASE</code>, <code>QDCC</code>, <code>PCPG</code>)
             </p>
           </div>
         </div>
@@ -407,7 +409,7 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
                         <>
                           <Bot className="w-3.5 h-3.5 text-emerald-400" />
                           <span className="text-emerald-300">
-                            Engenheiro Especialista HydroDiag AI
+                            Eng. Eletricista Sênior (PCH/UHE)
                           </span>
                         </>
                       )}
@@ -469,7 +471,7 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
 
                   {isUser ? (
                     <p className="text-sm text-slate-100 whitespace-pre-wrap leading-relaxed">
-                      {msg.content}
+                      {formatTechnicalSymbols(msg.content)}
                     </p>
                   ) : (
                     <div className="prose prose-invert max-w-none text-sm leading-relaxed space-y-2.5">
@@ -508,7 +510,7 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
                           ),
                         }}
                       >
-                        {msg.content}
+                        {formatTechnicalSymbols(msg.content)}
                       </ReactMarkdown>
                     </div>
                   )}
