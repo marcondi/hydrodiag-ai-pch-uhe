@@ -21,6 +21,8 @@ import {
   CheckCircle2,
   Clock,
   Download,
+  Database,
+  RefreshCw,
 } from 'lucide-react';
 import {
   ChatAttachmentPayload,
@@ -190,11 +192,17 @@ export default function App() {
   const [savedInvestigations, setSavedInvestigations] = useState<
     SavedInvestigationSummary[]
   >([]);
+  const [cloudStorageMode, setCloudStorageMode] = useState<
+    'supabase' | 'local'
+  >('local');
+  const [isSyncingCloud, setIsSyncingCloud] = useState<boolean>(false);
 
-  // Load saved investigations from both Server DB (/api/history) and localStorage on mount
-  useEffect(() => {
-    const loadHistory = async () => {
-      let localItems: SavedInvestigationSummary[] = [];
+  const handleSyncHistoryWithCloud = async (
+    itemsOverride?: SavedInvestigationSummary[]
+  ) => {
+    setIsSyncingCloud(true);
+    let localItems: SavedInvestigationSummary[] = itemsOverride || [];
+    if (!itemsOverride) {
       try {
         const raw =
           localStorage.getItem(STORAGE_KEY) ||
@@ -212,33 +220,45 @@ export default function App() {
       } catch {
         // Ignore storage read errors
       }
+    }
 
-      try {
-        const res = await fetch('/api/history');
-        if (res.ok) {
-          const data = await res.json();
-          if (Array.isArray(data.items) && data.items.length > 0) {
-            setSavedInvestigations(data.items);
-            return;
+    try {
+      const res = await fetch('/api/history/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: localItems }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.storageMode === 'supabase') {
+          setCloudStorageMode('supabase');
+        } else {
+          setCloudStorageMode('local');
+        }
+        if (Array.isArray(data.items)) {
+          setSavedInvestigations(data.items);
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(data.items));
+          } catch {
+            // Ignore
           }
+          setIsSyncingCloud(false);
+          return;
         }
-      } catch {
-        // Fallback to localItems
       }
+    } catch {
+      // Fallback to local
+    }
 
-      if (localItems.length > 0) {
-        setSavedInvestigations(localItems);
-        // Sync local items to server DB
-        for (const item of localItems.slice(0, 20)) {
-          fetch('/api/history', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(item),
-          }).catch(() => {});
-        }
-      }
-    };
-    loadHistory();
+    if (localItems.length > 0) {
+      setSavedInvestigations(localItems);
+    }
+    setIsSyncingCloud(false);
+  };
+
+  // Load and sync saved investigations between LocalStorage and Supabase Cloud ("Agenda Financeira youware") on mount
+  useEffect(() => {
+    handleSyncHistoryWithCloud();
   }, []);
 
   // Automatically persist current session to both LocalStorage and Server DB whenever turns/status/notes change
@@ -1259,11 +1279,21 @@ export default function App() {
                 : ''
             }`}
           >
-            Vercel & GitHub
+            Backup, Vercel & GitHub
           </a>
         </nav>
 
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center gap-2.5 shrink-0">
+          <a
+            href="/api/backup/download-zip"
+            download
+            title="Baixar cópia completa do código-fonte em .ZIP"
+            className="px-3.5 py-2 text-xs font-semibold text-emerald-200 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+          >
+            <Download className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Baixar Backup (.ZIP)</span>
+          </a>
+
           <button
             type="button"
             onClick={handleNewInvestigation}
@@ -1330,7 +1360,7 @@ export default function App() {
               : 'text-slate-400'
           }`}
         >
-          Vercel & GitHub
+          Backup & GitHub
         </button>
       </div>
 
@@ -1485,12 +1515,26 @@ export default function App() {
           <section className="bg-[#111827] border border-slate-800 rounded-lg p-6 flex flex-col gap-5">
             <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
               <div>
-                <h2 className="text-base font-semibold text-slate-100 flex items-center gap-2">
-                  <History className="w-4 h-4 text-sky-400" />
-                  <span>
-                    Base de Conhecimento & Histórico de Falhas da Usina
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <h2 className="text-base font-semibold text-slate-100 flex items-center gap-2">
+                    <History className="w-4 h-4 text-sky-400" />
+                    <span>
+                      Base de Conhecimento & Histórico de Falhas da Usina
+                    </span>
+                  </h2>
+                  <span
+                    className={`px-2.5 py-0.5 rounded text-[11px] font-mono border flex items-center gap-1.5 ${
+                      cloudStorageMode === 'supabase'
+                        ? 'bg-emerald-950/50 border-emerald-600/50 text-emerald-300'
+                        : 'bg-sky-950/40 border-sky-700/50 text-sky-300'
+                    }`}
+                  >
+                    <Database className="w-3 h-3" />
+                    {cloudStorageMode === 'supabase'
+                      ? 'Supabase Nuvem: Agenda Financeira youware (Sincronizado)'
+                      : 'Banco Híbrido: Local + Pronto p/ Supabase (Agenda Financeira youware)'}
                   </span>
-                </h2>
+                </div>
                 <p className="text-xs text-slate-400 mt-1">
                   Pesquise por alarme, borne (ex: <code>XED:217</code>), folha (
                   <code>Folha 49</code>), equipamento ou solução aplicada em
@@ -1498,7 +1542,28 @@ export default function App() {
                 </p>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleSyncHistoryWithCloud(savedInvestigations)}
+                  disabled={isSyncingCloud}
+                  className="px-3 py-1.5 text-xs font-medium text-emerald-300 bg-emerald-950/40 hover:bg-emerald-900/50 border border-emerald-700/50 rounded-md flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RefreshCw
+                    className={`w-3.5 h-3.5 ${isSyncingCloud ? 'animate-spin' : ''}`}
+                  />
+                  <span>Sincronizar Nuvem (Outros PCs)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveNavTab('github')}
+                  className="px-3 py-1.5 text-xs font-medium text-sky-300 bg-sky-950/40 hover:bg-sky-900/50 border border-sky-700/50 rounded-md flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Database className="w-3.5 h-3.5" />
+                  <span>Script SQL Supabase</span>
+                </button>
+
                 <button
                   type="button"
                   onClick={handleExportHistoryJson}
