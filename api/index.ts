@@ -3,6 +3,7 @@ import express from 'express';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import zlib from 'zlib';
 import { PDFDocument } from 'pdf-lib';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 
@@ -170,6 +171,199 @@ function writeHistoryDb(items: unknown[]) {
     fs.writeFileSync(HISTORY_DB_PATH, JSON.stringify(items, null, 2), 'utf-8');
   } catch {
     // Ignore
+  }
+}
+
+// ============================================================================
+// SUPABASE CLOUD PERSISTENCE ENGINE (Project: "Agenda Financeira youware")
+// Table: public.hydrodiag_investigations
+// ============================================================================
+const SUPABASE_TABLE = 'hydrodiag_investigations';
+const SUPABASE_PROJECT_LABEL = 'Agenda Financeira youware';
+
+function normalizeSupabaseUrl(inputUrl: string): string {
+  const trimmed = inputUrl.trim().replace(/\/+$/, '');
+  if (!trimmed || trimmed.includes('SEU_PROJECT_ID')) {
+    return 'https://oooegbbvrwifilavlvgt.supabase.co';
+  }
+  const dashMatch = trimmed.match(
+    /supabase\.com\/dashboard\/project\/([a-z0-9]+)/i
+  );
+  if (dashMatch && dashMatch[1]) {
+    return `https://${dashMatch[1]}.supabase.co`;
+  }
+  if (/^[a-z0-9]{15,30}$/i.test(trimmed)) {
+    return `https://${trimmed}.supabase.co`;
+  }
+  return trimmed;
+}
+
+function getSupabaseConfig(): { url: string; key: string } | null {
+  const rawUrl =
+    process.env.SUPABASE_URL ||
+    process.env.VITE_SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    'https://oooegbbvrwifilavlvgt.supabase.co';
+  const rawKey =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    process.env.SUPABASE_KEY ||
+    process.env.VITE_SUPABASE_ANON_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    '';
+
+  const url = normalizeSupabaseUrl(rawUrl);
+  const key = rawKey.trim();
+
+  if (!url || !key || key.includes('SUA_CHAVE')) {
+    return null;
+  }
+  return { url, key };
+}
+
+function getSupabaseHeaders(key: string, extra?: Record<string, string>) {
+  return {
+    apikey: key,
+    Authorization: `Bearer ${key}`,
+    'Content-Type': 'application/json',
+    ...extra,
+  };
+}
+
+function investigationToSupabaseRow(record: Record<string, unknown>) {
+  const nowIso = new Date().toISOString();
+  return {
+    id: String(record.id || `inv_${Date.now()}`),
+    title: String(record.title || 'Diagnóstico Eletromecânico PCH/UHE'),
+    status: String(record.status || 'em_investigacao'),
+    is_favorite: Boolean(record.isFavorite),
+    field_resolution_note: String(record.fieldResolutionNote || ''),
+    created_at: String(record.createdAt || nowIso),
+    updated_at: String(record.updatedAt || nowIso),
+    attachment_metadata: Array.isArray(record.attachmentMetadata)
+      ? record.attachmentMetadata
+      : [],
+    turns: Array.isArray(record.turns) ? record.turns : [],
+    raw_payload: record,
+  };
+}
+
+function supabaseRowToInvestigation(
+  row: Record<string, unknown>
+): Record<string, unknown> {
+  const rawPayload =
+    row.raw_payload && typeof row.raw_payload === 'object'
+      ? (row.raw_payload as Record<string, unknown>)
+      : {};
+
+  return {
+    ...rawPayload,
+    id: String(row.id || rawPayload.id || ''),
+    title: String(
+      row.title || rawPayload.title || 'Diagnóstico Eletromecânico PCH/UHE'
+    ),
+    status: String(row.status || rawPayload.status || 'em_investigacao'),
+    isFavorite:
+      typeof row.is_favorite === 'boolean'
+        ? row.is_favorite
+        : Boolean(rawPayload.isFavorite),
+    fieldResolutionNote: String(
+      row.field_resolution_note ?? rawPayload.fieldResolutionNote ?? ''
+    ),
+    createdAt: String(
+      row.created_at || rawPayload.createdAt || new Date().toISOString()
+    ),
+    updatedAt: String(
+      row.updated_at || rawPayload.updatedAt || new Date().toISOString()
+    ),
+    attachmentMetadata: Array.isArray(row.attachment_metadata)
+      ? row.attachment_metadata
+      : Array.isArray(rawPayload.attachmentMetadata)
+        ? rawPayload.attachmentMetadata
+        : [],
+    turns: Array.isArray(row.turns)
+      ? row.turns
+      : Array.isArray(rawPayload.turns)
+        ? rawPayload.turns
+        : [],
+  };
+}
+
+async function fetchHistoryFromSupabase(): Promise<{
+  ok: boolean;
+  items: Array<Record<string, unknown>>;
+  error?: string;
+}> {
+  const cfg = getSupabaseConfig();
+  if (!cfg) return { ok: false, items: [] };
+
+  try {
+    const res = await fetch(
+      `${cfg.url}/rest/v1/${SUPABASE_TABLE}?select=*&order=updated_at.desc&limit=100`,
+      {
+        method: 'GET',
+        headers: getSupabaseHeaders(cfg.key),
+      }
+    );
+
+    if (!res.ok) {
+      const errText = await res.text();
+      return { ok: false, items: [], error: errText.slice(0, 200) };
+    }
+
+    const rows = (await res.json()) as Array<Record<string, unknown>>;
+    const items = Array.isArray(rows)
+      ? rows.map(supabaseRowToInvestigation)
+      : [];
+    return { ok: true, items };
+  } catch (err) {
+    return {
+      ok: false,
+      items: [],
+      error: err instanceof Error ? err.message : 'Erro de rede no Supabase',
+    };
+  }
+}
+
+async function upsertHistoryToSupabase(
+  records: Array<Record<string, unknown>>
+): Promise<boolean> {
+  const cfg = getSupabaseConfig();
+  if (!cfg || records.length === 0) return false;
+
+  try {
+    const rows = records.map(investigationToSupabaseRow);
+    const res = await fetch(
+      `${cfg.url}/rest/v1/${SUPABASE_TABLE}?on_conflict=id`,
+      {
+        method: 'POST',
+        headers: getSupabaseHeaders(cfg.key, {
+          Prefer: 'resolution=merge-duplicates,return=minimal',
+        }),
+        body: JSON.stringify(rows),
+      }
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function deleteHistoryFromSupabase(id: string): Promise<boolean> {
+  const cfg = getSupabaseConfig();
+  if (!cfg || !id) return false;
+
+  try {
+    const res = await fetch(
+      `${cfg.url}/rest/v1/${SUPABASE_TABLE}?id=eq.${encodeURIComponent(id)}`,
+      {
+        method: 'DELETE',
+        headers: getSupabaseHeaders(cfg.key),
+      }
+    );
+    return res.ok;
+  } catch {
+    return false;
   }
 }
 
@@ -808,48 +1002,227 @@ app.post('/api/serverless-step', async (req, res) => {
   }
 });
 
-// History endpoints
-app.get('/api/history', (_req, res) => {
-  return res.json({ items: readHistoryDb() });
+// History + Supabase Cloud Sync endpoints
+app.get('/api/supabase/status', async (_req, res) => {
+  const cfg = getSupabaseConfig();
+  if (!cfg) {
+    return res.json({
+      configured: false,
+      connected: false,
+      tableReady: false,
+      projectName: SUPABASE_PROJECT_LABEL,
+      tableName: SUPABASE_TABLE,
+      message:
+        'Variáveis SUPABASE_URL e SUPABASE_ANON_KEY ainda não configuradas no ambiente.',
+    });
+  }
+
+  const supRes = await fetchHistoryFromSupabase();
+  if (!supRes.ok) {
+    const isMissingTable =
+      supRes.error?.includes('42P01') ||
+      supRes.error?.includes('PGRST205') ||
+      supRes.error?.toLowerCase().includes('does not exist') ||
+      supRes.error?.toLowerCase().includes('could not find the table');
+
+    return res.json({
+      configured: true,
+      connected: false,
+      tableReady: !isMissingTable,
+      projectName: SUPABASE_PROJECT_LABEL,
+      tableName: SUPABASE_TABLE,
+      message: isMissingTable
+        ? `Conectado ao projeto "${SUPABASE_PROJECT_LABEL}", mas falta executar o script SQL para criar a tabela "${SUPABASE_TABLE}".`
+        : `Erro ao consultar Supabase (${SUPABASE_PROJECT_LABEL}): ${supRes.error}`,
+    });
+  }
+
+  return res.json({
+    configured: true,
+    connected: true,
+    tableReady: true,
+    projectName: SUPABASE_PROJECT_LABEL,
+    tableName: SUPABASE_TABLE,
+    count: supRes.items.length,
+    message: `Sincronizado em tempo real com Supabase (${SUPABASE_PROJECT_LABEL} • tabela ${SUPABASE_TABLE}).`,
+  });
 });
 
-app.post('/api/history', (req, res) => {
+app.get('/api/history', async (_req, res) => {
+  const localItems = readHistoryDb() as Array<Record<string, unknown>>;
+  let items: Array<Record<string, unknown>> = localItems;
+  let storageMode: 'supabase' | 'local' = 'local';
+
+  const supRes = await fetchHistoryFromSupabase();
+  if (supRes.ok) {
+    storageMode = 'supabase';
+    const supIds = new Set(supRes.items.map((i) => String(i.id)));
+    const unsyncedLocal = localItems.filter(
+      (l) => l.id && !supIds.has(String(l.id))
+    );
+
+    if (unsyncedLocal.length > 0) {
+      await upsertHistoryToSupabase(unsyncedLocal);
+      items = [...unsyncedLocal, ...supRes.items].slice(0, 100);
+    } else {
+      items = supRes.items;
+    }
+    writeHistoryDb(items);
+  }
+
+  return res.json({
+    items,
+    storageMode,
+    supabaseProject: SUPABASE_PROJECT_LABEL,
+    supabaseTable: SUPABASE_TABLE,
+  });
+});
+
+app.post('/api/history', async (req, res) => {
   const record = req.body;
   if (!record || !record.id) return res.status(400).json({ error: 'Inválido' });
+  const nowIso = new Date().toISOString();
+  const normalizedRecord: Record<string, unknown> = {
+    status: 'em_investigacao',
+    isFavorite: false,
+    ...record,
+    updatedAt: nowIso,
+  };
+
   const items = readHistoryDb() as Array<Record<string, unknown>>;
   const idx = items.findIndex((i) => i.id === record.id);
   if (idx >= 0) {
     items[idx] = {
       ...items[idx],
-      ...record,
-      updatedAt: new Date().toISOString(),
+      ...normalizedRecord,
     };
   } else {
-    items.unshift({ ...record, updatedAt: new Date().toISOString() });
+    items.unshift(normalizedRecord);
   }
   const trimmed = items.slice(0, 100);
   writeHistoryDb(trimmed);
-  return res.json({ status: 'saved', items: trimmed });
+
+  const synced = await upsertHistoryToSupabase([
+    idx >= 0 ? items[idx] : normalizedRecord,
+  ]);
+  return res.json({
+    status: 'saved',
+    storageMode: synced ? 'supabase' : 'local',
+    items: trimmed,
+  });
 });
 
-app.patch('/api/history/:id', (req, res) => {
+app.post('/api/history/sync', async (req, res) => {
+  try {
+    const clientItems = Array.isArray(req.body?.items)
+      ? (req.body.items as Array<Record<string, unknown>>)
+      : [];
+    const localItems = readHistoryDb() as Array<Record<string, unknown>>;
+
+    const mergedMap = new Map<string, Record<string, unknown>>();
+    for (const item of [...localItems, ...clientItems]) {
+      if (item && item.id) {
+        mergedMap.set(String(item.id), item);
+      }
+    }
+
+    const supRes = await fetchHistoryFromSupabase();
+    if (supRes.ok) {
+      for (const supItem of supRes.items) {
+        if (supItem && supItem.id) {
+          const idStr = String(supItem.id);
+          const existing = mergedMap.get(idStr);
+          if (!existing) {
+            mergedMap.set(idStr, supItem);
+          } else {
+            const supTime = new Date(String(supItem.updatedAt || 0)).getTime();
+            const locTime = new Date(String(existing.updatedAt || 0)).getTime();
+            if (supTime >= locTime) {
+              mergedMap.set(idStr, supItem);
+            }
+          }
+        }
+      }
+    }
+
+    const mergedList = Array.from(mergedMap.values())
+      .sort(
+        (a, b) =>
+          new Date(String(b.updatedAt || 0)).getTime() -
+          new Date(String(a.updatedAt || 0)).getTime()
+      )
+      .slice(0, 100);
+
+    writeHistoryDb(mergedList);
+    const synced = await upsertHistoryToSupabase(mergedList);
+
+    return res.json({
+      status: 'synced',
+      storageMode: synced || supRes.ok ? 'supabase' : 'local',
+      supabaseProject: SUPABASE_PROJECT_LABEL,
+      items: mergedList,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      error:
+        err instanceof Error ? err.message : 'Erro ao sincronizar histórico.',
+    });
+  }
+});
+
+app.patch('/api/history/:id', async (req, res) => {
+  const { id } = req.params;
+  const updates = req.body || {};
   const items = readHistoryDb() as Array<Record<string, unknown>>;
-  const idx = items.findIndex((i) => i.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Não encontrado' });
-  items[idx] = {
-    ...items[idx],
-    ...req.body,
-    updatedAt: new Date().toISOString(),
-  };
-  writeHistoryDb(items);
-  return res.json({ status: 'updated', item: items[idx], items });
+  const idx = items.findIndex((i) => i.id === id);
+
+  let updatedRecord: Record<string, unknown> | null = null;
+  if (idx !== -1) {
+    items[idx] = {
+      ...items[idx],
+      ...updates,
+      updatedAt: new Date().toISOString(),
+    };
+    updatedRecord = items[idx];
+    writeHistoryDb(items);
+  } else {
+    const supRes = await fetchHistoryFromSupabase();
+    const foundInSup = supRes.items.find((i) => String(i.id) === id);
+    if (foundInSup) {
+      const nextRec: Record<string, unknown> = {
+        ...foundInSup,
+        ...updates,
+        updatedAt: new Date().toISOString(),
+      };
+      updatedRecord = nextRec;
+      items.unshift(nextRec);
+      writeHistoryDb(items.slice(0, 100));
+    }
+  }
+
+  if (!updatedRecord) {
+    return res.status(404).json({ error: 'Não encontrado' });
+  }
+
+  const synced = await upsertHistoryToSupabase([updatedRecord]);
+  return res.json({
+    status: 'updated',
+    storageMode: synced ? 'supabase' : 'local',
+    item: updatedRecord,
+    items,
+  });
 });
 
-app.delete('/api/history/:id', (req, res) => {
+app.delete('/api/history/:id', async (req, res) => {
   const items = readHistoryDb() as Array<Record<string, unknown>>;
   const next = items.filter((i) => i.id !== req.params.id);
   writeHistoryDb(next);
-  return res.json({ status: 'deleted', items: next });
+  const deletedFromSupabase = await deleteHistoryFromSupabase(req.params.id);
+  return res.json({
+    status: 'deleted',
+    storageMode: deletedFromSupabase ? 'supabase' : 'local',
+    items: next,
+  });
 });
 
 // Chunked Upload Endpoint
@@ -984,6 +1357,187 @@ app.get('/api/diagnose/status/:jobId', async (req, res) => {
     timestamp: job.timestamp,
     error: job.error,
   });
+});
+
+const BACKUP_FILE_LIST = [
+  'package.json',
+  'vercel.json',
+  'api/index.ts',
+  'tsconfig.json',
+  'vite.config.ts',
+  'index.html',
+  'metadata.json',
+  '.env.example',
+  '.gitignore',
+  'supabase_hydrodiag_schema.sql',
+  'server.ts',
+  'src/main.tsx',
+  'src/index.css',
+  'src/types.ts',
+  'src/App.tsx',
+  'src/utils/pdfClientEngine.ts',
+  'src/components/DiagramUploadPanel.tsx',
+  'src/components/FaultQueryPanel.tsx',
+  'src/components/DiagnosticReportView.tsx',
+  'src/components/FaultChatPanel.tsx',
+  'src/components/GitHubDeployModal.tsx',
+];
+
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(buf: Buffer): number {
+  let crc = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) {
+    crc = CRC32_TABLE[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function buildZipBuffer(entries: Array<{ name: string; data: Buffer }>): Buffer {
+  const localParts: Buffer[] = [];
+  const centralParts: Buffer[] = [];
+  let offset = 0;
+
+  for (const entry of entries) {
+    const nameBuf = Buffer.from(entry.name.replace(/\\/g, '/'), 'utf-8');
+    const uncompressed = entry.data;
+    const compressed = zlib.deflateRawSync(uncompressed);
+    const fileCrc = crc32(uncompressed);
+
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(0x0800, 6);
+    localHeader.writeUInt16LE(8, 8);
+    localHeader.writeUInt16LE(0, 10);
+    localHeader.writeUInt16LE(0x5421, 12);
+    localHeader.writeUInt32LE(fileCrc, 14);
+    localHeader.writeUInt32LE(compressed.length, 18);
+    localHeader.writeUInt32LE(uncompressed.length, 22);
+    localHeader.writeUInt16LE(nameBuf.length, 26);
+    localHeader.writeUInt16LE(0, 28);
+
+    localParts.push(localHeader, nameBuf, compressed);
+
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt16LE(0x0800, 8);
+    centralHeader.writeUInt16LE(8, 10);
+    centralHeader.writeUInt16LE(0, 12);
+    centralHeader.writeUInt16LE(0x5421, 14);
+    centralHeader.writeUInt32LE(fileCrc, 16);
+    centralHeader.writeUInt32LE(compressed.length, 20);
+    centralHeader.writeUInt32LE(uncompressed.length, 24);
+    centralHeader.writeUInt16LE(nameBuf.length, 28);
+    centralHeader.writeUInt16LE(0, 30);
+    centralHeader.writeUInt16LE(0, 32);
+    centralHeader.writeUInt16LE(0, 34);
+    centralHeader.writeUInt16LE(0, 36);
+    centralHeader.writeUInt32LE(0, 38);
+    centralHeader.writeUInt32LE(offset, 42);
+
+    centralParts.push(centralHeader, nameBuf);
+    offset += localHeader.length + nameBuf.length + compressed.length;
+  }
+
+  const centralDirBuf = Buffer.concat(centralParts);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(0, 4);
+  eocd.writeUInt16LE(0, 6);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(centralDirBuf.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  eocd.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...localParts, centralDirBuf, eocd]);
+}
+
+function collectBackupFiles(): Array<{
+  path: string;
+  sizeBytes: number;
+  content: string;
+  buffer: Buffer;
+}> {
+  const rootDir = process.cwd();
+  const collected: Array<{
+    path: string;
+    sizeBytes: number;
+    content: string;
+    buffer: Buffer;
+  }> = [];
+
+  for (const relPath of BACKUP_FILE_LIST) {
+    const absPath = path.join(rootDir, relPath);
+    if (fs.existsSync(absPath)) {
+      const rawBuf = fs.readFileSync(absPath);
+      collected.push({
+        path: relPath,
+        sizeBytes: rawBuf.length,
+        content: rawBuf.toString('utf-8'),
+        buffer: rawBuf,
+      });
+    }
+  }
+  return collected;
+}
+
+app.get('/api/backup/source-bundle', (_req, res) => {
+  try {
+    const files = collectBackupFiles();
+    const totalBytes = files.reduce((acc, f) => acc + f.sizeBytes, 0);
+    return res.json({
+      generatedAt: new Date().toISOString(),
+      projectName: 'hydrodiag-ai-pch-uhe',
+      totalFiles: files.length,
+      totalBytes,
+      files: files.map((f) => ({
+        path: f.path,
+        sizeBytes: f.sizeBytes,
+        content: f.content,
+      })),
+    });
+  } catch (err) {
+    return res.status(500).json({
+      error:
+        err instanceof Error ? err.message : 'Erro ao gerar backup do código.',
+    });
+  }
+});
+
+app.get('/api/backup/download-zip', (_req, res) => {
+  try {
+    const files = collectBackupFiles();
+    const zipBuffer = buildZipBuffer(
+      files.map((f) => ({ name: f.path, data: f.buffer }))
+    );
+    const dateTag = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="hydrodiag-ai-codigo-completo-backup-${dateTag}.zip"`
+    );
+    res.setHeader('Content-Length', String(zipBuffer.length));
+    return res.send(zipBuffer);
+  } catch (err) {
+    return res.status(500).json({
+      error:
+        err instanceof Error ? err.message : 'Erro ao baixar arquivo ZIP.',
+    });
+  }
 });
 
 export default app;
