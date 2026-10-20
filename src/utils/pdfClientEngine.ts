@@ -427,3 +427,88 @@ export function formatTechnicalSymbols(rawText: string): string {
   return out;
 }
 
+/**
+ * Retorna a quantidade total de páginas de um PDF anexado em base64.
+ */
+export async function getPdfPageCount(base64Data: string): Promise<number> {
+  if (!base64Data) return 1;
+  try {
+    const rawBytes = base64ToUint8Array(base64Data);
+    const srcDoc = await PDFDocument.load(rawBytes, { ignoreEncryption: true });
+    return Math.max(1, srcDoc.getPageCount());
+  } catch {
+    return 1;
+  }
+}
+
+/**
+ * Recorta cirurgicamente 1 única página (1-based) de um PDF anexado usando pdf-lib
+ * e retorna uma Blob URL instantânea para visualização no Inspetor Deep-Link.
+ * Isso garante abertura imediata na página exata mesmo em cadernos de 100+ folhas.
+ */
+export async function extractSinglePdfPageUrl(
+  base64Data: string,
+  pageNumberOneBased: number
+): Promise<{
+  blobUrl: string;
+  totalPages: number;
+  actualPage: number;
+}> {
+  const rawBytes = base64ToUint8Array(base64Data);
+  const srcDoc = await PDFDocument.load(rawBytes, { ignoreEncryption: true });
+  const totalPages = Math.max(1, srcDoc.getPageCount());
+  const actualPage = Math.min(Math.max(1, pageNumberOneBased), totalPages);
+
+  const singleDoc = await PDFDocument.create();
+  const [copiedPage] = await singleDoc.copyPages(srcDoc, [actualPage - 1]);
+  singleDoc.addPage(copiedPage);
+  const singlePdfBytes = await singleDoc.save();
+
+  const blob = new Blob([singlePdfBytes.buffer as ArrayBuffer], {
+    type: 'application/pdf',
+  });
+  const blobUrl = URL.createObjectURL(blob);
+
+  return {
+    blobUrl,
+    totalPages,
+    actualPage,
+  };
+}
+
+/**
+ * Transforma citações de páginas e folhas no texto do Laudo ou Chat
+ * (ex: "Página 12", "Pág. 49", "Folha 31", "Fl. 4") em links clicáveis
+ * no formato `[texto](#pdf-page-N)` sem quebrar blocos de código ou links já existentes.
+ */
+export function linkifyPdfPageReferences(markdownText: string): string {
+  if (!markdownText) return '';
+
+  // Evitar alterar dentro de blocos de código ```...``` ou `...` ou links existentes [...] (...)
+  const segments = markdownText.split(/(```[\s\S]*?```|`[^`\n]+`|\[[^\]]+\]\([^)]+\))/g);
+
+  return segments
+    .map((segment) => {
+      if (
+        segment.startsWith('```') ||
+        segment.startsWith('`') ||
+        (segment.startsWith('[') && segment.includes(']('))
+      ) {
+        return segment;
+      }
+
+      return segment.replace(
+        /\b((?:P[áa]gina|P[áa]g\.?|Folha|Fl\.?)\s*(?:do\s+PDF\s*)?#?\s*(\d{1,3}))\b/gi,
+        (fullMatch, labelPart, numStr) => {
+          const pageNum = parseInt(numStr, 10);
+          if (isNaN(pageNum) || pageNum < 1 || pageNum > 999) {
+            return fullMatch;
+          }
+          return `[${labelPart}](#pdf-page-${pageNum})`;
+        }
+      );
+    })
+    .join('');
+}
+
+
