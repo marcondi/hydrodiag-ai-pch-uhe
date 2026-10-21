@@ -13,6 +13,11 @@ import {
   CheckCircle2,
   ArrowRight,
   Layers,
+  Hand,
+  Grab,
+  ZoomIn,
+  ZoomOut,
+  RotateCcw,
 } from 'lucide-react';
 import { DiagramAttachment } from '../types';
 import {
@@ -97,12 +102,12 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
   initialAttachmentId,
   reportMarkdown,
   onAskAboutCurrentPage,
-  onRequestReupload,
   onRelinkAttachmentBinary,
 }) => {
   const drawerRef = useRef<HTMLElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const quickRelinkInputRef = useRef<HTMLInputElement | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
 
   const pdfAttachments = attachments.filter(
     (a) =>
@@ -122,11 +127,33 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
   );
   const [totalPages, setTotalPages] = useState<number>(1);
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [pageImageUrl, setPageImageUrl] = useState<string | null>(null);
+  const [useNativeIframe, setUseNativeIframe] = useState<boolean>(false);
   const [isLoadingPage, setIsLoadingPage] = useState<boolean>(false);
-  const [pageError, setPageError] = useState<string | null>(null);
   const [localRecoveredBase64, setLocalRecoveredBase64] = useState<
     Record<string, string>
   >({});
+
+  // CAD Pan ("Mãozinha") & Mouse Wheel Zoom State
+  const [zoom, setZoom] = useState<number>(1);
+  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState<boolean>(false);
+  const [isLeftClickWheelZooming, setIsLeftClickWheelZooming] =
+    useState<boolean>(false);
+
+  const dragStartRef = useRef<{
+    startX: number;
+    startY: number;
+    originPanX: number;
+    originPanY: number;
+  }>({ startX: 0, startY: 0, originPanX: 0, originPanY: 0 });
+
+  const zoomPanRef = useRef<{ zoom: number; panX: number; panY: number }>({
+    zoom: 1,
+    panX: 0,
+    panY: 0,
+  });
+  zoomPanRef.current = { zoom, panX: pan.x, panY: pan.y };
 
   const activeAttachment =
     attachments.find((a) => a.id === selectedAttachmentId) || attachments[0];
@@ -135,6 +162,14 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
   const activeAttachmentNameKey = (activeAttachment?.name || '')
     .trim()
     .toLowerCase();
+
+  // Reset Pan & Zoom when switching pages or files
+  useEffect(() => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+    setIsDragging(false);
+    setIsLeftClickWheelZooming(false);
+  }, [currentPage, activeAttachmentId, isOpen]);
 
   // Lookup cached AI summary for the current page if available
   const cachedBatches = activeAttachment
@@ -152,6 +187,79 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     currentPage
   );
 
+  const handleResetView = () => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  };
+
+  const applyZoomStep = (deltaFactor: number, clientX?: number, clientY?: number) => {
+    const prevZoom = zoomPanRef.current.zoom;
+    const prevPanX = zoomPanRef.current.panX;
+    const prevPanY = zoomPanRef.current.panY;
+
+    const nextZoom = Math.min(6, Math.max(0.5, Number((prevZoom * deltaFactor).toFixed(3))));
+    if (Math.abs(nextZoom - prevZoom) < 0.001) return;
+
+    let nextPanX = prevPanX;
+    let nextPanY = prevPanY;
+
+    if (
+      viewportRef.current &&
+      typeof clientX === 'number' &&
+      typeof clientY === 'number'
+    ) {
+      const rect = viewportRef.current.getBoundingClientRect();
+      const cx = clientX - (rect.left + rect.width / 2);
+      const cy = clientY - (rect.top + rect.height / 2);
+      const ratio = nextZoom / prevZoom;
+      nextPanX = cx - (cx - prevPanX) * ratio;
+      nextPanY = cy - (cy - prevPanY) * ratio;
+
+      // Keep smooth continuous drag if left mouse button is currently held down ("Mãozinha fechada + Roda")
+      dragStartRef.current = {
+        startX: clientX,
+        startY: clientY,
+        originPanX: nextPanX,
+        originPanY: nextPanY,
+      };
+    }
+
+    setZoom(nextZoom);
+    setPan({ x: nextPanX, y: nextPanY });
+  };
+
+  // Native non-passive wheel listener for smooth Mouse Wheel Zoom (supports Left-Click + Scroll AND Direct Wheel Scroll)
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!isOpen || !el || useNativeIframe) return;
+
+    let wheelBadgeTimeout: ReturnType<typeof setTimeout> | null = null;
+
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const leftButtonHeld = (e.buttons & 1) === 1 || isDragging;
+      if (leftButtonHeld) {
+        setIsLeftClickWheelZooming(true);
+        if (wheelBadgeTimeout) clearTimeout(wheelBadgeTimeout);
+        wheelBadgeTimeout = setTimeout(() => {
+          setIsLeftClickWheelZooming(false);
+        }, 700);
+      }
+
+      const direction = e.deltaY < 0 ? 1 : -1;
+      const factor = direction > 0 ? 1.16 : 1 / 1.16;
+      applyZoomStep(factor, e.clientX, e.clientY);
+    };
+
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => {
+      if (wheelBadgeTimeout) clearTimeout(wheelBadgeTimeout);
+      el.removeEventListener('wheel', onWheel);
+    };
+  }, [isOpen, isLoadingPage, useNativeIframe, isDragging]);
+
   // Close drawer with ESC key (and navigate pages with ArrowLeft / ArrowRight when not typing in input)
   useEffect(() => {
     if (!isOpen) return;
@@ -160,7 +268,6 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       drawerRef.current?.focus({ preventScroll: true });
     }, 30);
 
-    // Periodically reclaim keyboard focus if Chrome's PDF plugin inside the iframe captures it on click
     const focusGuardInterval = setInterval(() => {
       if (
         iframeRef.current &&
@@ -246,7 +353,6 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
 
     const loadExtractedPage = async () => {
       setIsLoadingPage(true);
-      setPageError(null);
 
       let b64ToUse = effectiveBase64;
       let justRecoveredFromVault = false;
@@ -266,9 +372,9 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       if (!b64ToUse) {
         if (!isCancelled) {
           setBlobUrl(null);
+          setPageImageUrl(null);
           setTotalPages(reconstructedSheet.totalPages);
           setIsLoadingPage(false);
-          setPageError(null);
         }
         return;
       }
@@ -278,6 +384,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
           const imgDataUrl = `data:${activeAttachment.mimeType};base64,${b64ToUse}`;
           if (!isCancelled) {
             setBlobUrl(imgDataUrl);
+            setPageImageUrl(imgDataUrl);
             setTotalPages(1);
             setCurrentPage(1);
             setPageInput('1');
@@ -288,6 +395,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
 
           if (!isCancelled) {
             setBlobUrl(result.blobUrl);
+            setPageImageUrl(result.pageImageUrl);
             setTotalPages(result.totalPages);
             if (result.actualPage !== currentPage) {
               setCurrentPage(result.actualPage);
@@ -311,7 +419,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       } catch {
         if (!isCancelled) {
           setBlobUrl(null);
-          setPageError(null);
+          setPageImageUrl(null);
         }
       } finally {
         if (!isCancelled) {
@@ -354,6 +462,61 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       setPageInput(String(currentPage));
     }
   };
+
+  const handleViewportMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || useNativeIframe) return;
+    const targetEl = e.target as HTMLElement;
+    if (targetEl.closest('button, a, input, select, [data-no-pan="true"]')) {
+      return;
+    }
+    e.preventDefault();
+    setIsDragging(true);
+    dragStartRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      originPanX: pan.x,
+      originPanY: pan.y,
+    };
+  };
+
+  const handleViewportMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isDragging || useNativeIframe) return;
+    if ((e.buttons & 1) === 0) {
+      setIsDragging(false);
+      setIsLeftClickWheelZooming(false);
+      return;
+    }
+    const dx = e.clientX - dragStartRef.current.startX;
+    const dy = e.clientY - dragStartRef.current.startY;
+    setPan({
+      x: dragStartRef.current.originPanX + dx,
+      y: dragStartRef.current.originPanY + dy,
+    });
+  };
+
+  const handleViewportMouseUpOrLeave = () => {
+    if (isDragging) {
+      setIsDragging(false);
+    }
+    if (isLeftClickWheelZooming) {
+      setIsLeftClickWheelZooming(false);
+    }
+  };
+
+  const handleViewportDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (useNativeIframe) return;
+    const targetEl = e.target as HTMLElement;
+    if (targetEl.closest('button, a, input, select, [data-no-pan="true"]')) {
+      return;
+    }
+    if (zoom > 1.35) {
+      handleResetView();
+    } else {
+      applyZoomStep(2.1, e.clientX, e.clientY);
+    }
+  };
+
+  const zoomPercent = Math.round(zoom * 100);
 
   return (
     <div className="fixed inset-0 z-50 bg-black/75 flex justify-end no-print">
@@ -401,7 +564,6 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                 [activeAttachmentNameKey]: b64,
                 [file.name.trim().toLowerCase()]: b64,
               }));
-              setPageError(null);
               if (onRelinkAttachmentBinary) {
                 onRelinkAttachmentBinary(
                   activeAttachment.id,
@@ -432,7 +594,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
           }
         }}
         aria-label="Visualizador Interativo de Folha do PDF (Deep-Link)"
-        className="w-full max-w-4xl bg-[#0B111E] border-l border-slate-800 h-full flex flex-col shadow-2xl focus:outline-none"
+        className="w-full max-w-5xl bg-[#0B111E] border-l border-slate-800 h-full flex flex-col shadow-2xl focus:outline-none"
       >
         {/* Top Control Bar */}
         <div className="px-4 py-3 bg-[#111827] border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 shrink-0">
@@ -558,8 +720,86 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
           </div>
         </div>
 
-        {/* Main PDF Single-Page High-Speed Canvas OR Reconstructed CAD Sheet */}
-        <div className="flex-1 bg-[#0B111E] p-3 sm:p-4 overflow-hidden flex flex-col relative">
+        {/* Interactive CAD Pan ("Mãozinha") & Mouse Wheel Zoom Control Bar */}
+        <div className="px-4 py-2 bg-[#0D1526] border-b border-slate-800 flex flex-wrap items-center justify-between gap-2 shrink-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className={`px-2.5 py-1 rounded text-xs font-mono font-medium flex items-center gap-1.5 border transition-colors ${
+                isDragging || isLeftClickWheelZooming
+                  ? 'bg-amber-500/20 border-amber-400/50 text-amber-200'
+                  : 'bg-sky-500/15 border-sky-500/30 text-sky-300'
+              }`}
+            >
+              {isDragging ? (
+                <Grab className="w-3.5 h-3.5 text-amber-300" />
+              ) : (
+                <Hand className="w-3.5 h-3.5 text-sky-400" />
+              )}
+              <span>
+                {isLeftClickWheelZooming
+                  ? 'Mãozinha + Roda: Zoom Ativo'
+                  : isDragging
+                    ? 'Mãozinha Fechada: Arrastando Página...'
+                    : 'Modo Pan (Mãozinha): Clique esq. p/ arrastar · Clique esq. + Rolar p/ Zoom'}
+              </span>
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <div className="flex items-center bg-[#0B111E] border border-slate-700 rounded-md p-0.5">
+              <button
+                type="button"
+                onClick={() => applyZoomStep(1 / 1.25)}
+                className="p-1 text-slate-300 hover:text-white hover:bg-slate-800 rounded cursor-pointer"
+                title="Diminuir Zoom"
+              >
+                <ZoomOut className="w-3.5 h-3.5" />
+              </button>
+
+              <button
+                type="button"
+                onClick={handleResetView}
+                className="px-2 py-0.5 text-xs font-mono tabular-nums font-semibold text-sky-300 hover:text-white cursor-pointer"
+                title="Clique para voltar a 100% e centralizar"
+              >
+                {zoomPercent}%
+              </button>
+
+              <button
+                type="button"
+                onClick={() => applyZoomStep(1.25)}
+                className="p-1 text-slate-300 hover:text-white hover:bg-slate-800 rounded cursor-pointer"
+                title="Aumentar Zoom"
+              >
+                <ZoomIn className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleResetView}
+              className="px-2 py-1 text-xs font-mono text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded flex items-center gap-1 cursor-pointer"
+              title="Centralizar e Resetar Zoom (100%)"
+            >
+              <RotateCcw className="w-3 h-3" />
+              <span className="hidden sm:inline">Centralizar</span>
+            </button>
+
+            {blobUrl && activeAttachment?.mimeType === 'application/pdf' && (
+              <button
+                type="button"
+                onClick={() => setUseNativeIframe((prev) => !prev)}
+                className="px-2 py-1 text-[11px] font-mono text-slate-300 hover:text-white bg-[#111827] hover:bg-slate-800 border border-slate-700 rounded cursor-pointer"
+                title="Alternar entre o Canvas Interativo (Mãozinha + Zoom) e o Leitor PDF Nativo do Navegador"
+              >
+                {useNativeIframe ? 'Usar Mãozinha (CAD)' : 'PDF Nativo'}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Main Interactive Pan & Zoom Viewport */}
+        <div className="flex-1 bg-[#070B14] p-2 sm:p-3 overflow-hidden flex flex-col relative">
           {isLoadingPage && (
             <div className="flex-1 flex flex-col items-center justify-center gap-3 text-slate-300">
               <Loader2 className="w-7 h-7 text-sky-400 animate-spin" />
@@ -569,262 +809,292 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
             </div>
           )}
 
-          {!isLoadingPage && blobUrl && (
-            <div className="flex-1 flex flex-col min-h-0 rounded-lg overflow-hidden border border-slate-800 bg-slate-950">
-              {activeAttachment?.mimeType === 'application/pdf' ? (
+          {/* Optional Native Browser PDF Plugin Mode */}
+          {!isLoadingPage &&
+            blobUrl &&
+            useNativeIframe &&
+            activeAttachment?.mimeType === 'application/pdf' && (
+              <div className="flex-1 flex flex-col min-h-0 rounded-lg overflow-hidden border border-slate-800 bg-slate-950">
                 <iframe
                   ref={iframeRef}
                   key={`${activeAttachment.id}_p_${currentPage}`}
                   title={`Página ${currentPage} - ${activeAttachment.name}`}
                   src={`${blobUrl}#toolbar=1&navpanes=0&view=FitH`}
-                  onLoad={() => {
-                    drawerRef.current?.focus();
-                    try {
-                      iframeRef.current?.contentWindow?.addEventListener(
-                        'keydown',
-                        (ev: KeyboardEvent) => {
-                          if (ev.key === 'Escape' || ev.key === 'Esc') {
-                            ev.preventDefault();
-                            onClose();
-                          }
-                        },
-                        true
-                      );
-                    } catch {
-                      // Ignore cross-context restriction
-                    }
-                  }}
                   className="w-full h-full flex-1 border-0"
                 />
-              ) : (
-                <div className="flex-1 overflow-auto flex items-center justify-center p-4">
-                  <img
-                    src={blobUrl}
-                    alt={activeAttachment?.name || 'Foto de campo'}
-                    className="max-h-full max-w-full object-contain rounded"
-                  />
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Interactive Reconstructed CAD Sheet when raw binary was from a pre-Vault session */}
-          {!isLoadingPage && !blobUrl && (
-            <div className="flex-1 flex flex-col min-h-0 rounded-lg border border-sky-900/60 bg-[#080D1A] overflow-y-auto">
-              {/* Top CAD Frame Coordinate Ruler (Colunas 1 - 8) */}
-              <div className="grid grid-cols-8 border-b border-slate-800 bg-[#0D1526] text-[10px] font-mono text-slate-400 text-center shrink-0">
-                {[1, 2, 3, 4, 5, 6, 7, 8].map((col) => {
-                  const isHighlightedCol =
-                    reconstructedSheet.extractedCoordinates.some((c) =>
-                      c.includes(String(col))
-                    );
-                  return (
-                    <div
-                      key={col}
-                      className={`py-1 border-r last:border-r-0 border-slate-800 ${
-                        isHighlightedCol
-                          ? 'bg-amber-500/20 text-amber-300 font-bold'
-                          : ''
-                      }`}
-                    >
-                      COLUNA {col}
-                    </div>
-                  );
-                })}
               </div>
+            )}
 
-              {/* Sub-header banner with CAD Sheet Info & Optional Vector PDF Attach */}
-              <div className="px-4 py-2.5 bg-[#111827]/90 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <span className="px-2 py-0.5 rounded bg-sky-500/15 border border-sky-500/30 text-[11px] font-mono font-semibold text-sky-300">
-                    FOLHA SELO #{reconstructedSheet.folhaSelo}
-                  </span>
-                  <span className="text-xs font-semibold text-slate-100">
-                    {reconstructedSheet.tituloFolha}
-                  </span>
-                  <span className="text-xs font-mono text-amber-400">
-                    [{reconstructedSheet.tagsPrincipais}]
-                  </span>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => quickRelinkInputRef.current?.click()}
-                  className="px-2.5 py-1 text-[11px] font-medium text-sky-300 hover:text-white bg-sky-500/15 hover:bg-sky-600 border border-sky-500/30 rounded flex items-center gap-1.5 transition-colors cursor-pointer"
-                  title="Carregar arquivo PDF original do computador para ver o desenho vetorial bruto"
+          {/* Interactive CAD Pan ("Mãozinha") & Mouse Wheel Zoom Surface */}
+          {!isLoadingPage &&
+            !(
+              blobUrl &&
+              useNativeIframe &&
+              activeAttachment?.mimeType === 'application/pdf'
+            ) && (
+              <div
+                ref={viewportRef}
+                onMouseDown={handleViewportMouseDown}
+                onMouseMove={handleViewportMouseMove}
+                onMouseUp={handleViewportMouseUpOrLeave}
+                onMouseLeave={handleViewportMouseUpOrLeave}
+                onDoubleClick={handleViewportDoubleClick}
+                style={{
+                  cursor: isDragging ? 'grabbing' : 'grab',
+                }}
+                className={`flex-1 flex flex-col min-h-0 rounded-lg overflow-hidden border border-slate-800 bg-[#050912] relative select-none ${
+                  isDragging ? 'cursor-grabbing' : 'cursor-grab'
+                }`}
+              >
+                {/* Transformed Pan + Zoom Layer */}
+                <div
+                  style={{
+                    transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})`,
+                    transformOrigin: 'center center',
+                    transition: isDragging
+                      ? 'none'
+                      : 'transform 60ms cubic-bezier(0.2, 0, 0, 1)',
+                  }}
+                  className="w-full h-full flex-1 flex items-center justify-center p-2 sm:p-4"
                 >
-                  <Upload className="w-3 h-3" />
-                  <span>Abrir PDF Vetorial Original</span>
-                </button>
-              </div>
+                  {pageImageUrl ? (
+                    <img
+                      src={pageImageUrl}
+                      alt={`Página ${currentPage} - ${activeAttachment?.name || 'Diagrama'}`}
+                      draggable={false}
+                      className="max-h-full max-w-full object-contain rounded shadow-2xl bg-white pointer-events-none select-none"
+                    />
+                  ) : (
+                    /* Interactive Reconstructed CAD Sheet inside the Pan/Zoom surface */
+                    <div className="w-full max-w-4xl rounded-lg border border-sky-900/70 bg-[#080D1A] shadow-2xl overflow-hidden flex flex-col">
+                      {/* Top CAD Frame Coordinate Ruler (Colunas 1 - 8) */}
+                      <div className="grid grid-cols-8 border-b border-slate-800 bg-[#0D1526] text-[10px] font-mono text-slate-400 text-center shrink-0">
+                        {[1, 2, 3, 4, 5, 6, 7, 8].map((col) => {
+                          const isHighlightedCol =
+                            reconstructedSheet.extractedCoordinates.some((c) =>
+                              c.includes(String(col))
+                            );
+                          return (
+                            <div
+                              key={col}
+                              className={`py-1 border-r last:border-r-0 border-slate-800 ${
+                                isHighlightedCol
+                                  ? 'bg-amber-500/20 text-amber-300 font-bold'
+                                  : ''
+                              }`}
+                            >
+                              COLUNA {col}
+                            </div>
+                          );
+                        })}
+                      </div>
 
-              {/* Main CAD Blueprint Schematic Body */}
-              <div className="p-4 sm:p-5 flex-1 flex flex-col gap-4 justify-between">
-                {/* 1. Extracted Coordinates & Terminal Blocks Bar */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <div className="p-3.5 rounded-lg bg-[#0D1526] border border-slate-800 flex flex-col gap-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[11px] font-mono uppercase tracking-wider text-sky-400 font-semibold flex items-center gap-1.5">
-                        <Cpu className="w-3.5 h-3.5" />
-                        Bornes, Réguas e TAGs na Página {currentPage}
-                      </span>
-                      <span className="text-[11px] font-mono text-amber-300 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded">
-                        {reconstructedSheet.extractedCoordinates.join(' · ')}
-                      </span>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-1.5 mt-1">
-                      {reconstructedSheet.extractedBornesAndTags.map(
-                        (token, idx) => (
-                          <span
-                            key={idx}
-                            className="px-2.5 py-1 rounded bg-[#111827] border border-sky-500/30 text-xs font-mono font-semibold text-slate-100"
-                          >
-                            {token}
+                      {/* Sub-header banner with CAD Sheet Info & Optional Vector PDF Attach */}
+                      <div className="px-4 py-2.5 bg-[#111827]/90 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="px-2 py-0.5 rounded bg-sky-500/15 border border-sky-500/30 text-[11px] font-mono font-semibold text-sky-300">
+                            FOLHA SELO #{reconstructedSheet.folhaSelo}
                           </span>
-                        )
-                      )}
-                    </div>
-                  </div>
+                          <span className="text-xs font-semibold text-slate-100">
+                            {reconstructedSheet.tituloFolha}
+                          </span>
+                          <span className="text-xs font-mono text-amber-400">
+                            [{reconstructedSheet.tagsPrincipais}]
+                          </span>
+                        </div>
 
-                  <div className="p-3.5 rounded-lg bg-[#0D1526] border border-slate-800 flex flex-col justify-between gap-2">
-                    <span className="text-[11px] font-mono uppercase tracking-wider text-emerald-400 font-semibold flex items-center gap-1.5">
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                      Topologia Funcional da Folha #{reconstructedSheet.folhaSelo}
-                    </span>
-                    <div className="flex flex-wrap items-center gap-1.5 text-xs font-mono text-slate-200">
-                      <span className="px-2 py-1 rounded bg-slate-900 border border-slate-700 text-sky-300">
-                        {reconstructedSheet.tagsPrincipais}
-                      </span>
-                      <ArrowRight className="w-3.5 h-3.5 text-slate-500" />
-                      <span className="px-2 py-1 rounded bg-slate-900 border border-amber-500/40 text-amber-300">
-                        {reconstructedSheet.tituloFolha}
-                      </span>
-                      <ArrowRight className="w-3.5 h-3.5 text-slate-500" />
-                      <span className="px-2 py-1 rounded bg-slate-900 border border-emerald-500/40 text-emerald-300">
-                        Pág. {currentPage} / {effectiveTotalPages}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 2. Technical Points & Citations Mapped to This Page */}
-                <div className="p-4 rounded-lg bg-[#0D1526] border border-slate-800 space-y-2.5">
-                  <h4 className="text-xs font-mono uppercase tracking-wider text-slate-300 font-semibold flex items-center gap-2">
-                    <FileText className="w-3.5 h-3.5 text-sky-400" />
-                    <span>
-                      Pontos de Inspeção e Circuitos Mapeados na Página{' '}
-                      {currentPage} (Folha {reconstructedSheet.folhaSelo})
-                    </span>
-                  </h4>
-                  <ul className="space-y-2 text-xs text-slate-200 leading-relaxed">
-                    {reconstructedSheet.reportCitationsForPage.map(
-                      (line, idx) => (
-                        <li
-                          key={idx}
-                          className="p-2.5 rounded bg-[#111827] border border-slate-800/90 flex items-start gap-2.5"
+                        <button
+                          type="button"
+                          data-no-pan="true"
+                          onClick={() => quickRelinkInputRef.current?.click()}
+                          className="px-2.5 py-1 text-[11px] font-medium text-sky-300 hover:text-white bg-sky-500/15 hover:bg-sky-600 border border-sky-500/30 rounded flex items-center gap-1.5 transition-colors cursor-pointer"
+                          title="Carregar arquivo PDF original do computador para ver o desenho vetorial bruto"
                         >
-                          <span className="px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 font-mono text-[10px] font-bold shrink-0 mt-0.5">
-                            PÁG. {currentPage}
-                          </span>
-                          <span>{line}</span>
-                        </li>
-                      )
-                    )}
-                  </ul>
-                </div>
+                          <Upload className="w-3 h-3" />
+                          <span>Abrir PDF Vetorial Original</span>
+                        </button>
+                      </div>
 
-                {/* 3. Interactive Sheet Navigator for Current Caderno Batch (e.g. Pages 41-50) */}
-                {reconstructedSheet.batchPages.length > 0 && (
-                  <div className="p-3.5 rounded-lg bg-[#0D1526] border border-slate-800 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[11px] font-mono uppercase tracking-wider text-slate-400 font-semibold flex items-center gap-1.5">
-                        <Layers className="w-3.5 h-3.5 text-sky-400" />
-                        Folhas do Caderno neste Lote (Clique para abrir a folha)
-                      </span>
-                      <span className="text-[11px] font-mono text-slate-400">
-                        Total: {effectiveTotalPages} páginas indexadas
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-44 overflow-y-auto pr-1">
-                      {reconstructedSheet.batchPages.map((entry) => {
-                        const isCurrent = entry.pdfPage === currentPage;
-                        return (
-                          <button
-                            key={entry.pdfPage}
-                            type="button"
-                            onClick={() => handleGoToPage(entry.pdfPage)}
-                            className={`text-left px-2.5 py-1.5 rounded border text-xs font-mono transition-colors flex items-center justify-between gap-2 cursor-pointer ${
-                              isCurrent
-                                ? 'bg-sky-500/20 border-sky-500 text-white font-semibold'
-                                : 'bg-[#111827] border-slate-800 text-slate-300 hover:border-slate-700 hover:text-white'
-                            }`}
+                      {/* Main CAD Blueprint Schematic Body */}
+                      <div className="p-4 sm:p-5 flex flex-col gap-4 justify-between">
+                        {/* 1. Extracted Coordinates & Terminal Blocks Bar */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <div className="p-3.5 rounded-lg bg-[#0D1526] border border-slate-800 flex flex-col gap-2">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[11px] font-mono uppercase tracking-wider text-sky-400 font-semibold flex items-center gap-1.5">
+                                <Cpu className="w-3.5 h-3.5" />
+                                Bornes, Réguas e TAGs na Página {currentPage}
+                              </span>
+                              <span className="text-[11px] font-mono text-amber-300 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded">
+                                {reconstructedSheet.extractedCoordinates.join(
+                                  ' · '
+                                )}
+                              </span>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                              {reconstructedSheet.extractedBornesAndTags.map(
+                                (token, idx) => (
+                                  <span
+                                    key={idx}
+                                    className="px-2.5 py-1 rounded bg-[#111827] border border-sky-500/30 text-xs font-mono font-semibold text-slate-100"
+                                  >
+                                    {token}
+                                  </span>
+                                )
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="p-3.5 rounded-lg bg-[#0D1526] border border-slate-800 flex flex-col justify-between gap-2">
+                            <span className="text-[11px] font-mono uppercase tracking-wider text-emerald-400 font-semibold flex items-center gap-1.5">
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                              Topologia Funcional da Folha #
+                              {reconstructedSheet.folhaSelo}
+                            </span>
+                            <div className="flex flex-wrap items-center gap-1.5 text-xs font-mono text-slate-200">
+                              <span className="px-2 py-1 rounded bg-slate-900 border border-slate-700 text-sky-300">
+                                {reconstructedSheet.tagsPrincipais}
+                              </span>
+                              <ArrowRight className="w-3.5 h-3.5 text-slate-500" />
+                              <span className="px-2 py-1 rounded bg-slate-900 border border-amber-500/40 text-amber-300">
+                                {reconstructedSheet.tituloFolha}
+                              </span>
+                              <ArrowRight className="w-3.5 h-3.5 text-slate-500" />
+                              <span className="px-2 py-1 rounded bg-slate-900 border border-emerald-500/40 text-emerald-300">
+                                Pág. {currentPage} / {effectiveTotalPages}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* 2. Technical Points & Citations Mapped to This Page */}
+                        <div className="p-4 rounded-lg bg-[#0D1526] border border-slate-800 space-y-2.5">
+                          <h4 className="text-xs font-mono uppercase tracking-wider text-slate-300 font-semibold flex items-center gap-2">
+                            <FileText className="w-3.5 h-3.5 text-sky-400" />
+                            <span>
+                              Pontos de Inspeção e Circuitos Mapeados na Página{' '}
+                              {currentPage} (Folha{' '}
+                              {reconstructedSheet.folhaSelo})
+                            </span>
+                          </h4>
+                          <ul className="space-y-2 text-xs text-slate-200 leading-relaxed">
+                            {reconstructedSheet.reportCitationsForPage.map(
+                              (line, idx) => (
+                                <li
+                                  key={idx}
+                                  className="p-2.5 rounded bg-[#111827] border border-slate-800/90 flex items-start gap-2.5"
+                                >
+                                  <span className="px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 font-mono text-[10px] font-bold shrink-0 mt-0.5">
+                                    PÁG. {currentPage}
+                                  </span>
+                                  <span>{line}</span>
+                                </li>
+                              )
+                            )}
+                          </ul>
+                        </div>
+
+                        {/* 3. Interactive Sheet Navigator for Current Caderno Batch (e.g. Pages 41-50) */}
+                        {reconstructedSheet.batchPages.length > 0 && (
+                          <div
+                            data-no-pan="true"
+                            className="p-3.5 rounded-lg bg-[#0D1526] border border-slate-800 space-y-2"
                           >
-                            <span className="truncate">
-                              <strong className="text-sky-400">
-                                Pág. {entry.pdfPage}
-                              </strong>{' '}
-                              (Selo {entry.folhaSelo}) — {entry.titulo}
-                            </span>
-                            <span className="text-[10px] text-amber-400 shrink-0">
-                              {entry.tags}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
+                            <div className="flex items-center justify-between">
+                              <span className="text-[11px] font-mono uppercase tracking-wider text-slate-400 font-semibold flex items-center gap-1.5">
+                                <Layers className="w-3.5 h-3.5 text-sky-400" />
+                                Folhas do Caderno neste Lote (Clique para abrir
+                                a folha)
+                              </span>
+                              <span className="text-[11px] font-mono text-slate-400">
+                                Total: {effectiveTotalPages} páginas indexadas
+                              </span>
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-40 overflow-y-auto pr-1">
+                              {reconstructedSheet.batchPages.map((entry) => {
+                                const isCurrent = entry.pdfPage === currentPage;
+                                return (
+                                  <button
+                                    key={entry.pdfPage}
+                                    type="button"
+                                    data-no-pan="true"
+                                    onClick={() => handleGoToPage(entry.pdfPage)}
+                                    className={`text-left px-2.5 py-1.5 rounded border text-xs font-mono transition-colors flex items-center justify-between gap-2 cursor-pointer ${
+                                      isCurrent
+                                        ? 'bg-sky-500/20 border-sky-500 text-white font-semibold'
+                                        : 'bg-[#111827] border-slate-800 text-slate-300 hover:border-slate-700 hover:text-white'
+                                    }`}
+                                  >
+                                    <span className="truncate">
+                                      <strong className="text-sky-400">
+                                        Pág. {entry.pdfPage}
+                                      </strong>{' '}
+                                      (Selo {entry.folhaSelo}) — {entry.titulo}
+                                    </span>
+                                    <span className="text-[10px] text-amber-400 shrink-0">
+                                      {entry.tags}
+                                    </span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
 
-                {/* 4. Official ABNT Engineering Title Block (Selo Técnico no Canto Inferior Direito) */}
-                <div className="mt-auto pt-2 flex justify-end">
-                  <div className="w-full sm:w-[440px] border-2 border-slate-700 bg-[#0B111E] rounded grid grid-cols-3 text-[11px] font-mono text-slate-200">
-                    <div className="col-span-2 p-2 border-b border-r border-slate-700">
-                      <div className="text-[9px] text-slate-400 uppercase">
-                        CADERNO / ARQUIVO TÉCNICO
-                      </div>
-                      <div className="font-semibold text-slate-100 truncate">
-                        {activeAttachment?.name || 'UNIFILAR GERADORES.pdf'}
+                        {/* 4. Official ABNT Engineering Title Block (Selo Técnico no Canto Inferior Direito) */}
+                        <div className="mt-auto pt-1 flex justify-end">
+                          <div className="w-full sm:w-[440px] border-2 border-slate-700 bg-[#0B111E] rounded grid grid-cols-3 text-[11px] font-mono text-slate-200">
+                            <div className="col-span-2 p-2 border-b border-r border-slate-700">
+                              <div className="text-[9px] text-slate-400 uppercase">
+                                CADERNO / ARQUIVO TÉCNICO
+                              </div>
+                              <div className="font-semibold text-slate-100 truncate">
+                                {activeAttachment?.name ||
+                                  'UNIFILAR GERADORES.pdf'}
+                              </div>
+                            </div>
+                            <div className="p-2 border-b border-slate-700">
+                              <div className="text-[9px] text-slate-400 uppercase">
+                                PAINEL / TAG
+                              </div>
+                              <div className="font-semibold text-amber-400 truncate">
+                                {reconstructedSheet.tagsPrincipais}
+                              </div>
+                            </div>
+                            <div className="col-span-2 p-2 border-r border-slate-700">
+                              <div className="text-[9px] text-slate-400 uppercase">
+                                TÍTULO DA FOLHA NO SELO
+                              </div>
+                              <div className="font-semibold text-sky-300 truncate">
+                                {reconstructedSheet.tituloFolha}
+                              </div>
+                            </div>
+                            <div className="p-2 flex items-center justify-between">
+                              <div>
+                                <div className="text-[9px] text-slate-400 uppercase">
+                                  FOLHA SELO
+                                </div>
+                                <div className="font-bold text-white">
+                                  #{reconstructedSheet.folhaSelo}
+                                </div>
+                              </div>
+                              <div className="text-right">
+                                <div className="text-[9px] text-slate-400 uppercase">
+                                  PÁG. PDF
+                                </div>
+                                <div className="font-bold text-sky-400">
+                                  {currentPage}/{effectiveTotalPages}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
                       </div>
                     </div>
-                    <div className="p-2 border-b border-slate-700">
-                      <div className="text-[9px] text-slate-400 uppercase">
-                        PAINEL / TAG
-                      </div>
-                      <div className="font-semibold text-amber-400 truncate">
-                        {reconstructedSheet.tagsPrincipais}
-                      </div>
-                    </div>
-                    <div className="col-span-2 p-2 border-r border-slate-700">
-                      <div className="text-[9px] text-slate-400 uppercase">
-                        TÍTULO DA FOLHA NO SELO
-                      </div>
-                      <div className="font-semibold text-sky-300 truncate">
-                        {reconstructedSheet.tituloFolha}
-                      </div>
-                    </div>
-                    <div className="p-2 flex items-center justify-between">
-                      <div>
-                        <div className="text-[9px] text-slate-400 uppercase">
-                          FOLHA SELO
-                        </div>
-                        <div className="font-bold text-white">
-                          #{reconstructedSheet.folhaSelo}
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div className="text-[9px] text-slate-400 uppercase">
-                          PÁG. PDF
-                        </div>
-                        <div className="font-bold text-sky-400">
-                          {currentPage}/{effectiveTotalPages}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
+                  )}
                 </div>
               </div>
-            </div>
-          )}
+            )}
         </div>
 
         {/* Footer with Cached Index Summary for the Inspected Batch */}

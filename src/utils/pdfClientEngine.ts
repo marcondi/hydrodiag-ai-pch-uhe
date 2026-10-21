@@ -1,5 +1,11 @@
 import { PDFDocument } from 'pdf-lib';
+import * as pdfjsLib from 'pdfjs-dist';
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { DiagramAttachment } from '../types';
+
+if (typeof window !== 'undefined' && pdfjsLib.GlobalWorkerOptions) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+}
 
 export interface PageBatchIndex {
   startPage: number;
@@ -1025,6 +1031,7 @@ export async function extractSinglePdfPageUrl(
   pageNumberOneBased: number
 ): Promise<{
   blobUrl: string;
+  pageImageUrl: string | null;
   totalPages: number;
   actualPage: number;
 }> {
@@ -1043,8 +1050,37 @@ export async function extractSinglePdfPageUrl(
   });
   const blobUrl = URL.createObjectURL(blob);
 
+  // Render high-resolution raster sheet (2.5x scale) so CAD Pan ("Mãozinha") and Mouse Zoom work directly on the drawing
+  let pageImageUrl: string | null = null;
+  try {
+    if (typeof document !== 'undefined') {
+      const loadingTask = pdfjsLib.getDocument({
+        data: new Uint8Array(singlePdfBytes),
+      });
+      const pdfDoc = await loadingTask.promise;
+      const page = await pdfDoc.getPage(1);
+      const viewport = page.getViewport({ scale: 2.5 });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.floor(viewport.width);
+      canvas.height = Math.floor(viewport.height);
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        await page.render({
+          canvasContext: ctx,
+          viewport,
+          canvas,
+        }).promise;
+        pageImageUrl = canvas.toDataURL('image/png');
+      }
+      await loadingTask.destroy();
+    }
+  } catch {
+    pageImageUrl = null;
+  }
+
   return {
     blobUrl,
+    pageImageUrl,
     totalPages,
     actualPage,
   };
