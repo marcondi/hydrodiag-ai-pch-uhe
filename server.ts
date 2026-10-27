@@ -2074,6 +2074,7 @@ Responda em Markdown técnico claro, objetivo e direto para auxiliar o operador 
         'src/components/FaultChatPanel.tsx',
         'src/components/PdfDeepLinkDrawer.tsx',
         'src/components/FieldCameraModal.tsx',
+        'src/components/MobileQrHandoffModal.tsx',
         'src/components/GitHubDeployModal.tsx',
       ];
 
@@ -2337,6 +2338,7 @@ Sistema especialista multimodal desenvolvido para engenharia de manutenção, pr
     'src/components/FaultChatPanel.tsx',
     'src/components/PdfDeepLinkDrawer.tsx',
     'src/components/FieldCameraModal.tsx',
+    'src/components/MobileQrHandoffModal.tsx',
     'src/components/GitHubDeployModal.tsx',
   ];
 

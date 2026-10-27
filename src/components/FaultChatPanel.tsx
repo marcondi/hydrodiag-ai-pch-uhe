@@ -20,6 +20,8 @@ import {
   ArrowUp,
   ChevronDown,
   ChevronUp,
+  Mic,
+  MicOff,
 } from 'lucide-react';
 import {
   ChatAttachmentPayload,
@@ -178,12 +180,82 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
   const [showSuggestions, setShowSuggestions] = useState<boolean>(
     () => messages.length === 0
   );
+  const [isListeningVoice, setIsListeningVoice] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const plusMenuRef = useRef<HTMLDivElement | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+  const speechRecRef = useRef<{ stop: () => void } | null>(null);
+
+  const toggleChatVoiceDictation = () => {
+    if (isListeningVoice) {
+      try {
+        speechRecRef.current?.stop();
+      } catch {
+        // Ignore
+      }
+      speechRecRef.current = null;
+      setIsListeningVoice(false);
+      return;
+    }
+
+    const win = window as unknown as {
+      SpeechRecognition?: new () => {
+        lang: string;
+        continuous: boolean;
+        interimResults: boolean;
+        onresult: (event: {
+          results: ArrayLike<{ 0: { transcript: string } }>;
+        }) => void;
+        onerror: () => void;
+        onend: () => void;
+        start: () => void;
+        stop: () => void;
+      };
+      webkitSpeechRecognition?: new () => {
+        lang: string;
+        continuous: boolean;
+        interimResults: boolean;
+        onresult: (event: {
+          results: ArrayLike<{ 0: { transcript: string } }>;
+        }) => void;
+        onerror: () => void;
+        onend: () => void;
+        start: () => void;
+        stop: () => void;
+      };
+    };
+
+    const SpeechRecClass =
+      win.SpeechRecognition || win.webkitSpeechRecognition;
+    if (!SpeechRecClass) return;
+
+    try {
+      const rec = new SpeechRecClass();
+      rec.lang = 'pt-BR';
+      rec.continuous = false;
+      rec.interimResults = false;
+      rec.onresult = (event) => {
+        const idx = event.results.length - 1;
+        const transcript = event.results[idx]?.[0]?.transcript?.trim();
+        if (transcript) {
+          setInputText((prev) =>
+            prev.trim() ? `${prev.trim()} ${transcript}` : transcript
+          );
+          setTimeout(() => textareaRef.current?.focus(), 30);
+        }
+      };
+      rec.onerror = () => setIsListeningVoice(false);
+      rec.onend = () => setIsListeningVoice(false);
+      speechRecRef.current = rec;
+      setIsListeningVoice(true);
+      rec.start();
+    } catch {
+      setIsListeningVoice(false);
+    }
+  };
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -954,6 +1026,30 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
               placeholder="Pergunte qualquer coisa, cole (Ctrl+V) uma print/foto ou clique no + para anexar PDF..."
               className="flex-1 bg-transparent border-0 px-1 py-1.5 text-sm text-slate-100 placeholder:text-slate-400 focus:outline-none resize-none max-h-32 overflow-y-auto leading-relaxed"
             />
+
+            {/* Hands-Free Voice Dictation Button (pt-BR) */}
+            <button
+              type="button"
+              disabled={isSending}
+              onClick={toggleChatVoiceDictation}
+              title={
+                isListeningVoice
+                  ? 'Parar ditado por voz'
+                  : 'Ditar medição/pergunta por voz (Mãos ocupadas com o multímetro)'
+              }
+              aria-label="Ditar por voz"
+              className={`w-9 h-9 rounded-full flex items-center justify-center transition-all cursor-pointer shrink-0 border ${
+                isListeningVoice
+                  ? 'bg-rose-600 text-white border-rose-400 animate-pulse'
+                  : 'bg-slate-800/90 hover:bg-slate-700 text-sky-300 border-slate-700'
+              }`}
+            >
+              {isListeningVoice ? (
+                <MicOff className="w-4 h-4" />
+              ) : (
+                <Mic className="w-4 h-4" />
+              )}
+            </button>
 
             {/* Circular Send Button */}
             <button

@@ -12,6 +12,13 @@ import {
   Video,
   Image as ImageIcon,
   Loader2,
+  Mic,
+  MicOff,
+  Circle,
+  MoveUpRight,
+  Pencil,
+  Undo2,
+  Trash2,
 } from 'lucide-react';
 
 export interface FieldPhotoCapturePayload {
@@ -32,6 +39,20 @@ interface FieldCameraModalProps {
   onCaptureSubmit: (payload: FieldPhotoCapturePayload) => Promise<void>;
 }
 
+type AnnotationTool = 'circle' | 'arrow' | 'pen';
+
+interface NormalizedPoint {
+  x: number; // 0..1
+  y: number; // 0..1
+}
+
+export interface PhotoAnnotationShape {
+  id: string;
+  tool: AnnotationTool;
+  color: string;
+  points: NormalizedPoint[];
+}
+
 const QUICK_PANEL_TAGS = [
   'PCPG1',
   'PCPG2',
@@ -47,8 +68,147 @@ const QUICK_FIELD_NOTES = [
   'Foto da régua de bornes e anilhas para conferência na Sala de Comando',
   'LED de alarme / falha aceso no cartão do CLP / relé de proteção',
   'Leitura do multímetro nos bornes durante teste com ponta de prova',
-  ' Estado físico de contator / relé auxiliar / fiação no painel',
+  'Estado físico de contator / relé auxiliar / fiação no painel',
 ];
+
+const ANNOTATION_COLORS = [
+  { label: 'Vermelho (Falha/Borne)', hex: '#EF4444' },
+  { label: 'Amarelo (Atenção)', hex: '#F59E0B' },
+  { label: 'Verde (Confirmado)', hex: '#10B981' },
+];
+
+export function drawAnnotationShapeOnCtx(
+  ctx: CanvasRenderingContext2D,
+  shape: PhotoAnnotationShape,
+  width: number,
+  height: number
+) {
+  if (shape.points.length < 2) return;
+  const strokeWidth = Math.max(3, Math.round(Math.min(width, height) * 0.0075));
+  ctx.save();
+  ctx.strokeStyle = shape.color;
+  ctx.fillStyle = shape.color;
+  ctx.lineWidth = strokeWidth;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.75)';
+  ctx.shadowBlur = 4;
+
+  const first = shape.points[0];
+  const last = shape.points[shape.points.length - 1];
+  const x1 = first.x * width;
+  const y1 = first.y * height;
+  const x2 = last.x * width;
+  const y2 = last.y * height;
+
+  if (shape.tool === 'circle') {
+    const cx = (x1 + x2) / 2;
+    const cy = (y1 + y2) / 2;
+    const rx = Math.max(8, Math.abs(x2 - x1) / 2);
+    const ry = Math.max(8, Math.abs(y2 - y1) / 2);
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  } else if (shape.tool === 'arrow') {
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+
+    const angle = Math.atan2(y2 - y1, x2 - x1);
+    const headLen = Math.max(14, strokeWidth * 4.2);
+    ctx.beginPath();
+    ctx.moveTo(x2, y2);
+    ctx.lineTo(
+      x2 - headLen * Math.cos(angle - Math.PI / 6),
+      y2 - headLen * Math.sin(angle - Math.PI / 6)
+    );
+    ctx.lineTo(
+      x2 - headLen * Math.cos(angle + Math.PI / 6),
+      y2 - headLen * Math.sin(angle + Math.PI / 6)
+    );
+    ctx.closePath();
+    ctx.fill();
+  } else {
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    for (let i = 1; i < shape.points.length; i++) {
+      ctx.lineTo(shape.points[i].x * width, shape.points[i].y * height);
+    }
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+async function bakeAnnotationsIntoDataUrl(
+  sourceDataUrl: string,
+  shapes: PhotoAnnotationShape[]
+): Promise<{
+  base64: string;
+  previewDataUrl: string;
+  sizeBytes: number;
+}> {
+  if (shapes.length === 0) {
+    const b64 = sourceDataUrl.includes(',')
+      ? sourceDataUrl.split(',')[1]
+      : sourceDataUrl;
+    return {
+      base64: b64,
+      previewDataUrl: sourceDataUrl,
+      sizeBytes: Math.round((b64.length * 3) / 4),
+    };
+  }
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const width = img.naturalWidth || img.width || 1280;
+      const height = img.naturalHeight || img.height || 960;
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        const b64 = sourceDataUrl.includes(',')
+          ? sourceDataUrl.split(',')[1]
+          : sourceDataUrl;
+        resolve({
+          base64: b64,
+          previewDataUrl: sourceDataUrl,
+          sizeBytes: Math.round((b64.length * 3) / 4),
+        });
+        return;
+      }
+
+      ctx.drawImage(img, 0, 0, width, height);
+      for (const shape of shapes) {
+        drawAnnotationShapeOnCtx(ctx, shape, width, height);
+      }
+
+      const finalDataUrl = canvas.toDataURL('image/jpeg', 0.86);
+      const finalB64 = finalDataUrl.includes(',')
+        ? finalDataUrl.split(',')[1]
+        : finalDataUrl;
+      resolve({
+        base64: finalB64,
+        previewDataUrl: finalDataUrl,
+        sizeBytes: Math.round((finalB64.length * 3) / 4),
+      });
+    };
+    img.onerror = () => {
+      const b64 = sourceDataUrl.includes(',')
+        ? sourceDataUrl.split(',')[1]
+        : sourceDataUrl;
+      resolve({
+        base64: b64,
+        previewDataUrl: sourceDataUrl,
+        sizeBytes: Math.round((b64.length * 3) / 4),
+      });
+    };
+    img.src = sourceDataUrl;
+  });
+}
 
 async function compressFieldPhotoFile(file: File): Promise<{
   base64: string;
@@ -151,6 +311,8 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const speechRecRef = useRef<{ stop: () => void } | null>(null);
 
   const [isLiveVideoOpen, setIsLiveVideoOpen] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
@@ -161,6 +323,19 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
     sizeBytes: number;
     fileName: string;
   } | null>(null);
+
+  // Annotation ("Caneta de Inspeção") state
+  const [annotationTool, setAnnotationTool] =
+    useState<AnnotationTool>('circle');
+  const [annotationColor, setAnnotationColor] = useState<string>('#EF4444');
+  const [annotations, setAnnotations] = useState<PhotoAnnotationShape[]>([]);
+  const [activeShape, setActiveShape] = useState<PhotoAnnotationShape | null>(
+    null
+  );
+
+  // Voice Dictation ("Mãos Ocupadas com Multímetro") state
+  const [isListeningVoice, setIsListeningVoice] = useState(false);
+  const [voiceStatusText, setVoiceStatusText] = useState<string | null>(null);
 
   const [selectedPanel, setSelectedPanel] = useState<string>('PCPG1');
   const [fieldNote, setFieldNote] = useState<string>('');
@@ -175,9 +350,23 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
     setIsLiveVideoOpen(false);
   };
 
+  const stopVoiceDictation = () => {
+    if (speechRecRef.current) {
+      try {
+        speechRecRef.current.stop();
+      } catch {
+        // Ignore
+      }
+      speechRecRef.current = null;
+    }
+    setIsListeningVoice(false);
+    setVoiceStatusText(null);
+  };
+
   useEffect(() => {
     if (!isOpen) {
       stopLiveCamera();
+      stopVoiceDictation();
       setCameraError(null);
       setSubmitSuccessMsg(null);
       return;
@@ -187,6 +376,7 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
       if (e.key === 'Escape' || e.key === 'Esc') {
         e.preventDefault();
         stopLiveCamera();
+        stopVoiceDictation();
         onClose();
       }
     };
@@ -199,10 +389,151 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
   useEffect(() => {
     return () => {
       stopLiveCamera();
+      stopVoiceDictation();
     };
   }, []);
 
+  // Re-render annotations on the interactive overlay canvas
+  useEffect(() => {
+    const canvas = overlayCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const allShapes = activeShape
+      ? [...annotations, activeShape]
+      : annotations;
+    for (const shape of allShapes) {
+      drawAnnotationShapeOnCtx(ctx, shape, canvas.width, canvas.height);
+    }
+  }, [annotations, activeShape, capturedPhoto]);
+
   if (!isOpen) return null;
+
+  const toggleVoiceDictation = () => {
+    if (isListeningVoice) {
+      stopVoiceDictation();
+      return;
+    }
+
+    const win = window as unknown as {
+      SpeechRecognition?: new () => {
+        lang: string;
+        continuous: boolean;
+        interimResults: boolean;
+        onresult: (event: {
+          results: ArrayLike<{ 0: { transcript: string }; isFinal?: boolean }>;
+        }) => void;
+        onerror: () => void;
+        onend: () => void;
+        start: () => void;
+        stop: () => void;
+      };
+      webkitSpeechRecognition?: new () => {
+        lang: string;
+        continuous: boolean;
+        interimResults: boolean;
+        onresult: (event: {
+          results: ArrayLike<{ 0: { transcript: string }; isFinal?: boolean }>;
+        }) => void;
+        onerror: () => void;
+        onend: () => void;
+        start: () => void;
+        stop: () => void;
+      };
+    };
+
+    const SpeechRecClass =
+      win.SpeechRecognition || win.webkitSpeechRecognition;
+    if (!SpeechRecClass) {
+      setVoiceStatusText(
+        'Seu navegador atual não suporta ditado por voz nativo. Use o microfone do teclado do celular.'
+      );
+      setTimeout(() => setVoiceStatusText(null), 4000);
+      return;
+    }
+
+    try {
+      const rec = new SpeechRecClass();
+      rec.lang = 'pt-BR';
+      rec.continuous = false;
+      rec.interimResults = false;
+
+      rec.onresult = (event) => {
+        const lastIdx = event.results.length - 1;
+        const transcript = event.results[lastIdx]?.[0]?.transcript?.trim();
+        if (transcript) {
+          setFieldNote((prev) =>
+            prev.trim() ? `${prev.trim()} — ${transcript}` : transcript
+          );
+        }
+      };
+
+      rec.onerror = () => {
+        setIsListeningVoice(false);
+        setVoiceStatusText(null);
+      };
+
+      rec.onend = () => {
+        setIsListeningVoice(false);
+        setVoiceStatusText(null);
+      };
+
+      speechRecRef.current = rec;
+      setIsListeningVoice(true);
+      setVoiceStatusText(
+        'Ouvindo... Fale a medição do multímetro ou estado do borne/LED.'
+      );
+      rec.start();
+    } catch {
+      setIsListeningVoice(false);
+      setVoiceStatusText(null);
+    }
+  };
+
+  const getNormalizedPointFromEvent = (
+    clientX: number,
+    clientY: number
+  ): NormalizedPoint | null => {
+    const canvas = overlayCanvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    const x = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    const y = Math.min(1, Math.max(0, (clientY - rect.top) / rect.height));
+    return { x, y };
+  };
+
+  const handlePointerStart = (clientX: number, clientY: number) => {
+    const pt = getNormalizedPointFromEvent(clientX, clientY);
+    if (!pt) return;
+    setActiveShape({
+      id: `ann_${Date.now()}`,
+      tool: annotationTool,
+      color: annotationColor,
+      points: [pt, pt],
+    });
+  };
+
+  const handlePointerMove = (clientX: number, clientY: number) => {
+    if (!activeShape) return;
+    const pt = getNormalizedPointFromEvent(clientX, clientY);
+    if (!pt) return;
+    setActiveShape((prev) => {
+      if (!prev) return null;
+      if (prev.tool === 'pen') {
+        return { ...prev, points: [...prev.points, pt] };
+      }
+      return { ...prev, points: [prev.points[0], pt] };
+    });
+  };
+
+  const handlePointerEnd = () => {
+    if (!activeShape) return;
+    setAnnotations((prev) => [...prev, activeShape]);
+    setActiveShape(null);
+  };
 
   const startLiveWebRtcCamera = async () => {
     setCameraError(null);
@@ -266,6 +597,8 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
       .toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
       .replace(':', 'h');
 
+    setAnnotations([]);
+    setActiveShape(null);
     setCapturedPhoto({
       base64: b64,
       mimeType: 'image/jpeg',
@@ -286,6 +619,8 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
       .toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
       .replace(':', 'h');
     const cleanPanel = selectedPanel.replace(/[^A-Z0-9]/gi, '') || 'PAINEL';
+    setAnnotations([]);
+    setActiveShape(null);
     setCapturedPhoto({
       ...compressed,
       fileName: `FOTO_CAMPO_${cleanPanel}_${stamp}.jpg`,
@@ -298,16 +633,21 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
     setIsSubmitting(true);
     setSubmitSuccessMsg(null);
     try {
+      const baked = await bakeAnnotationsIntoDataUrl(
+        capturedPhoto.previewDataUrl,
+        annotations
+      );
+
       await onCaptureSubmit({
-        base64: capturedPhoto.base64,
+        base64: baked.base64,
         mimeType: capturedPhoto.mimeType,
-        previewDataUrl: capturedPhoto.previewDataUrl,
+        previewDataUrl: baked.previewDataUrl,
         fileName: capturedPhoto.fileName,
-        sizeBytes: capturedPhoto.sizeBytes,
+        sizeBytes: baked.sizeBytes,
         panelName: selectedPanel.trim() || 'Painel de Campo',
         fieldNote:
           fieldNote.trim() ||
-          `Foto capturada em campo no painel ${selectedPanel || 'da usina'} para continuidade de análise na Sala de Comando.`,
+          `Foto capturada em campo no painel ${selectedPanel || 'da usina'}${annotations.length > 0 ? ' (com marcação visual em vermelho/amarelo no ponto inspecionado)' : ''} para continuidade de análise na Sala de Comando.`,
         mode,
       });
 
@@ -317,11 +657,13 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
         );
         setTimeout(() => {
           setCapturedPhoto(null);
+          setAnnotations([]);
           setSubmitSuccessMsg(null);
           onClose();
         }, 1400);
       } else {
         setCapturedPhoto(null);
+        setAnnotations([]);
         onClose();
       }
     } finally {
@@ -361,7 +703,7 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
               </h3>
               <p className="text-[11px] text-slate-400 flex items-center gap-1.5 mt-0.5">
                 <Smartphone className="w-3 h-3 text-emerald-400" />
-                <span>Tire a foto no painel</span>
+                <span>Tire a foto e circule o borne</span>
                 <ArrowRight className="w-3 h-3 text-slate-500" />
                 <Laptop className="w-3 h-3 text-sky-400" />
                 <span>Continue no Notebook da Sala de Comando</span>
@@ -373,6 +715,7 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
             type="button"
             onClick={() => {
               stopLiveCamera();
+              stopVoiceDictation();
               onClose();
             }}
             className="px-2.5 py-1.5 text-slate-400 hover:text-white bg-slate-800/80 hover:bg-rose-600/30 border border-slate-700 rounded-md flex items-center gap-1 cursor-pointer"
@@ -409,9 +752,9 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
                   Fotografar Painel, Régua de Bornes, Relé ou IHM
                 </h4>
                 <p className="text-xs text-slate-400">
-                  A foto é otimizada automaticamente em alta nitidez para leitura
-                  de anilhas (<code>X2:61</code>, <code>A70.0</code>) e
-                  sincronizada na nuvem para abrir direto no Notebook.
+                  Após tirar a foto, você pode <strong>circular em vermelho</strong>{' '}
+                  o borne ou relé na própria tela e usar o{' '}
+                  <strong>ditado por voz</strong> enquanto segura o multímetro.
                 </p>
               </div>
 
@@ -462,7 +805,6 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
                 muted
                 className="w-full max-h-80 object-contain bg-black"
               />
-              {/* Framing Reticle for Terminal Strips */}
               <div className="pointer-events-none absolute inset-6 border border-emerald-400/40 rounded-lg flex items-end justify-center pb-2">
                 <span className="px-2 py-0.5 rounded bg-black/70 text-[10px] font-mono text-emerald-300">
                   Enquadre as anilhas / bornes ou LEDs do cartão
@@ -488,19 +830,21 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
             </div>
           )}
 
-          {/* Preview of Captured Photo */}
+          {/* Preview of Captured Photo + Interactive Inspection Pen ("Caneta de Inspeção") */}
           {capturedPhoto && (
             <div className="p-3 rounded-xl bg-[#0B111E] border border-emerald-500/40 space-y-3">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs font-mono text-emerald-300 flex items-center gap-1.5">
                   <CheckCircle2 className="w-4 h-4 text-emerald-400" />
                   {capturedPhoto.fileName} (
-                  {Math.round(capturedPhoto.sizeBytes / 1024)} KB — Pronta p/
-                  Nuvem)
+                  {Math.round(capturedPhoto.sizeBytes / 1024)} KB)
                 </span>
                 <button
                   type="button"
-                  onClick={() => setCapturedPhoto(null)}
+                  onClick={() => {
+                    setCapturedPhoto(null);
+                    setAnnotations([]);
+                  }}
                   className="px-2.5 py-1 text-xs font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded flex items-center gap-1 cursor-pointer"
                 >
                   <RotateCcw className="w-3 h-3" />
@@ -508,13 +852,140 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
                 </button>
               </div>
 
-              <div className="max-h-64 overflow-hidden rounded-lg border border-slate-800 bg-black flex items-center justify-center">
-                <img
-                  src={capturedPhoto.previewDataUrl}
-                  alt="Foto capturada em campo"
-                  className="max-h-60 object-contain"
-                />
+              {/* Caneta de Inspeção Toolbar */}
+              <div className="p-2 rounded-lg bg-[#111827] border border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[11px] font-semibold text-slate-300 mr-1">
+                    Caneta de Inspeção:
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setAnnotationTool('circle')}
+                    className={`px-2 py-1 rounded text-[11px] flex items-center gap-1 cursor-pointer border ${
+                      annotationTool === 'circle'
+                        ? 'bg-rose-500/20 border-rose-500 text-rose-200 font-semibold'
+                        : 'bg-[#0B111E] border-slate-700 text-slate-300'
+                    }`}
+                    title="Arraste sobre a foto para circular um borne, relé ou LED"
+                  >
+                    <Circle className="w-3 h-3" />
+                    <span>Círculo</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAnnotationTool('arrow')}
+                    className={`px-2 py-1 rounded text-[11px] flex items-center gap-1 cursor-pointer border ${
+                      annotationTool === 'arrow'
+                        ? 'bg-rose-500/20 border-rose-500 text-rose-200 font-semibold'
+                        : 'bg-[#0B111E] border-slate-700 text-slate-300'
+                    }`}
+                    title="Arraste sobre a foto para apontar uma seta para o componente"
+                  >
+                    <MoveUpRight className="w-3 h-3" />
+                    <span>Seta</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAnnotationTool('pen')}
+                    className={`px-2 py-1 rounded text-[11px] flex items-center gap-1 cursor-pointer border ${
+                      annotationTool === 'pen'
+                        ? 'bg-rose-500/20 border-rose-500 text-rose-200 font-semibold'
+                        : 'bg-[#0B111E] border-slate-700 text-slate-300'
+                    }`}
+                    title="Traço livre sobre a foto"
+                  >
+                    <Pencil className="w-3 h-3" />
+                    <span>Traço</span>
+                  </button>
+
+                  {/* Color Swatches */}
+                  <div className="flex items-center gap-1 ml-1">
+                    {ANNOTATION_COLORS.map((c) => (
+                      <button
+                        key={c.hex}
+                        type="button"
+                        onClick={() => setAnnotationColor(c.hex)}
+                        title={c.label}
+                        style={{ backgroundColor: c.hex }}
+                        className={`w-5 h-5 rounded-full cursor-pointer border-2 ${
+                          annotationColor === c.hex
+                            ? 'border-white scale-110'
+                            : 'border-transparent opacity-70'
+                        }`}
+                      />
+                    ))}
+                  </div>
+                </div>
+
+                {annotations.length > 0 && (
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setAnnotations((prev) => prev.slice(0, -1))
+                      }
+                      className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] flex items-center gap-1 cursor-pointer"
+                    >
+                      <Undo2 className="w-3 h-3" />
+                      <span>Desfazer</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAnnotations([])}
+                      className="px-2 py-1 rounded bg-rose-950/60 hover:bg-rose-900/60 text-rose-200 text-[11px] flex items-center gap-1 cursor-pointer"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      <span>Limpar</span>
+                    </button>
+                  </div>
+                )}
               </div>
+
+              <div className="relative max-h-72 overflow-hidden rounded-lg border border-slate-800 bg-black flex items-center justify-center select-none">
+                <div className="relative inline-block">
+                  <img
+                    src={capturedPhoto.previewDataUrl}
+                    alt="Foto capturada em campo"
+                    className="max-h-64 w-auto object-contain block pointer-events-none"
+                  />
+                  <canvas
+                    ref={overlayCanvasRef}
+                    width={800}
+                    height={600}
+                    onMouseDown={(e) => handlePointerStart(e.clientX, e.clientY)}
+                    onMouseMove={(e) => handlePointerMove(e.clientX, e.clientY)}
+                    onMouseUp={handlePointerEnd}
+                    onMouseLeave={handlePointerEnd}
+                    onTouchStart={(e) => {
+                      if (e.touches.length === 1) {
+                        e.preventDefault();
+                        handlePointerStart(
+                          e.touches[0].clientX,
+                          e.touches[0].clientY
+                        );
+                      }
+                    }}
+                    onTouchMove={(e) => {
+                      if (e.touches.length === 1) {
+                        e.preventDefault();
+                        handlePointerMove(
+                          e.touches[0].clientX,
+                          e.touches[0].clientY
+                        );
+                      }
+                    }}
+                    onTouchEnd={() => handlePointerEnd()}
+                    className="absolute inset-0 w-full h-full cursor-crosshair touch-none"
+                  />
+                </div>
+              </div>
+              <p className="text-[11px] text-slate-400 text-center">
+                Dica: Arraste o dedo ou mouse sobre a foto acima para{' '}
+                <strong className="text-rose-300">
+                  circular ou apontar com seta
+                </strong>{' '}
+                o borne/LED defeituoso.
+              </p>
             </div>
           )}
 
@@ -548,11 +1019,43 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
             />
           </div>
 
-          {/* Step 3: Optional Field Observation */}
+          {/* Step 3: Field Observation + Hands-Free Voice Dictation */}
           <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-slate-300">
-              2. Observação Rápida de Campo (O que você viu ou mediu no painel?):
-            </label>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label className="block text-xs font-medium text-slate-300">
+                2. Observação Rápida de Campo (Digite ou dite por voz):
+              </label>
+
+              <button
+                type="button"
+                onClick={toggleVoiceDictation}
+                className={`px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1.5 cursor-pointer border transition-colors ${
+                  isListeningVoice
+                    ? 'bg-rose-600 text-white border-rose-400 animate-pulse'
+                    : 'bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border-sky-500/40'
+                }`}
+                title="Ditar medição por voz enquanto segura as pontas de prova do multímetro"
+              >
+                {isListeningVoice ? (
+                  <>
+                    <MicOff className="w-3.5 h-3.5" />
+                    <span>Parar Ditado</span>
+                  </>
+                ) : (
+                  <>
+                    <Mic className="w-3.5 h-3.5 text-sky-400" />
+                    <span>Ditar por Voz (Mãos Livres)</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            {voiceStatusText && (
+              <div className="px-3 py-1.5 rounded bg-rose-950/50 border border-rose-500/40 text-[11px] text-rose-200 font-mono">
+                🎙️ {voiceStatusText}
+              </div>
+            )}
+
             <div className="flex flex-wrap gap-1.5">
               {QUICK_FIELD_NOTES.map((preset, idx) => (
                 <button
@@ -595,9 +1098,7 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
               ) : (
                 <CloudUpload className="w-4 h-4 text-emerald-400" />
               )}
-              <span>
-                Salvar p/ Sala de Comando (Abrir no Notebook)
-              </span>
+              <span>Salvar p/ Sala de Comando (Abrir no Notebook)</span>
             </button>
 
             <button

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef, useState } from 'react';
 import {
   Activity,
   Wrench,
@@ -6,6 +6,8 @@ import {
   PackageSearch,
   Send,
   RotateCcw,
+  Mic,
+  MicOff,
 } from 'lucide-react';
 
 interface FaultQueryPanelProps {
@@ -72,6 +74,74 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
   isAnalyzing,
   hasPreviousTurns,
 }) => {
+  const [isListeningVoice, setIsListeningVoice] = useState(false);
+  const speechRecRef = useRef<{ stop: () => void } | null>(null);
+
+  const toggleVoiceQuery = () => {
+    if (isListeningVoice) {
+      try {
+        speechRecRef.current?.stop();
+      } catch {
+        // Ignore
+      }
+      speechRecRef.current = null;
+      setIsListeningVoice(false);
+      return;
+    }
+
+    const win = window as unknown as {
+      SpeechRecognition?: new () => {
+        lang: string;
+        continuous: boolean;
+        interimResults: boolean;
+        onresult: (event: {
+          results: ArrayLike<{ 0: { transcript: string } }>;
+        }) => void;
+        onerror: () => void;
+        onend: () => void;
+        start: () => void;
+        stop: () => void;
+      };
+      webkitSpeechRecognition?: new () => {
+        lang: string;
+        continuous: boolean;
+        interimResults: boolean;
+        onresult: (event: {
+          results: ArrayLike<{ 0: { transcript: string } }>;
+        }) => void;
+        onerror: () => void;
+        onend: () => void;
+        start: () => void;
+        stop: () => void;
+      };
+    };
+
+    const SpeechRecClass =
+      win.SpeechRecognition || win.webkitSpeechRecognition;
+    if (!SpeechRecClass) return;
+
+    try {
+      const rec = new SpeechRecClass();
+      rec.lang = 'pt-BR';
+      rec.continuous = false;
+      rec.interimResults = false;
+      rec.onresult = (event) => {
+        const idx = event.results.length - 1;
+        const transcript = event.results[idx]?.[0]?.transcript?.trim();
+        if (transcript) {
+          setQuery(query.trim() ? `${query.trim()} ${transcript}` : transcript);
+        }
+      };
+      rec.onerror = () => setIsListeningVoice(false);
+      rec.onend = () => setIsListeningVoice(false);
+      speechRecRef.current = rec;
+      setIsListeningVoice(true);
+      rec.start();
+    } catch {
+      setIsListeningVoice(false);
+    }
+  };
+
   const handleQuickButtonClick = async (btn: QuickSupportButtonConfig) => {
     if (isAnalyzing) return;
 
@@ -104,31 +174,53 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
           2. Consulta de Falha / Alarme
         </h2>
         <p className="text-[11px] text-slate-400 mt-0.5">
-          Descreva o alarme do supervisório (SCADA) ou sintoma em campo
+          Descreva ou dite por voz o alarme do supervisório (SCADA) ou sintoma
+          em campo
         </p>
       </div>
 
       <form onSubmit={handleSubmit} className="flex flex-col gap-3">
         <div className="flex flex-col gap-1">
-          <label
-            htmlFor="fault-query-input"
-            className="text-xs font-medium text-slate-300 flex items-center justify-between"
-          >
-            <span>Alarme ou Sintoma</span>
-            {query && (
+          <div className="text-xs font-medium text-slate-300 flex items-center justify-between gap-2">
+            <label htmlFor="fault-query-input">Alarme ou Sintoma</label>
+            <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => {
-                  setQuery('');
-                  setActiveFocusTopic('');
-                }}
-                className="text-[11px] text-slate-400 hover:text-slate-200 flex items-center gap-1 cursor-pointer"
+                onClick={toggleVoiceQuery}
+                className={`px-2 py-0.5 rounded text-[11px] font-medium flex items-center gap-1 cursor-pointer border transition-colors ${
+                  isListeningVoice
+                    ? 'bg-rose-600 text-white border-rose-400 animate-pulse'
+                    : 'bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border-sky-500/40'
+                }`}
+                title="Ditar alarme ou sintoma por voz (Português)"
               >
-                <RotateCcw className="w-3 h-3" />
-                <span>Limpar</span>
+                {isListeningVoice ? (
+                  <>
+                    <MicOff className="w-3 h-3" />
+                    <span>Ouvindo...</span>
+                  </>
+                ) : (
+                  <>
+                    <Mic className="w-3 h-3 text-sky-400" />
+                    <span>Ditar por Voz</span>
+                  </>
+                )}
               </button>
-            )}
-          </label>
+              {query && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setQuery('');
+                    setActiveFocusTopic('');
+                  }}
+                  className="text-[11px] text-slate-400 hover:text-slate-200 flex items-center gap-1 cursor-pointer"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Limpar</span>
+                </button>
+              )}
+            </div>
+          </div>
 
           <textarea
             id="fault-query-input"

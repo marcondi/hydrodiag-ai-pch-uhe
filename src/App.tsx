@@ -31,6 +31,7 @@ import {
   ArrowRight,
   Camera,
   Smartphone,
+  QrCode,
 } from 'lucide-react';
 import {
   ChatAttachmentPayload,
@@ -53,6 +54,7 @@ import {
   FieldCameraModal,
   FieldPhotoCapturePayload,
 } from './components/FieldCameraModal';
+import { MobileQrHandoffModal } from './components/MobileQrHandoffModal';
 import {
   deduplicateAttachments,
   extractSignalChainFromContext,
@@ -201,6 +203,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [sequenceModalOpen, setSequenceModalOpen] = useState<boolean>(false);
   const [fieldCameraOpen, setFieldCameraOpen] = useState<boolean>(false);
+  const [qrHandoffOpen, setQrHandoffOpen] = useState<boolean>(false);
   const [fieldSyncBanner, setFieldSyncBanner] = useState<string | null>(null);
   const [isLeftSidebarCollapsed, setIsLeftSidebarCollapsed] =
     useState<boolean>(false);
@@ -292,9 +295,12 @@ export default function App() {
           }
           if (!itemsOverride && turns.length === 0 && data.items.length > 0) {
             try {
-              const lastActiveId = localStorage.getItem(
-                ACTIVE_SESSION_STORAGE_KEY
-              );
+              const urlParams = new URLSearchParams(window.location.search);
+              const sessionFromUrl = urlParams.get('session');
+              const openCamFromUrl = urlParams.get('camera') === '1';
+              const lastActiveId =
+                sessionFromUrl ||
+                localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
               const toRestore =
                 (lastActiveId &&
                   data.items.find(
@@ -303,6 +309,9 @@ export default function App() {
                 null;
               if (toRestore) {
                 handleLoadInvestigation(toRestore);
+              }
+              if (openCamFromUrl) {
+                setFieldCameraOpen(true);
               }
             } catch {
               // Ignore
@@ -1714,6 +1723,16 @@ export default function App() {
 
           <button
             type="button"
+            onClick={() => setQrHandoffOpen(true)}
+            title="Gerar QR Code para abrir esta mesma investigação no Celular em 1 segundo antes de descer para a Casa de Força"
+            className="px-2.5 py-2 text-xs font-medium text-sky-200 bg-sky-600/20 hover:bg-sky-600/30 border border-sky-500/40 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+          >
+            <QrCode className="w-3.5 h-3.5 text-sky-400" />
+            <span className="hidden md:inline">QR Celular</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setFieldContrastMode((prev) => !prev)}
             title="Alternar Modo Alto Contraste de Campo (Casa de Força / Painel)"
             className={`px-3 py-2 text-xs font-medium rounded-md border transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
@@ -2456,6 +2475,13 @@ export default function App() {
         onClose={() => setFieldCameraOpen(false)}
         onCaptureSubmit={handleFieldPhotoCaptureSubmit}
         activeInvestigationTitle={turns[0]?.userQuery}
+      />
+
+      <MobileQrHandoffModal
+        isOpen={qrHandoffOpen}
+        onClose={() => setQrHandoffOpen(false)}
+        sessionId={sessionId}
+        investigationTitle={turns[0]?.userQuery}
       />
 
       <footer className="mt-auto border-t border-slate-800/80 px-6 py-4 text-xs text-slate-500 flex flex-wrap items-center justify-between gap-4 no-print">

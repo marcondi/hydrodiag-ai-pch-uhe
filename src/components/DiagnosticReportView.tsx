@@ -143,6 +143,27 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
 
     return (
       <div className="flex flex-col gap-4">
+        {/* Formal Ordem de Serviço (OS) Print Header */}
+        <div className="hidden print:block border-b-2 border-slate-800 pb-3 mb-2">
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-lg font-bold">
+                HYDRODIAG AI — ORDEM DE SERVIÇO &amp; PASSAGEM DE TURNO (PCH /
+                UHE)
+              </h1>
+              <p className="text-xs font-mono">
+                Status:{' '}
+                {investigationStatus === 'resolvida'
+                  ? 'RESOLVIDA EM CAMPO'
+                  : investigationStatus === 'aguardando_peca'
+                    ? 'AGUARDANDO PEÇA / SOBRESSALENTE'
+                    : 'EM INVESTIGAÇÃO TÉCNICA'}{' '}
+                · Emitido em: {new Date().toLocaleString('pt-BR')}
+              </p>
+            </div>
+          </div>
+        </div>
+
         {/* Active Query Context Summary Box */}
         <div className="p-3 rounded-md bg-[#0B111E] border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
           <div className="space-y-1 min-w-0">
@@ -193,9 +214,9 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
           </div>
         </div>
 
-        {/* GALERIA DE FOTOS DE CAMPO SINCRONIZADAS (CELULAR ➔ SALA DE COMANDO) */}
+        {/* GALERIA DE FOTOS DE CAMPO SINCRONIZADAS (CELULAR ➔ SALA DE COMANDO) — INCLUÍDA NA ORDEM DE SERVIÇO (OS) */}
         {attachments.some((a) => a.mimeType !== 'application/pdf') && (
-          <div className="rounded-lg bg-emerald-950/20 border border-emerald-800/50 px-3.5 py-2.5 flex flex-col gap-2.5 no-print">
+          <div className="rounded-lg bg-emerald-950/20 border border-emerald-800/50 px-3.5 py-2.5 flex flex-col gap-2.5">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-300">
                 <Camera className="w-4 h-4 text-emerald-400 shrink-0" />
@@ -208,7 +229,7 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
                 <button
                   type="button"
                   onClick={onOpenFieldCamera}
-                  className="text-[11px] font-medium text-emerald-300 hover:text-emerald-200 flex items-center gap-1 cursor-pointer"
+                  className="text-[11px] font-medium text-emerald-300 hover:text-emerald-200 flex items-center gap-1 cursor-pointer no-print"
                 >
                   <PlusCircle className="w-3 h-3" />
                   <span>+ Nova Foto de Campo</span>
@@ -257,7 +278,7 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
                             {photoAtt.name}
                           </span>
                         </div>
-                        <div className="flex flex-wrap items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2 no-print">
                           <button
                             type="button"
                             onClick={() =>
@@ -288,11 +309,11 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
           </div>
         )}
 
-        {/* ITEM 5: LINHA DO TEMPO VISUAL DE RASTREAMENTO ENTRE PAINÉIS ("CADEIA DE SINAL") */}
+        {/* ITEM 5: LINHA DO TEMPO VISUAL DE RASTREAMENTO ENTRE PAINÉIS ("CADEIA DE SINAL") — INCLUÍDA NA OS */}
         {signalChain.length > 0 && (
           <div
             aria-label="Linha do Tempo de Rastreamento entre Painéis"
-            className="rounded-lg bg-[#0B111E] border border-slate-800 px-3.5 py-2.5 flex flex-col gap-2 no-print"
+            className="rounded-lg bg-[#0B111E] border border-slate-800 px-3.5 py-2.5 flex flex-col gap-2"
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
@@ -304,7 +325,7 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
               <button
                 type="button"
                 onClick={onOpenSequenceUpload}
-                className="text-[11px] font-medium text-amber-300 hover:text-amber-200 flex items-center gap-1 cursor-pointer"
+                className="text-[11px] font-medium text-amber-300 hover:text-amber-200 flex items-center gap-1 cursor-pointer no-print"
                 title="Anexar próximo caderno de painel na sequência"
               >
                 <PlusCircle className="w-3 h-3" />
@@ -612,8 +633,8 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
         </div>
       </div>
 
-      {/* Field Resolution Note Box (Saved in Fault History DB) */}
-      <div className="p-3.5 rounded-lg bg-[#0B111E] border border-slate-800 flex flex-col gap-2 no-print">
+      {/* Field Resolution Note Box (Saved in Fault History DB & Included in Printed OS) */}
+      <div className="p-3.5 rounded-lg bg-[#0B111E] border border-slate-800 flex flex-col gap-2">
         <div className="flex items-center justify-between gap-2">
           <label
             htmlFor="field-resolution-note"
@@ -622,11 +643,11 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
             <CheckCircle2 className="w-4 h-4 text-emerald-400" />
             <span>
               Registro de Resolução em Campo / Causa Raiz Confirmada (Salvo no
-              Supabase)
+              Supabase &amp; OS)
             </span>
           </label>
           {noteSavedToast && (
-            <span className="text-[11px] text-emerald-400 font-mono">
+            <span className="text-[11px] text-emerald-400 font-mono no-print">
               Salvo automaticamente
             </span>
           )}
