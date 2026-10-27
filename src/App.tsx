@@ -1649,11 +1649,11 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#0B111E] text-slate-100 flex flex-col">
-      {/* Top Bar Contract: Zero-overflow layout + Modo Sanduíche (Hamburger Menu) */}
+      {/* Top Bar Contract: Modo Sanduíche Puro (Zero repetição de botões entre a barra e o menu) */}
       <header className="sticky top-0 z-40 w-full border-b border-slate-800 bg-[#0B111E]/95 backdrop-blur-md no-print">
         <div className="max-w-[1440px] w-full mx-auto flex items-center justify-between gap-3 px-4 sm:px-6 py-3">
-          {/* Zone 1: Brand + Active Section Indicator on compact screens */}
-          <div className="flex items-center gap-3 min-w-0 shrink-0">
+          {/* Esquerda: Marca + Módulo Ativo Atual */}
+          <div className="flex items-center gap-2.5 min-w-0">
             <a
               href="#bancada"
               onClick={(e) => {
@@ -1665,133 +1665,43 @@ export default function App() {
             >
               HydroDiag AI
             </a>
-            <span
-              aria-hidden="true"
-              className="text-slate-700 hidden sm:inline xl:hidden"
-            >
+            <span aria-hidden="true" className="text-slate-700">
               /
             </span>
-            <span className="text-xs font-medium text-sky-400 truncate hidden sm:inline xl:hidden">
+            <span className="text-xs sm:text-sm font-medium text-sky-400 truncate">
               {activeNavTab === 'bancada' && 'Bancada de Diagnóstico'}
               {activeNavTab === 'historico' &&
-                `Histórico (${savedInvestigations.length})`}
+                `Histórico de Falhas (${savedInvestigations.length})`}
               {activeNavTab === 'sequencia' &&
-                `Sequência (${attachments.length})`}
+                `Sequência de Desenhos (${attachments.length})`}
               {activeNavTab === 'seguranca' && 'Segurança NR-10'}
               {activeNavTab === 'github' && 'Backup, Vercel & GitHub'}
             </span>
+
+            {activeNavTab !== 'bancada' && (
+              <button
+                type="button"
+                onClick={() => setActiveNavTab('bancada')}
+                className="ml-1 px-2.5 py-1 rounded-md bg-slate-800/80 hover:bg-slate-700 text-slate-200 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                ← Voltar à Bancada
+              </button>
+            )}
           </div>
 
-          {/* Zone 2: Clean Desktop Navigation (visible when viewport has generous width, never clips) */}
-          <nav
-            aria-label="Navegação Principal"
-            className="hidden xl:flex items-center gap-5 text-sm font-medium text-slate-400 min-w-0"
-          >
-            <a
-              href="#bancada"
-              onClick={(e) => {
-                e.preventDefault();
-                setActiveNavTab('bancada');
-              }}
-              className={`hover:text-slate-100 transition-colors whitespace-nowrap py-1 ${
-                activeNavTab === 'bancada'
-                  ? 'text-sky-400 underline underline-offset-8 decoration-2 decoration-sky-400'
-                  : ''
-              }`}
-            >
-              Bancada de Diagnóstico
-            </a>
-            <a
-              href="#historico"
-              onClick={(e) => {
-                e.preventDefault();
-                setActiveNavTab('historico');
-              }}
-              className={`hover:text-slate-100 transition-colors whitespace-nowrap py-1 ${
-                activeNavTab === 'historico'
-                  ? 'text-sky-400 underline underline-offset-8 decoration-2 decoration-sky-400'
-                  : ''
-              }`}
-            >
-              Histórico ({savedInvestigations.length})
-            </a>
-            <a
-              href="#sequencia"
-              onClick={(e) => {
-                e.preventDefault();
-                setActiveNavTab('sequencia');
-              }}
-              className={`hover:text-slate-100 transition-colors whitespace-nowrap py-1 ${
-                activeNavTab === 'sequencia'
-                  ? 'text-sky-400 underline underline-offset-8 decoration-2 decoration-sky-400'
-                  : ''
-              }`}
-            >
-              Sequência ({attachments.length})
-            </a>
-            <a
-              href="#seguranca"
-              onClick={(e) => {
-                e.preventDefault();
-                setActiveNavTab('seguranca');
-              }}
-              className={`hover:text-slate-100 transition-colors whitespace-nowrap py-1 ${
-                activeNavTab === 'seguranca'
-                  ? 'text-sky-400 underline underline-offset-8 decoration-2 decoration-sky-400'
-                  : ''
-              }`}
-            >
-              Segurança NR-10
-            </a>
-            <a
-              href="#github"
-              onClick={(e) => {
-                e.preventDefault();
-                setActiveNavTab('github');
-              }}
-              className={`hover:text-slate-100 transition-colors whitespace-nowrap py-1 ${
-                activeNavTab === 'github'
-                  ? 'text-sky-400 underline underline-offset-8 decoration-2 decoration-sky-400'
-                  : ''
-              }`}
-            >
-              Backup, Vercel &amp; GitHub
-            </a>
-          </nav>
-
-          {/* Zone 3: Essential Quick Actions + Botão Menu Sanduíche (Zero Clipping) */}
+          {/* Direita: Apenas Nova Investigação + Botão Menu Sanduíche (Zero repetição com o conteúdo do menu) */}
           <div
             ref={headerMenuRef}
-            className="relative flex items-center gap-2 shrink-0"
+            className="relative flex items-center gap-2.5 shrink-0"
           >
-            <button
-              type="button"
-              onClick={() => setFieldCameraOpen(true)}
-              title="Tirar foto de painel/borne no celular em campo e sincronizar automaticamente com o Notebook da Sala de Comando"
-              className="px-2.5 sm:px-3 py-2 text-xs font-semibold text-emerald-200 bg-emerald-600/25 hover:bg-emerald-600/35 border border-emerald-500/50 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
-            >
-              <Camera className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-              <span className="hidden sm:inline">Foto de Campo</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setQrHandoffOpen(true)}
-              title="Gerar QR Code para abrir esta mesma investigação no Celular em 1 segundo antes de descer para a Casa de Força"
-              className="hidden md:flex px-2.5 py-2 text-xs font-medium text-sky-200 bg-sky-600/20 hover:bg-sky-600/30 border border-sky-500/40 rounded-md transition-colors whitespace-nowrap shrink-0 items-center gap-1.5 cursor-pointer"
-            >
-              <QrCode className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-              <span>QR Celular</span>
-            </button>
-
             <button
               type="button"
               onClick={handleNewInvestigation}
               title="Iniciar uma nova investigação limpa"
-              className="px-2.5 sm:px-3 py-2 text-xs font-medium text-white bg-sky-600 hover:bg-sky-500 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+              className="px-3 py-2 text-xs font-medium text-white bg-sky-600 hover:bg-sky-500 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5 shrink-0" />
-              <span className="hidden md:inline">Nova Investigação</span>
+              <span className="hidden sm:inline">Nova Investigação</span>
             </button>
 
             {/* Botão Menu Sanduíche (Hamburger Menu) */}
@@ -1800,11 +1710,11 @@ export default function App() {
               onClick={() => setIsHeaderMenuOpen((prev) => !prev)}
               aria-expanded={isHeaderMenuOpen}
               aria-label="Abrir Menu de Ferramentas e Navegação"
-              title="Menu Sanduíche: Navegação completa, Alto Contraste, Backup .ZIP, QR Celular e Sincronização"
-              className={`px-3 py-2 text-xs font-semibold rounded-md border transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+              title="Abrir Menu Sanduíche com todos os módulos e ferramentas"
+              className={`px-3.5 py-2 text-xs font-semibold rounded-md border transition-colors whitespace-nowrap shrink-0 flex items-center gap-2 cursor-pointer ${
                 isHeaderMenuOpen
                   ? 'bg-sky-500/25 border-sky-400 text-sky-200'
-                  : 'bg-[#111827] hover:bg-slate-800 border-slate-700 text-slate-200'
+                  : 'bg-[#111827] hover:bg-slate-800 border-slate-700 text-slate-100'
               }`}
             >
               {isHeaderMenuOpen ? (
