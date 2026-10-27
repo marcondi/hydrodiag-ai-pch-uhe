@@ -1010,27 +1010,44 @@ export function createApiApp() {
 
       if (action === 'transcribe_audio') {
         const { audioBase64, mimeType } = req.body;
-        if (!audioBase64) {
+        if (!audioBase64 || String(audioBase64).length < 100) {
           return sendChunkedJson({ transcript: '' });
         }
+        const rawMime = String(mimeType || 'audio/webm')
+          .split(';')[0]
+          .trim()
+          .toLowerCase();
+        const cleanMime =
+          rawMime === 'audio/mp4' ||
+          rawMime === 'audio/ogg' ||
+          rawMime === 'audio/wav' ||
+          rawMime === 'audio/mpeg' ||
+          rawMime === 'audio/webm'
+            ? rawMime
+            : 'audio/webm';
+
         const result = await callGeminiFast(
           ai,
           [
             {
               inlineData: {
-                mimeType: mimeType || 'audio/webm',
-                data: audioBase64,
+                mimeType: cleanMime,
+                data: String(audioBase64),
               },
             },
             {
-              text: 'Transcreva exatamente em português do Brasil o áudio falado pelo operador/engenheiro de manutenção de usina hidrelétrica (PCH/UHE). Preserve termos técnicos como 125 Vcc, 24 Vcc, 220 Vca, bornes X2, 1X2, 2X2, XED, UHLM, PCPG1, PCPG2, CLP-SASE, QDCC, disjuntor 52G, chave 89. Retorne APENAS o texto transcrito, sem comentários adicionais.',
+              text: 'Transcreva fielmente em português do Brasil tudo o que foi falado neste áudio pelo operador/engenheiro de manutenção de usina hidrelétrica (PCH/UHE). Preserve termos técnicos como 125 Vcc, 24 Vcc, 220 Vca, bornes X2, 1X2, 2X2, XED, UHLM, PCPG1, PCPG2, CLP-SASE, QDCC, disjuntor 52G, chave 89. Se o áudio contiver apenas silêncio ou ruído sem fala humana, retorne exatamente vazio "". Caso contrário, retorne APENAS as palavras faladas, sem aspas e sem comentários adicionais.',
             },
           ],
           null,
           ThinkingLevel.MINIMAL,
           true
         );
-        return sendChunkedJson({ transcript: (result.text || '').trim() });
+        const cleaned = (result.text || '')
+          .trim()
+          .replace(/^["']+|["']+$/g, '')
+          .trim();
+        return sendChunkedJson({ transcript: cleaned });
       }
 
       if (action === 'select_pages') {
@@ -2093,6 +2110,7 @@ Responda em Markdown técnico claro, objetivo e direto para auxiliar o operador 
         'src/types.ts',
         'src/App.tsx',
         'src/utils/pdfClientEngine.ts',
+        'src/utils/voiceDictationEngine.ts',
         'src/components/DiagramUploadPanel.tsx',
         'src/components/FaultQueryPanel.tsx',
         'src/components/DiagnosticReportView.tsx',
@@ -2357,6 +2375,7 @@ Sistema especialista multimodal desenvolvido para engenharia de manutenção, pr
     'src/types.ts',
     'src/App.tsx',
     'src/utils/pdfClientEngine.ts',
+    'src/utils/voiceDictationEngine.ts',
     'src/components/DiagramUploadPanel.tsx',
     'src/components/FaultQueryPanel.tsx',
     'src/components/DiagnosticReportView.tsx',

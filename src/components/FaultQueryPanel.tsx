@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Activity,
   Wrench,
@@ -9,6 +9,7 @@ import {
   Mic,
   MicOff,
 } from 'lucide-react';
+import { UniversalVoiceDictation } from '../utils/voiceDictationEngine';
 
 interface FaultQueryPanelProps {
   query: string;
@@ -75,152 +76,40 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
   hasPreviousTurns,
 }) => {
   const [isListeningVoice, setIsListeningVoice] = useState(false);
-  const speechRecRef = useRef<{ stop: () => void } | null>(null);
-  const keepListeningRef = useRef<boolean>(false);
-  const restartTimerRef = useRef<number | null>(null);
-  const baseQueryBeforeMicRef = useRef<string>('');
-  const completedSessionsRef = useRef<string>('');
-  const currentFinalRef = useRef<string>('');
-  const currentInterimRef = useRef<string>('');
+  const [isTranscribingAudio, setIsTranscribingAudio] = useState(false);
+  const queryRef = useRef<string>(query);
+  queryRef.current = query;
+  const setQueryRef = useRef(setQuery);
+  setQueryRef.current = setQuery;
 
-  const stopVoiceQuery = () => {
-    keepListeningRef.current = false;
-    if (restartTimerRef.current !== null) {
-      window.clearTimeout(restartTimerRef.current);
-      restartTimerRef.current = null;
-    }
-    try {
-      speechRecRef.current?.stop();
-    } catch {
-      // Ignore
-    }
-    speechRecRef.current = null;
-    setIsListeningVoice(false);
-  };
+  const voiceEngineRef = useRef<UniversalVoiceDictation | null>(null);
 
-  const toggleVoiceQuery = () => {
-    if (isListeningVoice) {
-      stopVoiceQuery();
-      return;
-    }
-
-    const win = window as unknown as {
-      SpeechRecognition?: new () => {
-        lang: string;
-        continuous: boolean;
-        interimResults: boolean;
-        onresult: (event: {
-          results: ArrayLike<{ isFinal?: boolean; 0: { transcript: string } }>;
-        }) => void;
-        onerror: (event: { error?: string }) => void;
-        onend: () => void;
-        start: () => void;
-        stop: () => void;
-      };
-      webkitSpeechRecognition?: new () => {
-        lang: string;
-        continuous: boolean;
-        interimResults: boolean;
-        onresult: (event: {
-          results: ArrayLike<{ isFinal?: boolean; 0: { transcript: string } }>;
-        }) => void;
-        onerror: (event: { error?: string }) => void;
-        onend: () => void;
-        start: () => void;
-        stop: () => void;
-      };
+  useEffect(() => {
+    const engine = new UniversalVoiceDictation({
+      getInitialText: () => queryRef.current,
+      onTextUpdate: (fullText) => {
+        queryRef.current = fullText;
+        setQueryRef.current(fullText);
+      },
+      onStateChange: (st) => {
+        setIsListeningVoice(st.isRecording);
+        setIsTranscribingAudio(st.isTranscribing);
+      },
+    });
+    voiceEngineRef.current = engine;
+    return () => {
+      engine.destroy();
     };
+  }, []);
 
-    const SpeechRecClass =
-      win.SpeechRecognition || win.webkitSpeechRecognition;
-    if (!SpeechRecClass) return;
-
-    baseQueryBeforeMicRef.current = query.trim();
-    completedSessionsRef.current = '';
-    currentFinalRef.current = '';
-    currentInterimRef.current = '';
-    keepListeningRef.current = true;
-    setIsListeningVoice(true);
-
-    const startInstance = () => {
-      if (!keepListeningRef.current) return;
-      try {
-        const rec = new SpeechRecClass();
-        rec.lang = 'pt-BR';
-        rec.continuous = true;
-        rec.interimResults = true;
-        rec.onresult = (event) => {
-          if (!keepListeningRef.current) return;
-          const finalParts: string[] = [];
-          const interimParts: string[] = [];
-          for (let i = 0; i < event.results.length; i++) {
-            const res = event.results[i];
-            const transcript = (res?.[0]?.transcript || '').trim();
-            if (!transcript) continue;
-            if (res?.isFinal) {
-              finalParts.push(transcript);
-            } else {
-              interimParts.push(transcript);
-            }
-          }
-          currentFinalRef.current = finalParts.join(' ').trim();
-          currentInterimRef.current = interimParts.join(' ').trim();
-          const fullText = [
-            baseQueryBeforeMicRef.current,
-            completedSessionsRef.current,
-            currentFinalRef.current,
-            currentInterimRef.current,
-          ]
-            .filter(Boolean)
-            .join(' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-          setQuery(fullText);
-        };
-        rec.onerror = (event) => {
-          const code = event?.error || '';
-          if (
-            code === 'not-allowed' ||
-            code === 'service-not-allowed' ||
-            code === 'audio-capture'
-          ) {
-            keepListeningRef.current = false;
-            setIsListeningVoice(false);
-          }
-        };
-        rec.onend = () => {
-          const cycleText = [currentFinalRef.current, currentInterimRef.current]
-            .filter(Boolean)
-            .join(' ')
-            .trim();
-          if (cycleText) {
-            completedSessionsRef.current = [
-              completedSessionsRef.current,
-              cycleText,
-            ]
-              .filter(Boolean)
-              .join(' ')
-              .replace(/\s+/g, ' ')
-              .trim();
-            currentFinalRef.current = '';
-            currentInterimRef.current = '';
-          }
-          if (keepListeningRef.current) {
-            restartTimerRef.current = window.setTimeout(startInstance, 60);
-          } else {
-            setIsListeningVoice(false);
-          }
-        };
-        speechRecRef.current = rec;
-        rec.start();
-      } catch {
-        if (keepListeningRef.current) {
-          restartTimerRef.current = window.setTimeout(startInstance, 250);
-        }
-      }
-    };
-
-    startInstance();
+  const toggleVoiceQuery = async () => {
+    const engine = voiceEngineRef.current;
+    if (!engine) return;
+    if (engine.getIsRecording()) {
+      await engine.stop();
+    } else if (!engine.getIsTranscribing()) {
+      await engine.start();
+    }
   };
 
   const handleQuickButtonClick = async (btn: QuickSupportButtonConfig) => {
@@ -267,19 +156,24 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
             <div className="flex items-center gap-2">
               <button
                 type="button"
+                disabled={isTranscribingAudio}
                 onClick={toggleVoiceQuery}
                 className={`px-2 py-0.5 rounded text-[11px] font-medium flex items-center gap-1 cursor-pointer border transition-colors ${
                   isListeningVoice
                     ? 'bg-rose-600 text-white border-rose-400 animate-pulse'
-                    : 'bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border-sky-500/40'
+                    : isTranscribingAudio
+                      ? 'bg-amber-600/30 text-amber-200 border-amber-500/40 animate-pulse'
+                      : 'bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border-sky-500/40'
                 }`}
                 title="Ditar alarme ou sintoma por voz (Português)"
               >
                 {isListeningVoice ? (
                   <>
                     <MicOff className="w-3 h-3" />
-                    <span>Ouvindo...</span>
+                    <span>Concluir Voz</span>
                   </>
+                ) : isTranscribingAudio ? (
+                  <span>Transcrevendo...</span>
                 ) : (
                   <>
                     <Mic className="w-3 h-3 text-sky-400" />

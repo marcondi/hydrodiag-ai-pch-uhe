@@ -32,6 +32,7 @@ import {
   formatTechnicalSymbols,
   linkifyPdfPageReferences,
 } from '../utils/pdfClientEngine';
+import { UniversalVoiceDictation } from '../utils/voiceDictationEngine';
 
 interface FaultChatPanelProps {
   alarmTitle: string;
@@ -182,6 +183,8 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
   );
   const [isListeningVoice, setIsListeningVoice] = useState(false);
   const [isTranscribingAudio, setIsTranscribingAudio] = useState(false);
+  const [voiceAudioLevel, setVoiceAudioLevel] = useState(0);
+  const [voiceElapsedSec, setVoiceElapsedSec] = useState(0);
   const [voiceStatusText, setVoiceStatusText] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -189,331 +192,40 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const plusMenuRef = useRef<HTMLDivElement | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
-  const speechRecRef = useRef<{ stop: () => void; abort?: () => void } | null>(
-    null
-  );
-  const keepListeningRef = useRef<boolean>(false);
-  const restartTimerRef = useRef<number | null>(null);
-  const baseTextBeforeMicRef = useRef<string>('');
-  const completedSessionsTextRef = useRef<string>('');
-  const currentSessionFinalRef = useRef<string>('');
-  const currentSessionInterimRef = useRef<string>('');
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const inputTextRef = useRef<string>('');
+  inputTextRef.current = inputText;
 
-  const stopMediaStream = () => {
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
-      mediaStreamRef.current = null;
-    }
-  };
-
-  const stopVoiceDictation = () => {
-    keepListeningRef.current = false;
-    if (restartTimerRef.current !== null) {
-      window.clearTimeout(restartTimerRef.current);
-      restartTimerRef.current = null;
-    }
-    if (speechRecRef.current) {
-      try {
-        speechRecRef.current.stop();
-      } catch {
-        // Ignore
-      }
-      speechRecRef.current = null;
-    }
-    if (
-      mediaRecorderRef.current &&
-      mediaRecorderRef.current.state !== 'inactive'
-    ) {
-      try {
-        mediaRecorderRef.current.stop();
-      } catch {
-        stopMediaStream();
-      }
-    } else {
-      stopMediaStream();
-    }
-    setIsListeningVoice(false);
-    setVoiceStatusText(null);
-  };
+  const voiceEngineRef = useRef<UniversalVoiceDictation | null>(null);
 
   useEffect(() => {
+    const engine = new UniversalVoiceDictation({
+      getInitialText: () => inputTextRef.current,
+      onTextUpdate: (fullText) => {
+        setInputText(fullText);
+        inputTextRef.current = fullText;
+      },
+      onStateChange: (st) => {
+        setIsListeningVoice(st.isRecording);
+        setIsTranscribingAudio(st.isTranscribing);
+        setVoiceAudioLevel(st.audioLevel);
+        setVoiceElapsedSec(st.elapsedSeconds);
+        setVoiceStatusText(st.statusMessage);
+      },
+    });
+    voiceEngineRef.current = engine;
     return () => {
-      keepListeningRef.current = false;
-      if (restartTimerRef.current !== null) {
-        window.clearTimeout(restartTimerRef.current);
-      }
-      try {
-        speechRecRef.current?.stop();
-      } catch {
-        // Ignore
-      }
-      stopMediaStream();
+      engine.destroy();
     };
   }, []);
 
   const toggleChatVoiceDictation = async () => {
-    if (isListeningVoice) {
-      stopVoiceDictation();
-      setTimeout(() => textareaRef.current?.focus(), 30);
-      return;
-    }
-
-    const win = window as unknown as {
-      SpeechRecognition?: new () => {
-        lang: string;
-        continuous: boolean;
-        interimResults: boolean;
-        maxAlternatives?: number;
-        onresult: (event: {
-          resultIndex?: number;
-          results: ArrayLike<{ isFinal?: boolean; 0: { transcript: string } }>;
-        }) => void;
-        onerror: (event: { error?: string }) => void;
-        onend: () => void;
-        start: () => void;
-        stop: () => void;
-      };
-      webkitSpeechRecognition?: new () => {
-        lang: string;
-        continuous: boolean;
-        interimResults: boolean;
-        maxAlternatives?: number;
-        onresult: (event: {
-          resultIndex?: number;
-          results: ArrayLike<{ isFinal?: boolean; 0: { transcript: string } }>;
-        }) => void;
-        onerror: (event: { error?: string }) => void;
-        onend: () => void;
-        start: () => void;
-        stop: () => void;
-      };
-    };
-
-    const SpeechRecClass =
-      win.SpeechRecognition || win.webkitSpeechRecognition;
-
-    baseTextBeforeMicRef.current = inputText.trim();
-    completedSessionsTextRef.current = '';
-    currentSessionFinalRef.current = '';
-    currentSessionInterimRef.current = '';
-    keepListeningRef.current = true;
-    setIsListeningVoice(true);
-    setVoiceStatusText(
-      '🎙️ Microfone contínuo ativo (sem limite de tempo) — Fale à vontade e clique em Concluir quando terminar...'
-    );
-
-    if (SpeechRecClass) {
-      const startRecognitionInstance = () => {
-        if (!keepListeningRef.current) return;
-        try {
-          const rec = new SpeechRecClass();
-          rec.lang = 'pt-BR';
-          rec.continuous = true;
-          rec.interimResults = true;
-          rec.maxAlternatives = 1;
-
-          rec.onresult = (event) => {
-            if (!keepListeningRef.current) return;
-            const finalParts: string[] = [];
-            const interimParts: string[] = [];
-
-            for (let i = 0; i < event.results.length; i++) {
-              const res = event.results[i];
-              const transcript = (res?.[0]?.transcript || '').trim();
-              if (!transcript) continue;
-              if (res?.isFinal) {
-                finalParts.push(transcript);
-              } else {
-                interimParts.push(transcript);
-              }
-            }
-
-            currentSessionFinalRef.current = finalParts.join(' ').trim();
-            currentSessionInterimRef.current = interimParts.join(' ').trim();
-
-            const fullText = [
-              baseTextBeforeMicRef.current,
-              completedSessionsTextRef.current,
-              currentSessionFinalRef.current,
-              currentSessionInterimRef.current,
-            ]
-              .filter(Boolean)
-              .join(' ')
-              .replace(/\s+/g, ' ')
-              .trim();
-
-            setInputText(fullText);
-
-            if (currentSessionInterimRef.current) {
-              setVoiceStatusText(
-                `🎙️ Capturando contínuo: "${currentSessionInterimRef.current}"`
-              );
-            } else {
-              setVoiceStatusText(
-                '🎙️ Microfone contínuo ativo — Pode continuar falando (sem limite de tempo)...'
-              );
-            }
-          };
-
-          rec.onerror = (event) => {
-            const errCode = event?.error || '';
-            if (
-              errCode === 'not-allowed' ||
-              errCode === 'service-not-allowed' ||
-              errCode === 'audio-capture'
-            ) {
-              keepListeningRef.current = false;
-              setIsListeningVoice(false);
-              setVoiceStatusText(
-                '⚠️ Permita o acesso ao microfone no navegador para usar o ditado por voz.'
-              );
-              setTimeout(() => setVoiceStatusText(null), 4000);
-            }
-            // For 'no-speech', 'network', or 'aborted' during pauses, onend will automatically restart
-          };
-
-          rec.onend = () => {
-            // Preserve whatever was spoken in this cycle before restarting
-            const cycleText = [
-              currentSessionFinalRef.current,
-              currentSessionInterimRef.current,
-            ]
-              .filter(Boolean)
-              .join(' ')
-              .trim();
-
-            if (cycleText) {
-              completedSessionsTextRef.current = [
-                completedSessionsTextRef.current,
-                cycleText,
-              ]
-                .filter(Boolean)
-                .join(' ')
-                .replace(/\s+/g, ' ')
-                .trim();
-              currentSessionFinalRef.current = '';
-              currentSessionInterimRef.current = '';
-            }
-
-            if (keepListeningRef.current) {
-              restartTimerRef.current = window.setTimeout(() => {
-                startRecognitionInstance();
-              }, 60);
-            } else {
-              setIsListeningVoice(false);
-              setVoiceStatusText(null);
-            }
-          };
-
-          speechRecRef.current = rec;
-          rec.start();
-        } catch {
-          if (keepListeningRef.current) {
-            restartTimerRef.current = window.setTimeout(() => {
-              startRecognitionInstance();
-            }, 250);
-          }
-        }
-      };
-
-      startRecognitionInstance();
-      return;
-    }
-
-    // Fallback for browsers without Web Speech API (e.g. Firefox Desktop)
-    if (navigator.mediaDevices?.getUserMedia) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
-        });
-        mediaStreamRef.current = stream;
-        const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-          ? 'audio/webm;codecs=opus'
-          : MediaRecorder.isTypeSupported('audio/mp4')
-            ? 'audio/mp4'
-            : '';
-        const recorder = mimeType
-          ? new MediaRecorder(stream, { mimeType })
-          : new MediaRecorder(stream);
-        const chunks: BlobPart[] = [];
-
-        recorder.ondataavailable = (ev) => {
-          if (ev.data && ev.data.size > 0) {
-            chunks.push(ev.data);
-          }
-        };
-
-        recorder.onstop = async () => {
-          stopMediaStream();
-          if (chunks.length === 0) {
-            setVoiceStatusText(null);
-            setIsListeningVoice(false);
-            return;
-          }
-
-          const blob = new Blob(chunks, {
-            type: recorder.mimeType || 'audio/webm',
-          });
-          if (blob.size < 800) {
-            setVoiceStatusText(null);
-            setIsListeningVoice(false);
-            return;
-          }
-
-          setIsTranscribingAudio(true);
-          setVoiceStatusText('⏳ Transcrevendo áudio técnico (pt-BR)...');
-          try {
-            const base64Audio = await new Promise<string>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onloadend = () => {
-                const res = String(reader.result || '');
-                const commaIdx = res.indexOf(',');
-                resolve(commaIdx >= 0 ? res.slice(commaIdx + 1) : res);
-              };
-              reader.onerror = reject;
-              reader.readAsDataURL(blob);
-            });
-
-            const resp = await fetch('/api/serverless-step', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                action: 'transcribe_audio',
-                audioBase64: base64Audio,
-                mimeType: blob.type || 'audio/webm',
-              }),
-            });
-            if (resp.ok) {
-              const data = (await resp.json()) as { transcript?: string };
-              const text = (data.transcript || '').trim();
-              if (text) {
-                setInputText((prev) =>
-                  prev.trim() ? `${prev.trim()} ${text}` : text
-                );
-                setTimeout(() => textareaRef.current?.focus(), 30);
-              }
-            }
-          } catch {
-            // Ignore transcription fallback errors
-          } finally {
-            setIsTranscribingAudio(false);
-            setVoiceStatusText(null);
-            setIsListeningVoice(false);
-          }
-        };
-
-        mediaRecorderRef.current = recorder;
-        recorder.start(1000);
-      } catch {
-        keepListeningRef.current = false;
-        setIsListeningVoice(false);
-        setVoiceStatusText(
-          '⚠️ Permita o acesso ao microfone no navegador para usar o ditado por voz.'
-        );
-        setTimeout(() => setVoiceStatusText(null), 4000);
-      }
+    const engine = voiceEngineRef.current;
+    if (!engine) return;
+    if (engine.getIsRecording()) {
+      await engine.stop();
+      setTimeout(() => textareaRef.current?.focus(), 40);
+    } else if (!engine.getIsTranscribing()) {
+      await engine.start();
     }
   };
 
@@ -622,11 +334,17 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSending || (!inputText.trim() && !attachedFile)) return;
+    if (isSending || isTranscribingAudio) return;
 
-    if (isListeningVoice || keepListeningRef.current) {
-      stopVoiceDictation();
+    let currentText = inputText.trim();
+    if (voiceEngineRef.current?.getIsRecording()) {
+      const transcribed = await voiceEngineRef.current.stop();
+      if (transcribed && transcribed.trim()) {
+        currentText = transcribed.trim();
+      }
     }
+
+    if (!currentText && !attachedFile) return;
 
     const isPdf = attachedFile?.mimeType === 'application/pdf';
     const defaultPrompt = isPdf
@@ -635,14 +353,11 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
         } para continuarmos a investigação desta falha. Analise este diagrama em conjunto com o contexto atual.`
       : 'Analise esta foto de medição/campo anexada em relação à falha atual.';
 
-    const textToSend = inputText.trim() || defaultPrompt;
+    const textToSend = currentText || defaultPrompt;
     const fileToSend = attachedFile || undefined;
 
     setInputText('');
-    baseTextBeforeMicRef.current = '';
-    completedSessionsTextRef.current = '';
-    currentSessionFinalRef.current = '';
-    currentSessionInterimRef.current = '';
+    inputTextRef.current = '';
     setAttachedFile(null);
     setIsPlusMenuOpen(false);
 
@@ -1117,18 +832,52 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
           )}
 
           {(isListeningVoice || isTranscribingAudio || voiceStatusText) && (
-            <div className="mb-2 flex items-center justify-between gap-2 px-3 py-1.5 rounded-xl bg-rose-500/15 border border-rose-500/35 text-xs text-rose-200 animate-in fade-in duration-150">
-              <span className="truncate font-medium">
-                {voiceStatusText ||
-                  '🎙️ Microfone ativo (Notebook / Celular) — Fale agora...'}
-              </span>
+            <div className="mb-2 flex items-center justify-between gap-3 px-3.5 py-2 rounded-2xl bg-rose-500/15 border border-rose-500/40 text-xs text-rose-100 animate-in fade-in duration-150">
+              <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                {isListeningVoice && (
+                  <div
+                    className="flex items-end gap-0.5 h-4 shrink-0 px-1"
+                    title="Medidor de nível de voz do microfone ao vivo"
+                  >
+                    {[0.35, 0.6, 0.85, 1.0, 0.75, 0.5, 0.9, 0.45].map(
+                      (mult, idx) => {
+                        const barHeight = Math.max(
+                          20,
+                          Math.min(100, Math.round(voiceAudioLevel * mult + 12))
+                        );
+                        return (
+                          <span
+                            key={idx}
+                            style={{ height: `${barHeight}%` }}
+                            className={`w-1 rounded-full transition-all duration-75 ${
+                              voiceAudioLevel > 8
+                                ? 'bg-emerald-400'
+                                : 'bg-rose-400/60'
+                            }`}
+                          />
+                        );
+                      }
+                    )}
+                  </div>
+                )}
+                {isListeningVoice && (
+                  <span className="font-mono font-bold text-rose-300 shrink-0">
+                    {String(Math.floor(voiceElapsedSec / 60)).padStart(2, '0')}:
+                    {String(voiceElapsedSec % 60).padStart(2, '0')}
+                  </span>
+                )}
+                <span className="truncate font-medium">
+                  {voiceStatusText ||
+                    '🎙️ Gravando sua voz — Fale à vontade e clique em Concluir'}
+                </span>
+              </div>
               {isListeningVoice && (
                 <button
                   type="button"
                   onClick={toggleChatVoiceDictation}
-                  className="px-2 py-0.5 rounded-md bg-rose-600 hover:bg-rose-500 text-white font-semibold text-[11px] shrink-0 cursor-pointer"
+                  className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs shrink-0 cursor-pointer shadow-sm"
                 >
-                  Concluir
+                  Concluir e Transcrever
                 </button>
               )}
             </div>
@@ -1304,12 +1053,8 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
               onChange={(e) => {
                 const val = e.target.value;
                 setInputText(val);
-                if (keepListeningRef.current) {
-                  baseTextBeforeMicRef.current = val.trim();
-                  completedSessionsTextRef.current = '';
-                  currentSessionFinalRef.current = '';
-                  currentSessionInterimRef.current = '';
-                }
+                inputTextRef.current = val;
+                voiceEngineRef.current?.updateBaseTextFromManualEdit(val);
               }}
               onPaste={handlePaste}
               onKeyDown={(e) => {
@@ -1333,7 +1078,7 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
               onClick={toggleChatVoiceDictation}
               title={
                 isListeningVoice
-                  ? 'Clique para concluir o ditado por voz'
+                  ? 'Clique para concluir e transcrever sua fala'
                   : 'Ditar por voz no Notebook ou Celular (pt-BR)'
               }
               aria-label="Ditar por voz"
@@ -1355,7 +1100,11 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
             {/* Circular Send Button */}
             <button
               type="submit"
-              disabled={isSending || (!inputText.trim() && !attachedFile)}
+              disabled={
+                isSending ||
+                isTranscribingAudio ||
+                (!inputText.trim() && !attachedFile && !isListeningVoice)
+              }
               title="Enviar mensagem"
               aria-label="Enviar mensagem"
               className="w-9 h-9 rounded-full bg-sky-500 hover:bg-sky-400 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 font-semibold transition-all flex items-center justify-center cursor-pointer shrink-0 shadow-sm"

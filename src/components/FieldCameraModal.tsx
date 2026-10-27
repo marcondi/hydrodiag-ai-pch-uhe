@@ -20,6 +20,7 @@ import {
   Undo2,
   Trash2,
 } from 'lucide-react';
+import { UniversalVoiceDictation } from '../utils/voiceDictationEngine';
 
 export interface FieldPhotoCapturePayload {
   base64: string;
@@ -312,7 +313,7 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const speechRecRef = useRef<{ stop: () => void } | null>(null);
+  const voiceEngineRef = useRef<UniversalVoiceDictation | null>(null);
 
   const [isLiveVideoOpen, setIsLiveVideoOpen] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
@@ -336,17 +337,31 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
   // Voice Dictation ("Mãos Ocupadas com Multímetro") state
   const [isListeningVoice, setIsListeningVoice] = useState(false);
   const [voiceStatusText, setVoiceStatusText] = useState<string | null>(null);
-  const keepListeningRef = useRef<boolean>(false);
-  const restartTimerRef = useRef<number | null>(null);
-  const baseNoteBeforeMicRef = useRef<string>('');
-  const completedSessionsRef = useRef<string>('');
-  const currentFinalRef = useRef<string>('');
-  const currentInterimRef = useRef<string>('');
 
   const [selectedPanel, setSelectedPanel] = useState<string>('PCPG1');
   const [fieldNote, setFieldNote] = useState<string>('');
+  const fieldNoteRef = useRef<string>('');
+  fieldNoteRef.current = fieldNote;
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [submitSuccessMsg, setSubmitSuccessMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    const engine = new UniversalVoiceDictation({
+      getInitialText: () => fieldNoteRef.current,
+      onTextUpdate: (fullText) => {
+        fieldNoteRef.current = fullText;
+        setFieldNote(fullText);
+      },
+      onStateChange: (st) => {
+        setIsListeningVoice(st.isRecording);
+        setVoiceStatusText(st.statusMessage);
+      },
+    });
+    voiceEngineRef.current = engine;
+    return () => {
+      engine.destroy();
+    };
+  }, []);
 
   const stopLiveCamera = () => {
     if (mediaStreamRef.current) {
@@ -357,18 +372,8 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
   };
 
   const stopVoiceDictation = () => {
-    keepListeningRef.current = false;
-    if (restartTimerRef.current !== null) {
-      window.clearTimeout(restartTimerRef.current);
-      restartTimerRef.current = null;
-    }
-    if (speechRecRef.current) {
-      try {
-        speechRecRef.current.stop();
-      } catch {
-        // Ignore
-      }
-      speechRecRef.current = null;
+    if (voiceEngineRef.current?.getIsRecording()) {
+      void voiceEngineRef.current.stop();
     }
     setIsListeningVoice(false);
     setVoiceStatusText(null);
@@ -422,145 +427,14 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
 
   if (!isOpen) return null;
 
-  const toggleVoiceDictation = () => {
-    if (isListeningVoice) {
-      stopVoiceDictation();
-      return;
+  const toggleVoiceDictation = async () => {
+    const engine = voiceEngineRef.current;
+    if (!engine) return;
+    if (engine.getIsRecording()) {
+      await engine.stop();
+    } else if (!engine.getIsTranscribing()) {
+      await engine.start();
     }
-
-    const win = window as unknown as {
-      SpeechRecognition?: new () => {
-        lang: string;
-        continuous: boolean;
-        interimResults: boolean;
-        onresult: (event: {
-          results: ArrayLike<{ 0: { transcript: string }; isFinal?: boolean }>;
-        }) => void;
-        onerror: (event: { error?: string }) => void;
-        onend: () => void;
-        start: () => void;
-        stop: () => void;
-      };
-      webkitSpeechRecognition?: new () => {
-        lang: string;
-        continuous: boolean;
-        interimResults: boolean;
-        onresult: (event: {
-          results: ArrayLike<{ 0: { transcript: string }; isFinal?: boolean }>;
-        }) => void;
-        onerror: (event: { error?: string }) => void;
-        onend: () => void;
-        start: () => void;
-        stop: () => void;
-      };
-    };
-
-    const SpeechRecClass =
-      win.SpeechRecognition || win.webkitSpeechRecognition;
-    if (!SpeechRecClass) {
-      setVoiceStatusText(
-        'Seu navegador atual não suporta ditado por voz nativo. Use o microfone do teclado do celular.'
-      );
-      setTimeout(() => setVoiceStatusText(null), 4000);
-      return;
-    }
-
-    baseNoteBeforeMicRef.current = fieldNote.trim();
-    completedSessionsRef.current = '';
-    currentFinalRef.current = '';
-    currentInterimRef.current = '';
-    keepListeningRef.current = true;
-    setIsListeningVoice(true);
-    setVoiceStatusText(
-      '🎙️ Microfone contínuo ativo (sem limite de tempo) — Fale a medição do multímetro ou estado do borne/LED.'
-    );
-
-    const startInstance = () => {
-      if (!keepListeningRef.current) return;
-      try {
-        const rec = new SpeechRecClass();
-        rec.lang = 'pt-BR';
-        rec.continuous = true;
-        rec.interimResults = true;
-
-        rec.onresult = (event) => {
-          if (!keepListeningRef.current) return;
-          const finalParts: string[] = [];
-          const interimParts: string[] = [];
-          for (let i = 0; i < event.results.length; i++) {
-            const res = event.results[i];
-            const transcript = (res?.[0]?.transcript || '').trim();
-            if (!transcript) continue;
-            if (res?.isFinal) {
-              finalParts.push(transcript);
-            } else {
-              interimParts.push(transcript);
-            }
-          }
-          currentFinalRef.current = finalParts.join(' ').trim();
-          currentInterimRef.current = interimParts.join(' ').trim();
-
-          const fullText = [
-            baseNoteBeforeMicRef.current,
-            completedSessionsRef.current,
-            currentFinalRef.current,
-            currentInterimRef.current,
-          ]
-            .filter(Boolean)
-            .join(' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-          setFieldNote(fullText);
-        };
-
-        rec.onerror = (event) => {
-          const code = event?.error || '';
-          if (
-            code === 'not-allowed' ||
-            code === 'service-not-allowed' ||
-            code === 'audio-capture'
-          ) {
-            keepListeningRef.current = false;
-            setIsListeningVoice(false);
-            setVoiceStatusText(null);
-          }
-        };
-
-        rec.onend = () => {
-          const cycleText = [currentFinalRef.current, currentInterimRef.current]
-            .filter(Boolean)
-            .join(' ')
-            .trim();
-          if (cycleText) {
-            completedSessionsRef.current = [
-              completedSessionsRef.current,
-              cycleText,
-            ]
-              .filter(Boolean)
-              .join(' ')
-              .replace(/\s+/g, ' ')
-              .trim();
-            currentFinalRef.current = '';
-            currentInterimRef.current = '';
-          }
-          if (keepListeningRef.current) {
-            restartTimerRef.current = window.setTimeout(startInstance, 60);
-          } else {
-            setIsListeningVoice(false);
-            setVoiceStatusText(null);
-          }
-        };
-
-        speechRecRef.current = rec;
-        rec.start();
-      } catch {
-        if (keepListeningRef.current) {
-          restartTimerRef.current = window.setTimeout(startInstance, 250);
-        }
-      }
-    };
-
-    startInstance();
   };
 
   const getNormalizedPointFromEvent = (
