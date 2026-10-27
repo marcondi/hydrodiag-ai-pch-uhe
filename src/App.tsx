@@ -1956,9 +1956,10 @@ export default function App() {
         {/* TAB 1: BANCADA DE DIAGNÓSTICO (SPLIT-WORKSPACE ZERO ROLAGEM VERTICAL EXCESSIVA) */}
         {activeNavTab === 'bancada' && (
           <div className="flex flex-col gap-3 flex-1">
-            {/* Unified Compact Workbench Command Bar: Context + Quick History + Active PDF Sequence */}
-            <div className="bg-[#111827] border border-slate-800 rounded-lg px-3.5 py-2 flex flex-wrap items-center justify-between gap-3 no-print">
-              <div className="flex flex-wrap items-center gap-2.5 min-w-0">
+            {/* Unified Single-Row Workbench Command Bar: Zero two-line staggered wrapping */}
+            <div className="bg-[#111827] border border-slate-800 rounded-lg px-3.5 py-2 flex flex-wrap lg:flex-nowrap items-center justify-between gap-2.5 no-print">
+              {/* Left Group: Input Drawer Toggle + Active Attachments + Quick Add */}
+              <div className="flex items-center gap-2 min-w-0 flex-1">
                 <button
                   type="button"
                   onClick={() => setIsLeftSidebarCollapsed((prev) => !prev)}
@@ -1975,12 +1976,12 @@ export default function App() {
                 >
                   {isLeftSidebarCollapsed ? (
                     <>
-                      <PanelLeftOpen className="w-3.5 h-3.5 text-sky-400" />
+                      <PanelLeftOpen className="w-3.5 h-3.5 text-sky-400 shrink-0" />
                       <span>Entrada &amp; Upload ({attachments.length})</span>
                     </>
                   ) : (
                     <>
-                      <PanelLeftClose className="w-3.5 h-3.5 text-slate-400" />
+                      <PanelLeftClose className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                       <span>Recolher Entrada</span>
                     </>
                   )}
@@ -1988,112 +1989,114 @@ export default function App() {
 
                 <span
                   aria-hidden="true"
-                  className="text-slate-700 hidden sm:inline"
+                  className="text-slate-700 hidden sm:inline shrink-0"
                 >
                   |
                 </span>
 
                 {/* Active Attachments Inline Summary */}
-                <div className="flex items-center gap-1.5 text-xs text-slate-300 min-w-0">
+                <div className="flex items-center gap-1.5 text-xs text-slate-300 min-w-0 flex-1">
                   <FileText className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                  <span className="truncate max-w-[260px] sm:max-w-[360px] text-slate-300">
+                  <span
+                    className="truncate text-slate-300 min-w-0 max-w-[180px] sm:max-w-[260px] xl:max-w-[360px]"
+                    title={
+                      attachments.length > 0
+                        ? attachments
+                            .map((a) => `#${a.sequenceIndex} ${a.name}`)
+                            .join(' · ')
+                        : 'Nenhum PDF anexado'
+                    }
+                  >
                     {attachments.length > 0
                       ? attachments
                           .map((a) => `#${a.sequenceIndex} ${a.name}`)
                           .join(' · ')
                       : 'Nenhum PDF anexado'}
                   </span>
+
                   <button
                     type="button"
                     onClick={() => setSequenceModalOpen(true)}
-                    className="px-2 py-0.5 rounded bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 text-[11px] font-medium flex items-center gap-1 cursor-pointer transition-colors shrink-0"
+                    className="px-2 py-1 rounded bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 text-[11px] font-medium flex items-center gap-1 cursor-pointer transition-colors shrink-0"
                     title="Anexar próximo desenho elétrico ou foto na sequência"
                   >
-                    <PlusCircle className="w-3 h-3" />
+                    <PlusCircle className="w-3 h-3 shrink-0" />
                     <span>+ Desenho</span>
                   </button>
+
                   <button
                     type="button"
                     onClick={() => setFieldCameraOpen(true)}
-                    className="px-2 py-0.5 rounded bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-[11px] font-medium flex items-center gap-1 cursor-pointer transition-colors shrink-0"
+                    className="px-2 py-1 rounded bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-[11px] font-medium flex items-center gap-1 cursor-pointer transition-colors shrink-0"
                     title="Tirar foto em campo pelo celular ou webcam e sincronizar com a Sala de Comando"
                   >
-                    <Camera className="w-3 h-3" />
+                    <Camera className="w-3 h-3 shrink-0" />
                     <span>+ Foto Campo</span>
                   </button>
                 </div>
               </div>
 
-              {/* Right Side of Command Bar: Quick Recent Faults Recall + Cloud Sync */}
-              <div className="flex flex-wrap items-center gap-2 min-w-0 ml-auto">
+              {/* Right Group: Compact Single-Line Cloud Sync + Quick Saved Faults Selector */}
+              <div className="flex items-center gap-2 shrink-0">
                 <button
                   type="button"
                   onClick={() => handleSyncHistoryWithCloud()}
                   disabled={isSyncingCloud}
-                  className="px-2 py-1 rounded bg-[#0B111E] hover:bg-slate-800 border border-slate-800 text-[11px] text-emerald-300 flex items-center gap-1 cursor-pointer transition-colors shrink-0"
+                  className="px-2.5 py-1.5 rounded-md bg-[#0B111E] hover:bg-slate-800 border border-slate-800 text-xs text-emerald-300 flex items-center gap-1.5 cursor-pointer transition-colors shrink-0"
                   title="Sincronizar fotos e investigações salvas pelo celular em campo (Supabase Cloud)"
                 >
                   <RefreshCw
-                    className={`w-3 h-3 text-emerald-400 ${
+                    className={`w-3.5 h-3.5 text-emerald-400 shrink-0 ${
                       isSyncingCloud ? 'animate-spin' : ''
                     }`}
                   />
-                  <span className="hidden sm:inline">Sincronizar Campo</span>
+                  <span>Sincronizar Campo</span>
                 </button>
 
                 {savedInvestigations.length > 0 && (
-                  <>
-                    <div className="hidden xl:flex items-center gap-1.5 min-w-0">
-                      <History className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-                      <span className="text-[11px] text-slate-400 shrink-0">
-                        Recentes:
-                      </span>
-                      {quickFilteredHistory.slice(0, 3).map((item) => {
-                        const isActive =
-                          item.id === sessionId && turns.length > 0;
-                        const hasFieldPhoto = item.attachmentMetadata?.some(
-                          (m) => m.mimeType !== 'application/pdf'
+                  <div className="flex items-center gap-1.5 bg-[#0B111E] border border-slate-800 rounded-md px-2.5 py-1">
+                    <History className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                    <label
+                      htmlFor="quick-history-select"
+                      className="text-[11px] text-slate-400 shrink-0 hidden sm:inline"
+                    >
+                      Recentes:
+                    </label>
+                    <select
+                      id="quick-history-select"
+                      aria-label="Selecionar investigação recente"
+                      value={
+                        turns.length > 0 &&
+                        savedInvestigations.some((i) => i.id === sessionId)
+                          ? sessionId
+                          : ''
+                      }
+                      onChange={(e) => {
+                        const selected = savedInvestigations.find(
+                          (item) => item.id === e.target.value
                         );
-                        return (
-                          <button
-                            key={item.id}
-                            type="button"
-                            onClick={() => handleLoadInvestigation(item)}
-                            className={`px-2 py-1 rounded text-[11px] transition-colors flex items-center gap-1 cursor-pointer max-w-[180px] truncate border ${
-                              isActive
-                                ? 'bg-sky-500/20 border-sky-500/50 text-sky-200 font-medium'
-                                : 'bg-[#0B111E] border-slate-800 hover:border-slate-700 text-slate-300 hover:text-white'
-                            }`}
-                            title={`Reabrir diagnóstico: ${item.title}`}
-                          >
-                            {item.status === 'resolvida' && (
-                              <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
-                            )}
-                            {hasFieldPhoto && (
-                              <Smartphone className="w-3 h-3 text-emerald-400 shrink-0" />
-                            )}
-                            <span className="truncate">{item.title}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-
-                    <div className="relative">
-                      <Search className="w-3 h-3 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
-                      <input
-                        type="text"
-                        value={quickBarSearch}
-                        onChange={(e) => setQuickBarSearch(e.target.value)}
-                        placeholder="Buscar falha salva..."
-                        className="bg-[#0B111E] border border-slate-800 focus:border-sky-500 rounded-md pl-7 pr-2 py-1 text-[11px] text-slate-200 placeholder:text-slate-500 focus:outline-none w-36 sm:w-44"
-                      />
-                    </div>
-                  </>
+                        if (selected) {
+                          handleLoadInvestigation(selected);
+                        }
+                      }}
+                      className="bg-transparent text-xs text-sky-200 font-medium focus:outline-none max-w-[190px] sm:max-w-[230px] truncate cursor-pointer"
+                    >
+                      <option value="" className="bg-[#0F172A] text-slate-300">
+                        Selecionar falha ({savedInvestigations.length})...
+                      </option>
+                      {savedInvestigations.map((item) => (
+                        <option
+                          key={item.id}
+                          value={item.id}
+                          className="bg-[#0F172A] text-slate-100"
+                        >
+                          {item.status === 'resolvida' ? '✓ ' : ''}
+                          {item.title}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 )}
-
-                <span className="hidden 2xl:inline text-[11px] text-slate-500 font-mono tabular-nums">
-                  125 Vcc / 220 Vca · WEG / IEC
-                </span>
               </div>
             </div>
 
