@@ -1068,7 +1068,6 @@ export async function extractSinglePdfPageUrl(
         await page.render({
           canvasContext: ctx,
           viewport,
-          canvas,
         }).promise;
         pageImageUrl = canvas.toDataURL('image/png');
       }

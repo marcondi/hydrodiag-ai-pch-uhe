@@ -2051,7 +2051,7 @@ Responda em Markdown técnico claro, objetivo e direto para auxiliar o operador 
         });
       }
 
-      const filesToPublish = [
+      const baseFilesToPublish = [
         'package.json',
         'vercel.json',
         'api/index.ts',
@@ -2073,8 +2073,28 @@ Responda em Markdown técnico claro, objetivo e direto para auxiliar o operador 
         'src/components/DiagnosticReportView.tsx',
         'src/components/FaultChatPanel.tsx',
         'src/components/PdfDeepLinkDrawer.tsx',
+        'src/components/FieldCameraModal.tsx',
         'src/components/GitHubDeployModal.tsx',
       ];
+
+      const discoverSrcFiles = (dirRel: string): string[] => {
+        const found: string[] = [];
+        const absDir = path.join(__dirname, dirRel);
+        if (!fs.existsSync(absDir)) return found;
+        for (const entry of fs.readdirSync(absDir, { withFileTypes: true })) {
+          const rel = path.posix.join(dirRel.replace(/\\/g, '/'), entry.name);
+          if (entry.isDirectory()) {
+            found.push(...discoverSrcFiles(rel));
+          } else if (/\.(ts|tsx|css|json)$/i.test(entry.name)) {
+            found.push(rel);
+          }
+        }
+        return found;
+      };
+
+      const filesToPublish = Array.from(
+        new Set([...baseFilesToPublish, ...discoverSrcFiles('src')])
+      );
 
       const readmeContent = `# ⚡ HydroDiag AI — Sistema de Diagnóstico Eletromecânico, Supervisório e Resolução de Falhas (PCH / UHE)
 
@@ -2174,15 +2194,23 @@ Sistema especialista multimodal desenvolvido para engenharia de manutenção, pr
               const treeData = (await createTreeRes.json()) as { sha?: string };
               const newTreeSha = treeData.sha;
 
-              if (newTreeSha) {
+              // If the tree SHA is identical to baseTreeSha, skip creating a duplicate commit/deploy on Vercel
+              if (newTreeSha && baseTreeSha && newTreeSha === baseTreeSha) {
+                atomicSuccess = true;
+              } else if (newTreeSha) {
+                const stamp = new Date().toLocaleString('pt-BR', {
+                  day: '2-digit',
+                  month: '2-digit',
+                  hour: '2-digit',
+                  minute: '2-digit',
+                });
                 const newCommitRes = await fetch(
                   `https://api.github.com/repos/${owner}/${cleanRepo}/git/commits`,
                   {
                     method: 'POST',
                     headers,
                     body: JSON.stringify({
-                      message:
-                        'feat: atomic release HydroDiag AI (Split-Workspace + PDF Deep-Link + Supabase Sync)',
+                      message: `feat(release): HydroDiag AI — Camera de Campo + CAD Pan/Zoom + PDF Deep-Link (${stamp})`,
                       tree: newTreeSha,
                       parents: [latestCommitSha],
                     }),
@@ -2308,6 +2336,7 @@ Sistema especialista multimodal desenvolvido para engenharia de manutenção, pr
     'src/components/DiagnosticReportView.tsx',
     'src/components/FaultChatPanel.tsx',
     'src/components/PdfDeepLinkDrawer.tsx',
+    'src/components/FieldCameraModal.tsx',
     'src/components/GitHubDeployModal.tsx',
   ];
 
