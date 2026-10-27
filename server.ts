@@ -1008,6 +1008,31 @@ export function createApiApp() {
         return sendChunkedJson({ summary: result.text });
       }
 
+      if (action === 'transcribe_audio') {
+        const { audioBase64, mimeType } = req.body;
+        if (!audioBase64) {
+          return sendChunkedJson({ transcript: '' });
+        }
+        const result = await callGeminiFast(
+          ai,
+          [
+            {
+              inlineData: {
+                mimeType: mimeType || 'audio/webm',
+                data: audioBase64,
+              },
+            },
+            {
+              text: 'Transcreva exatamente em português do Brasil o áudio falado pelo operador/engenheiro de manutenção de usina hidrelétrica (PCH/UHE). Preserve termos técnicos como 125 Vcc, 24 Vcc, 220 Vca, bornes X2, 1X2, 2X2, XED, UHLM, PCPG1, PCPG2, CLP-SASE, QDCC, disjuntor 52G, chave 89. Retorne APENAS o texto transcrito, sem comentários adicionais.',
+            },
+          ],
+          null,
+          ThinkingLevel.MINIMAL,
+          true
+        );
+        return sendChunkedJson({ transcript: (result.text || '').trim() });
+      }
+
       if (action === 'select_pages') {
         const { fileName, totalPages, fullIndexText, userQuery, focusTopic } =
           req.body;

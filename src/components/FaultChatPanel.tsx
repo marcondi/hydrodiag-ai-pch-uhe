@@ -181,23 +181,82 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
     () => messages.length === 0
   );
   const [isListeningVoice, setIsListeningVoice] = useState(false);
+  const [isTranscribingAudio, setIsTranscribingAudio] = useState(false);
+  const [voiceStatusText, setVoiceStatusText] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const plusMenuRef = useRef<HTMLDivElement | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
-  const speechRecRef = useRef<{ stop: () => void } | null>(null);
+  const speechRecRef = useRef<{ stop: () => void; abort?: () => void } | null>(
+    null
+  );
+  const keepListeningRef = useRef<boolean>(false);
+  const restartTimerRef = useRef<number | null>(null);
+  const baseTextBeforeMicRef = useRef<string>('');
+  const completedSessionsTextRef = useRef<string>('');
+  const currentSessionFinalRef = useRef<string>('');
+  const currentSessionInterimRef = useRef<string>('');
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
 
-  const toggleChatVoiceDictation = () => {
-    if (isListeningVoice) {
+  const stopMediaStream = () => {
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+    }
+  };
+
+  const stopVoiceDictation = () => {
+    keepListeningRef.current = false;
+    if (restartTimerRef.current !== null) {
+      window.clearTimeout(restartTimerRef.current);
+      restartTimerRef.current = null;
+    }
+    if (speechRecRef.current) {
+      try {
+        speechRecRef.current.stop();
+      } catch {
+        // Ignore
+      }
+      speechRecRef.current = null;
+    }
+    if (
+      mediaRecorderRef.current &&
+      mediaRecorderRef.current.state !== 'inactive'
+    ) {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {
+        stopMediaStream();
+      }
+    } else {
+      stopMediaStream();
+    }
+    setIsListeningVoice(false);
+    setVoiceStatusText(null);
+  };
+
+  useEffect(() => {
+    return () => {
+      keepListeningRef.current = false;
+      if (restartTimerRef.current !== null) {
+        window.clearTimeout(restartTimerRef.current);
+      }
       try {
         speechRecRef.current?.stop();
       } catch {
         // Ignore
       }
-      speechRecRef.current = null;
-      setIsListeningVoice(false);
+      stopMediaStream();
+    };
+  }, []);
+
+  const toggleChatVoiceDictation = async () => {
+    if (isListeningVoice) {
+      stopVoiceDictation();
+      setTimeout(() => textareaRef.current?.focus(), 30);
       return;
     }
 
@@ -206,10 +265,12 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
         lang: string;
         continuous: boolean;
         interimResults: boolean;
+        maxAlternatives?: number;
         onresult: (event: {
-          results: ArrayLike<{ 0: { transcript: string } }>;
+          resultIndex?: number;
+          results: ArrayLike<{ isFinal?: boolean; 0: { transcript: string } }>;
         }) => void;
-        onerror: () => void;
+        onerror: (event: { error?: string }) => void;
         onend: () => void;
         start: () => void;
         stop: () => void;
@@ -218,10 +279,12 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
         lang: string;
         continuous: boolean;
         interimResults: boolean;
+        maxAlternatives?: number;
         onresult: (event: {
-          results: ArrayLike<{ 0: { transcript: string } }>;
+          resultIndex?: number;
+          results: ArrayLike<{ isFinal?: boolean; 0: { transcript: string } }>;
         }) => void;
-        onerror: () => void;
+        onerror: (event: { error?: string }) => void;
         onend: () => void;
         start: () => void;
         stop: () => void;
@@ -230,30 +293,227 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
 
     const SpeechRecClass =
       win.SpeechRecognition || win.webkitSpeechRecognition;
-    if (!SpeechRecClass) return;
 
-    try {
-      const rec = new SpeechRecClass();
-      rec.lang = 'pt-BR';
-      rec.continuous = false;
-      rec.interimResults = false;
-      rec.onresult = (event) => {
-        const idx = event.results.length - 1;
-        const transcript = event.results[idx]?.[0]?.transcript?.trim();
-        if (transcript) {
-          setInputText((prev) =>
-            prev.trim() ? `${prev.trim()} ${transcript}` : transcript
-          );
-          setTimeout(() => textareaRef.current?.focus(), 30);
+    baseTextBeforeMicRef.current = inputText.trim();
+    completedSessionsTextRef.current = '';
+    currentSessionFinalRef.current = '';
+    currentSessionInterimRef.current = '';
+    keepListeningRef.current = true;
+    setIsListeningVoice(true);
+    setVoiceStatusText(
+      '🎙️ Microfone contínuo ativo (sem limite de tempo) — Fale à vontade e clique em Concluir quando terminar...'
+    );
+
+    if (SpeechRecClass) {
+      const startRecognitionInstance = () => {
+        if (!keepListeningRef.current) return;
+        try {
+          const rec = new SpeechRecClass();
+          rec.lang = 'pt-BR';
+          rec.continuous = true;
+          rec.interimResults = true;
+          rec.maxAlternatives = 1;
+
+          rec.onresult = (event) => {
+            if (!keepListeningRef.current) return;
+            const finalParts: string[] = [];
+            const interimParts: string[] = [];
+
+            for (let i = 0; i < event.results.length; i++) {
+              const res = event.results[i];
+              const transcript = (res?.[0]?.transcript || '').trim();
+              if (!transcript) continue;
+              if (res?.isFinal) {
+                finalParts.push(transcript);
+              } else {
+                interimParts.push(transcript);
+              }
+            }
+
+            currentSessionFinalRef.current = finalParts.join(' ').trim();
+            currentSessionInterimRef.current = interimParts.join(' ').trim();
+
+            const fullText = [
+              baseTextBeforeMicRef.current,
+              completedSessionsTextRef.current,
+              currentSessionFinalRef.current,
+              currentSessionInterimRef.current,
+            ]
+              .filter(Boolean)
+              .join(' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+
+            setInputText(fullText);
+
+            if (currentSessionInterimRef.current) {
+              setVoiceStatusText(
+                `🎙️ Capturando contínuo: "${currentSessionInterimRef.current}"`
+              );
+            } else {
+              setVoiceStatusText(
+                '🎙️ Microfone contínuo ativo — Pode continuar falando (sem limite de tempo)...'
+              );
+            }
+          };
+
+          rec.onerror = (event) => {
+            const errCode = event?.error || '';
+            if (
+              errCode === 'not-allowed' ||
+              errCode === 'service-not-allowed' ||
+              errCode === 'audio-capture'
+            ) {
+              keepListeningRef.current = false;
+              setIsListeningVoice(false);
+              setVoiceStatusText(
+                '⚠️ Permita o acesso ao microfone no navegador para usar o ditado por voz.'
+              );
+              setTimeout(() => setVoiceStatusText(null), 4000);
+            }
+            // For 'no-speech', 'network', or 'aborted' during pauses, onend will automatically restart
+          };
+
+          rec.onend = () => {
+            // Preserve whatever was spoken in this cycle before restarting
+            const cycleText = [
+              currentSessionFinalRef.current,
+              currentSessionInterimRef.current,
+            ]
+              .filter(Boolean)
+              .join(' ')
+              .trim();
+
+            if (cycleText) {
+              completedSessionsTextRef.current = [
+                completedSessionsTextRef.current,
+                cycleText,
+              ]
+                .filter(Boolean)
+                .join(' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+              currentSessionFinalRef.current = '';
+              currentSessionInterimRef.current = '';
+            }
+
+            if (keepListeningRef.current) {
+              restartTimerRef.current = window.setTimeout(() => {
+                startRecognitionInstance();
+              }, 60);
+            } else {
+              setIsListeningVoice(false);
+              setVoiceStatusText(null);
+            }
+          };
+
+          speechRecRef.current = rec;
+          rec.start();
+        } catch {
+          if (keepListeningRef.current) {
+            restartTimerRef.current = window.setTimeout(() => {
+              startRecognitionInstance();
+            }, 250);
+          }
         }
       };
-      rec.onerror = () => setIsListeningVoice(false);
-      rec.onend = () => setIsListeningVoice(false);
-      speechRecRef.current = rec;
-      setIsListeningVoice(true);
-      rec.start();
-    } catch {
-      setIsListeningVoice(false);
+
+      startRecognitionInstance();
+      return;
+    }
+
+    // Fallback for browsers without Web Speech API (e.g. Firefox Desktop)
+    if (navigator.mediaDevices?.getUserMedia) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+        });
+        mediaStreamRef.current = stream;
+        const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+          ? 'audio/webm;codecs=opus'
+          : MediaRecorder.isTypeSupported('audio/mp4')
+            ? 'audio/mp4'
+            : '';
+        const recorder = mimeType
+          ? new MediaRecorder(stream, { mimeType })
+          : new MediaRecorder(stream);
+        const chunks: BlobPart[] = [];
+
+        recorder.ondataavailable = (ev) => {
+          if (ev.data && ev.data.size > 0) {
+            chunks.push(ev.data);
+          }
+        };
+
+        recorder.onstop = async () => {
+          stopMediaStream();
+          if (chunks.length === 0) {
+            setVoiceStatusText(null);
+            setIsListeningVoice(false);
+            return;
+          }
+
+          const blob = new Blob(chunks, {
+            type: recorder.mimeType || 'audio/webm',
+          });
+          if (blob.size < 800) {
+            setVoiceStatusText(null);
+            setIsListeningVoice(false);
+            return;
+          }
+
+          setIsTranscribingAudio(true);
+          setVoiceStatusText('⏳ Transcrevendo áudio técnico (pt-BR)...');
+          try {
+            const base64Audio = await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onloadend = () => {
+                const res = String(reader.result || '');
+                const commaIdx = res.indexOf(',');
+                resolve(commaIdx >= 0 ? res.slice(commaIdx + 1) : res);
+              };
+              reader.onerror = reject;
+              reader.readAsDataURL(blob);
+            });
+
+            const resp = await fetch('/api/serverless-step', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                action: 'transcribe_audio',
+                audioBase64: base64Audio,
+                mimeType: blob.type || 'audio/webm',
+              }),
+            });
+            if (resp.ok) {
+              const data = (await resp.json()) as { transcript?: string };
+              const text = (data.transcript || '').trim();
+              if (text) {
+                setInputText((prev) =>
+                  prev.trim() ? `${prev.trim()} ${text}` : text
+                );
+                setTimeout(() => textareaRef.current?.focus(), 30);
+              }
+            }
+          } catch {
+            // Ignore transcription fallback errors
+          } finally {
+            setIsTranscribingAudio(false);
+            setVoiceStatusText(null);
+            setIsListeningVoice(false);
+          }
+        };
+
+        mediaRecorderRef.current = recorder;
+        recorder.start(1000);
+      } catch {
+        keepListeningRef.current = false;
+        setIsListeningVoice(false);
+        setVoiceStatusText(
+          '⚠️ Permita o acesso ao microfone no navegador para usar o ditado por voz.'
+        );
+        setTimeout(() => setVoiceStatusText(null), 4000);
+      }
     }
   };
 
@@ -364,6 +624,10 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
     e.preventDefault();
     if (isSending || (!inputText.trim() && !attachedFile)) return;
 
+    if (isListeningVoice || keepListeningRef.current) {
+      stopVoiceDictation();
+    }
+
     const isPdf = attachedFile?.mimeType === 'application/pdf';
     const defaultPrompt = isPdf
       ? `Anexei o novo caderno PDF "${attachedFile?.name}"${
@@ -375,6 +639,10 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
     const fileToSend = attachedFile || undefined;
 
     setInputText('');
+    baseTextBeforeMicRef.current = '';
+    completedSessionsTextRef.current = '';
+    currentSessionFinalRef.current = '';
+    currentSessionInterimRef.current = '';
     setAttachedFile(null);
     setIsPlusMenuOpen(false);
 
@@ -848,6 +1116,24 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
             </div>
           )}
 
+          {(isListeningVoice || isTranscribingAudio || voiceStatusText) && (
+            <div className="mb-2 flex items-center justify-between gap-2 px-3 py-1.5 rounded-xl bg-rose-500/15 border border-rose-500/35 text-xs text-rose-200 animate-in fade-in duration-150">
+              <span className="truncate font-medium">
+                {voiceStatusText ||
+                  '🎙️ Microfone ativo (Notebook / Celular) — Fale agora...'}
+              </span>
+              {isListeningVoice && (
+                <button
+                  type="button"
+                  onClick={toggleChatVoiceDictation}
+                  className="px-2 py-0.5 rounded-md bg-rose-600 hover:bg-rose-500 text-white font-semibold text-[11px] shrink-0 cursor-pointer"
+                >
+                  Concluir
+                </button>
+              )}
+            </div>
+          )}
+
           {/* Main Row: (+) Button + Direct Camera Button + Input + Send Button */}
           <div className="flex items-center gap-2">
             {/* Plus Button & Popover Container */}
@@ -1015,7 +1301,16 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
               ref={textareaRef}
               rows={1}
               value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
+              onChange={(e) => {
+                const val = e.target.value;
+                setInputText(val);
+                if (keepListeningRef.current) {
+                  baseTextBeforeMicRef.current = val.trim();
+                  completedSessionsTextRef.current = '';
+                  currentSessionFinalRef.current = '';
+                  currentSessionInterimRef.current = '';
+                }
+              }}
               onPaste={handlePaste}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
@@ -1023,25 +1318,31 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
                   handleSubmit(e);
                 }
               }}
-              placeholder="Pergunte qualquer coisa, cole (Ctrl+V) uma print/foto ou clique no + para anexar PDF..."
-              className="flex-1 bg-transparent border-0 px-1 py-1.5 text-sm text-slate-100 placeholder:text-slate-400 focus:outline-none resize-none max-h-32 overflow-y-auto leading-relaxed"
+              placeholder="Pergunte sobre bornes, cole (Ctrl+V) uma print ou dite no microfone..."
+              className={`flex-1 bg-transparent border-0 px-1 py-1.5 text-sm text-slate-100 placeholder:text-slate-400 focus:outline-none resize-none max-h-32 leading-relaxed ${
+                inputText.includes('\n') || inputText.length > 90
+                  ? 'overflow-y-auto'
+                  : 'overflow-y-hidden'
+              }`}
             />
 
-            {/* Hands-Free Voice Dictation Button (pt-BR) */}
+            {/* Hands-Free Voice Dictation Button (pt-BR) — Works on Notebook & Mobile */}
             <button
               type="button"
-              disabled={isSending}
+              disabled={isSending || isTranscribingAudio}
               onClick={toggleChatVoiceDictation}
               title={
                 isListeningVoice
-                  ? 'Parar ditado por voz'
-                  : 'Ditar medição/pergunta por voz (Mãos ocupadas com o multímetro)'
+                  ? 'Clique para concluir o ditado por voz'
+                  : 'Ditar por voz no Notebook ou Celular (pt-BR)'
               }
               aria-label="Ditar por voz"
               className={`w-9 h-9 rounded-full flex items-center justify-center transition-all cursor-pointer shrink-0 border ${
                 isListeningVoice
-                  ? 'bg-rose-600 text-white border-rose-400 animate-pulse'
-                  : 'bg-slate-800/90 hover:bg-slate-700 text-sky-300 border-slate-700'
+                  ? 'bg-rose-600 text-white border-rose-400 animate-pulse ring-2 ring-rose-500/40'
+                  : isTranscribingAudio
+                    ? 'bg-amber-600/30 text-amber-300 border-amber-500/50 animate-pulse'
+                    : 'bg-slate-800/90 hover:bg-slate-700 text-sky-300 border-slate-700'
               }`}
             >
               {isListeningVoice ? (

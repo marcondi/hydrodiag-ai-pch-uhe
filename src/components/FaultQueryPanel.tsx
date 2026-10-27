@@ -76,16 +76,31 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
 }) => {
   const [isListeningVoice, setIsListeningVoice] = useState(false);
   const speechRecRef = useRef<{ stop: () => void } | null>(null);
+  const keepListeningRef = useRef<boolean>(false);
+  const restartTimerRef = useRef<number | null>(null);
+  const baseQueryBeforeMicRef = useRef<string>('');
+  const completedSessionsRef = useRef<string>('');
+  const currentFinalRef = useRef<string>('');
+  const currentInterimRef = useRef<string>('');
+
+  const stopVoiceQuery = () => {
+    keepListeningRef.current = false;
+    if (restartTimerRef.current !== null) {
+      window.clearTimeout(restartTimerRef.current);
+      restartTimerRef.current = null;
+    }
+    try {
+      speechRecRef.current?.stop();
+    } catch {
+      // Ignore
+    }
+    speechRecRef.current = null;
+    setIsListeningVoice(false);
+  };
 
   const toggleVoiceQuery = () => {
     if (isListeningVoice) {
-      try {
-        speechRecRef.current?.stop();
-      } catch {
-        // Ignore
-      }
-      speechRecRef.current = null;
-      setIsListeningVoice(false);
+      stopVoiceQuery();
       return;
     }
 
@@ -95,9 +110,9 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
         continuous: boolean;
         interimResults: boolean;
         onresult: (event: {
-          results: ArrayLike<{ 0: { transcript: string } }>;
+          results: ArrayLike<{ isFinal?: boolean; 0: { transcript: string } }>;
         }) => void;
-        onerror: () => void;
+        onerror: (event: { error?: string }) => void;
         onend: () => void;
         start: () => void;
         stop: () => void;
@@ -107,9 +122,9 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
         continuous: boolean;
         interimResults: boolean;
         onresult: (event: {
-          results: ArrayLike<{ 0: { transcript: string } }>;
+          results: ArrayLike<{ isFinal?: boolean; 0: { transcript: string } }>;
         }) => void;
-        onerror: () => void;
+        onerror: (event: { error?: string }) => void;
         onend: () => void;
         start: () => void;
         stop: () => void;
@@ -120,26 +135,92 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
       win.SpeechRecognition || win.webkitSpeechRecognition;
     if (!SpeechRecClass) return;
 
-    try {
-      const rec = new SpeechRecClass();
-      rec.lang = 'pt-BR';
-      rec.continuous = false;
-      rec.interimResults = false;
-      rec.onresult = (event) => {
-        const idx = event.results.length - 1;
-        const transcript = event.results[idx]?.[0]?.transcript?.trim();
-        if (transcript) {
-          setQuery(query.trim() ? `${query.trim()} ${transcript}` : transcript);
+    baseQueryBeforeMicRef.current = query.trim();
+    completedSessionsRef.current = '';
+    currentFinalRef.current = '';
+    currentInterimRef.current = '';
+    keepListeningRef.current = true;
+    setIsListeningVoice(true);
+
+    const startInstance = () => {
+      if (!keepListeningRef.current) return;
+      try {
+        const rec = new SpeechRecClass();
+        rec.lang = 'pt-BR';
+        rec.continuous = true;
+        rec.interimResults = true;
+        rec.onresult = (event) => {
+          if (!keepListeningRef.current) return;
+          const finalParts: string[] = [];
+          const interimParts: string[] = [];
+          for (let i = 0; i < event.results.length; i++) {
+            const res = event.results[i];
+            const transcript = (res?.[0]?.transcript || '').trim();
+            if (!transcript) continue;
+            if (res?.isFinal) {
+              finalParts.push(transcript);
+            } else {
+              interimParts.push(transcript);
+            }
+          }
+          currentFinalRef.current = finalParts.join(' ').trim();
+          currentInterimRef.current = interimParts.join(' ').trim();
+          const fullText = [
+            baseQueryBeforeMicRef.current,
+            completedSessionsRef.current,
+            currentFinalRef.current,
+            currentInterimRef.current,
+          ]
+            .filter(Boolean)
+            .join(' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          setQuery(fullText);
+        };
+        rec.onerror = (event) => {
+          const code = event?.error || '';
+          if (
+            code === 'not-allowed' ||
+            code === 'service-not-allowed' ||
+            code === 'audio-capture'
+          ) {
+            keepListeningRef.current = false;
+            setIsListeningVoice(false);
+          }
+        };
+        rec.onend = () => {
+          const cycleText = [currentFinalRef.current, currentInterimRef.current]
+            .filter(Boolean)
+            .join(' ')
+            .trim();
+          if (cycleText) {
+            completedSessionsRef.current = [
+              completedSessionsRef.current,
+              cycleText,
+            ]
+              .filter(Boolean)
+              .join(' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+            currentFinalRef.current = '';
+            currentInterimRef.current = '';
+          }
+          if (keepListeningRef.current) {
+            restartTimerRef.current = window.setTimeout(startInstance, 60);
+          } else {
+            setIsListeningVoice(false);
+          }
+        };
+        speechRecRef.current = rec;
+        rec.start();
+      } catch {
+        if (keepListeningRef.current) {
+          restartTimerRef.current = window.setTimeout(startInstance, 250);
         }
-      };
-      rec.onerror = () => setIsListeningVoice(false);
-      rec.onend = () => setIsListeningVoice(false);
-      speechRecRef.current = rec;
-      setIsListeningVoice(true);
-      rec.start();
-    } catch {
-      setIsListeningVoice(false);
-    }
+      }
+    };
+
+    startInstance();
   };
 
   const handleQuickButtonClick = async (btn: QuickSupportButtonConfig) => {

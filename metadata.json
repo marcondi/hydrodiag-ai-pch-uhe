@@ -1,6 +1,6 @@
 {
   "name": "HydroDiag AI — Diagnóstico Eletromecânico PCH/UHE",
   "description": "Sistema de Diagnóstico Eletromecânico, Supervisório e Resolução de Falhas para Usinas Hidrelétricas (PCH/UHE) com análise multimodal de diagramas /EL, /ME, /RM e /RB.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["camera", "microphone"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
