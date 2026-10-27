@@ -79,6 +79,7 @@ export interface SavedInvestigationSummary {
     sequenceIndex: number;
     categoryTag: DiagramCategoryTag;
     panelName?: string;
+    previewBase64?: string;
   }>;
   turns: DiagnosticTurn[];
 }

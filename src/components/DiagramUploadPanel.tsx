@@ -9,6 +9,7 @@ import {
   Link2,
   X,
   ArrowRightCircle,
+  Camera,
 } from 'lucide-react';
 import { DiagramAttachment, DiagramCategoryTag } from '../types';
 
@@ -28,6 +29,7 @@ interface DiagramUploadPanelProps {
   isUploading: boolean;
   sequenceModalOpen: boolean;
   setSequenceModalOpen: (open: boolean) => void;
+  onOpenFieldCamera?: () => void;
 }
 
 const CATEGORY_OPTIONS: DiagramCategoryTag[] = [
@@ -55,9 +57,11 @@ export const DiagramUploadPanel: React.FC<DiagramUploadPanelProps> = ({
   isUploading,
   sequenceModalOpen,
   setSequenceModalOpen,
+  onOpenFieldCamera,
 }) => {
   const initialInputRef = useRef<HTMLInputElement | null>(null);
   const sequenceInputRef = useRef<HTMLInputElement | null>(null);
+  const directCameraInputRef = useRef<HTMLInputElement | null>(null);
 
   const [isDragging, setIsDragging] = useState(false);
   const [seqPanelName, setSeqPanelName] = useState('');
@@ -185,11 +189,19 @@ export const DiagramUploadPanel: React.FC<DiagramUploadPanelProps> = ({
           onChange={handleInitialFileChange}
           className="hidden"
         />
+        <input
+          ref={directCameraInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          onChange={handleInitialFileChange}
+          className="hidden"
+        />
 
         <div className="flex items-center gap-2">
           <Upload className="w-4 h-4 text-sky-400 shrink-0" />
           <p className="text-xs font-medium text-slate-200">
-            Arraste PDFs ou fotos de painéis aqui
+            Arraste PDFs ou fotografe o painel pelo celular
           </p>
         </div>
 
@@ -201,6 +213,23 @@ export const DiagramUploadPanel: React.FC<DiagramUploadPanelProps> = ({
             className="px-3 py-1.5 text-xs font-medium text-slate-100 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
           >
             {isUploading ? 'Sincronizando...' : 'Selecionar PDF / Foto'}
+          </button>
+
+          <button
+            type="button"
+            disabled={isUploading}
+            onClick={() => {
+              if (onOpenFieldCamera) {
+                onOpenFieldCamera();
+              } else {
+                directCameraInputRef.current?.click();
+              }
+            }}
+            className="px-2.5 py-1.5 text-xs font-semibold text-emerald-200 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+            title="Tirar foto em campo no celular e sincronizar direto para o Notebook na Sala de Comando"
+          >
+            <Camera className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Tirar Foto (Campo)</span>
           </button>
 
           <button

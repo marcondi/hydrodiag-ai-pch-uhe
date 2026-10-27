@@ -180,6 +180,7 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
   );
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const cameraInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const plusMenuRef = useRef<HTMLDivElement | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
@@ -660,6 +661,14 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
           onChange={handleFileChange}
           className="hidden"
         />
+        <input
+          ref={cameraInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          onChange={handleFileChange}
+          className="hidden"
+        />
 
         {/* Unified Pill/Rounded Container */}
         <div
@@ -767,10 +776,10 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
             </div>
           )}
 
-          {/* Main Row: (+) Button + Input + Send Button */}
-          <div className="flex items-center gap-2.5">
+          {/* Main Row: (+) Button + Direct Camera Button + Input + Send Button */}
+          <div className="flex items-center gap-2">
             {/* Plus Button & Popover Container */}
-            <div ref={plusMenuRef} className="relative shrink-0">
+            <div ref={plusMenuRef} className="relative shrink-0 flex items-center gap-1.5">
               <button
                 type="button"
                 disabled={isSending}
@@ -790,9 +799,39 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
                 />
               </button>
 
+              <button
+                type="button"
+                disabled={isSending}
+                onClick={() => cameraInputRef.current?.click()}
+                title="Tirar foto em campo com a câmera do celular"
+                aria-label="Tirar foto em campo com a câmera"
+                className="w-9 h-9 rounded-full bg-emerald-600/20 hover:bg-emerald-600/35 border border-emerald-500/40 text-emerald-300 flex items-center justify-center transition-all cursor-pointer disabled:opacity-50 shrink-0"
+              >
+                <Camera className="w-4 h-4" />
+              </button>
+
               {/* Floating GPT-Style Popover Menu */}
               {isPlusMenuOpen && (
                 <div className="absolute bottom-full left-0 mb-3 w-80 sm:w-96 rounded-2xl bg-[#1A2234] border border-slate-700/90 shadow-2xl p-2 z-50 flex flex-col gap-0.5 animate-in fade-in slide-in-from-bottom-2 duration-150">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsPlusMenuOpen(false);
+                      cameraInputRef.current?.click();
+                    }}
+                    className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/25 text-left transition-colors cursor-pointer group mb-1"
+                  >
+                    <Camera className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <div className="flex flex-wrap items-baseline gap-x-2 min-w-0">
+                      <span className="text-xs sm:text-sm font-semibold text-emerald-200">
+                        Tirar foto agora (Câmera de Campo)
+                      </span>
+                      <span className="text-xs text-slate-400">
+                        Sincroniza c/ Sala de Comando
+                      </span>
+                    </div>
+                  </button>
+
                   <button
                     type="button"
                     onClick={() =>
@@ -808,7 +847,7 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
                         Adicionar fotos e arquivos
                       </span>
                       <span className="text-xs text-slate-400">
-                        Enviar do computador
+                        Enviar da galeria ou computador
                       </span>
                     </div>
                   </button>
@@ -825,24 +864,6 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
                       </span>
                       <span className="text-xs text-slate-400">
                         Painel CLP-SASE, QDCC, /EL, /RB
-                      </span>
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      triggerFilePicker('image/jpeg,image/png,image/webp,image/*')
-                    }
-                    className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl hover:bg-slate-800/90 text-left transition-colors cursor-pointer group"
-                  >
-                    <Camera className="w-4 h-4 text-amber-400 shrink-0" />
-                    <div className="flex flex-wrap items-baseline gap-x-2 min-w-0">
-                      <span className="text-xs sm:text-sm font-semibold text-slate-100">
-                        Foto de medição / painel
-                      </span>
-                      <span className="text-xs text-slate-400">
-                        Multímetro, bornes ou cartão CLP
                       </span>
                     </div>
                   </button>

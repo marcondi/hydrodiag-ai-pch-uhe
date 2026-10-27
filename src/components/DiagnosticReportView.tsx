@@ -23,6 +23,7 @@ import {
   Zap,
   GitCommitHorizontal,
   ArrowRight,
+  Camera,
 } from 'lucide-react';
 import {
   ChatAttachmentPayload,
@@ -68,6 +69,7 @@ interface DiagnosticReportViewProps {
     fileName?: string,
     sizeBytes?: number
   ) => void;
+  onOpenFieldCamera?: () => void;
 }
 
 export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
@@ -88,6 +90,7 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
   isLeftSidebarCollapsed = false,
   onToggleLeftSidebar,
   onRelinkAttachmentBinary,
+  onOpenFieldCamera,
 }) => {
   const [copiedTurnId, setCopiedTurnId] = useState<string | null>(null);
   const [selectedTurnIndex, setSelectedTurnIndex] = useState<number | null>(
@@ -98,8 +101,12 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
     useState<WorkspaceLayoutMode>('split');
   const [deepLinkOpen, setDeepLinkOpen] = useState<boolean>(false);
   const [deepLinkPage, setDeepLinkPage] = useState<number>(1);
+  const [deepLinkAttachmentId, setDeepLinkAttachmentId] = useState<
+    string | undefined
+  >(undefined);
 
-  const handleOpenPdfDeepLink = (pageNumber: number) => {
+  const handleOpenPdfDeepLink = (pageNumber: number, attachmentId?: string) => {
+    setDeepLinkAttachmentId(attachmentId);
     setDeepLinkPage(Math.max(1, pageNumber));
     setDeepLinkOpen(true);
   };
@@ -154,7 +161,18 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
             </p>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0 no-print">
+          <div className="flex flex-wrap items-center gap-2 shrink-0 no-print">
+            {onOpenFieldCamera && (
+              <button
+                type="button"
+                onClick={onOpenFieldCamera}
+                className="px-2.5 py-1 rounded bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 text-xs font-medium flex items-center gap-1.5 cursor-pointer transition-colors"
+                title="Tirar foto de painel/borne no celular ou anexar evidência de campo"
+              >
+                <Camera className="w-3.5 h-3.5 text-emerald-400" />
+                <span>+ Foto de Campo</span>
+              </button>
+            )}
             {attachments.length > 0 && (
               <button
                 type="button"
@@ -174,6 +192,101 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
             </div>
           </div>
         </div>
+
+        {/* GALERIA DE FOTOS DE CAMPO SINCRONIZADAS (CELULAR ➔ SALA DE COMANDO) */}
+        {attachments.some((a) => a.mimeType !== 'application/pdf') && (
+          <div className="rounded-lg bg-emerald-950/20 border border-emerald-800/50 px-3.5 py-2.5 flex flex-col gap-2.5 no-print">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-300">
+                <Camera className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>
+                  Evidências Fotográficas de Campo (Sincronizadas Celular ➔
+                  Notebook)
+                </span>
+              </div>
+              {onOpenFieldCamera && (
+                <button
+                  type="button"
+                  onClick={onOpenFieldCamera}
+                  className="text-[11px] font-medium text-emerald-300 hover:text-emerald-200 flex items-center gap-1 cursor-pointer"
+                >
+                  <PlusCircle className="w-3 h-3" />
+                  <span>+ Nova Foto de Campo</span>
+                </button>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              {attachments
+                .filter((a) => a.mimeType !== 'application/pdf')
+                .map((photoAtt) => {
+                  const hasImg = Boolean(photoAtt.base64Data);
+                  const imgSrc = hasImg
+                    ? `data:${photoAtt.mimeType};base64,${photoAtt.base64Data}`
+                    : null;
+                  return (
+                    <div
+                      key={photoAtt.id}
+                      className="p-2.5 rounded-md bg-[#0B111E] border border-slate-800 flex items-center gap-3"
+                    >
+                      {imgSrc ? (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenPdfDeepLink(1, photoAtt.id)}
+                          className="w-16 h-14 rounded overflow-hidden border border-slate-700 bg-slate-950 shrink-0 cursor-pointer group relative"
+                          title="Clique para inspecionar a foto com Mãozinha (Pan) e Zoom de até 600%"
+                        >
+                          <img
+                            src={imgSrc}
+                            alt={photoAtt.name}
+                            className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                          />
+                        </button>
+                      ) : (
+                        <div className="w-16 h-14 rounded border border-slate-800 bg-slate-900 flex items-center justify-center text-emerald-400 shrink-0">
+                          <Camera className="w-5 h-5" />
+                        </div>
+                      )}
+
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                            {photoAtt.panelName || photoAtt.categoryTag}
+                          </span>
+                          <span className="text-xs font-medium text-slate-200 truncate">
+                            {photoAtt.name}
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleOpenPdfDeepLink(1, photoAtt.id)
+                            }
+                            className="px-2 py-0.5 rounded bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/40 text-sky-300 text-[11px] font-medium cursor-pointer transition-colors"
+                          >
+                            Ampliar (Pan + Zoom)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onSendChatMessage(
+                                turn.id,
+                                `Analise em detalhes a foto de campo "${photoAtt.name}" (${photoAtt.panelName || 'Painel'}) anexada nesta investigação. Identifique o estado dos LEDs, disjuntores, relés e anilhas de bornes visíveis.`
+                              )
+                            }
+                            className="px-2 py-0.5 rounded bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-300 text-[11px] font-medium cursor-pointer transition-colors"
+                          >
+                            Inspecionar com IA
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+          </div>
+        )}
 
         {/* ITEM 5: LINHA DO TEMPO VISUAL DE RASTREAMENTO ENTRE PAINÉIS ("CADEIA DE SINAL") */}
         {signalChain.length > 0 && (
@@ -916,6 +1029,7 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
         onClose={() => setDeepLinkOpen(false)}
         attachments={attachments}
         initialPage={deepLinkPage}
+        initialAttachmentId={deepLinkAttachmentId}
         reportMarkdown={activeTurn?.markdownResponse}
         onAskAboutCurrentPage={
           activeTurn

@@ -29,6 +29,8 @@ import {
   PlusCircle,
   Sun,
   ArrowRight,
+  Camera,
+  Smartphone,
 } from 'lucide-react';
 import {
   ChatAttachmentPayload,
@@ -47,6 +49,10 @@ import {
 import { FaultQueryPanel } from './components/FaultQueryPanel';
 import { DiagnosticReportView } from './components/DiagnosticReportView';
 import { GitHubDeployPanel } from './components/GitHubDeployModal';
+import {
+  FieldCameraModal,
+  FieldPhotoCapturePayload,
+} from './components/FieldCameraModal';
 import {
   deduplicateAttachments,
   extractSignalChainFromContext,
@@ -194,6 +200,8 @@ export default function App() {
   const [chatProgressStep, setChatProgressStep] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const [sequenceModalOpen, setSequenceModalOpen] = useState<boolean>(false);
+  const [fieldCameraOpen, setFieldCameraOpen] = useState<boolean>(false);
+  const [fieldSyncBanner, setFieldSyncBanner] = useState<string | null>(null);
   const [isLeftSidebarCollapsed, setIsLeftSidebarCollapsed] =
     useState<boolean>(false);
 
@@ -328,9 +336,21 @@ export default function App() {
     setIsSyncingCloud(false);
   };
 
-  // Load and sync saved investigations between LocalStorage and Supabase Cloud ("Agenda Financeira youware") on mount
+  // Load and sync saved investigations between LocalStorage and Supabase Cloud ("Agenda Financeira youware") on mount and when switching from mobile to notebook (window focus)
   useEffect(() => {
     handleSyncHistoryWithCloud();
+
+    const onWindowFocus = () => {
+      if (document.visibilityState === 'visible') {
+        handleSyncHistoryWithCloud();
+      }
+    };
+    window.addEventListener('focus', onWindowFocus);
+    document.addEventListener('visibilitychange', onWindowFocus);
+    return () => {
+      window.removeEventListener('focus', onWindowFocus);
+      document.removeEventListener('visibilitychange', onWindowFocus);
+    };
   }, []);
 
   // Automatically persist current session to both LocalStorage and Server DB whenever turns/status/notes change
@@ -356,6 +376,12 @@ export default function App() {
         sequenceIndex: a.sequenceIndex,
         categoryTag: a.categoryTag,
         panelName: a.panelName,
+        previewBase64:
+          a.mimeType !== 'application/pdf' &&
+          a.base64Data &&
+          a.base64Data.length < 450000
+            ? a.base64Data
+            : undefined,
       })),
       turns,
     };
@@ -725,12 +751,12 @@ export default function App() {
     let workingAttachments = [...attachments];
     let newlyAddedPdfItem: DiagramAttachment | null = null;
 
-    if (chatAttachment && isNewPdfInChat) {
+    if (chatAttachment) {
       const nextSeq = workingAttachments.length + 1;
-      const newPdfItem: DiagramAttachment = {
+      const newAttItem: DiagramAttachment = {
         id: `att_chat_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         name: chatAttachment.name,
-        mimeType: 'application/pdf',
+        mimeType: chatAttachment.mimeType,
         sizeBytes:
           chatAttachment.sizeBytes ||
           Math.round((chatAttachment.base64.length * 3) / 4),
@@ -738,7 +764,9 @@ export default function App() {
         sequenceIndex: nextSeq,
         categoryTag:
           chatAttachment.categoryTag ||
-          inferCategoryFromFilename(chatAttachment.name),
+          (isNewPdfInChat
+            ? inferCategoryFromFilename(chatAttachment.name)
+            : 'FOTO CAMPO'),
         panelName: chatAttachment.panelName?.trim() || undefined,
         addedAtTimestamp: new Date().toLocaleTimeString('pt-BR', {
           hour: '2-digit',
@@ -747,13 +775,15 @@ export default function App() {
         serverUploadStatus: 'synced',
         uploadProgress: 100,
       };
-      newlyAddedPdfItem = newPdfItem;
-      workingAttachments = [...workingAttachments, newPdfItem];
+      if (isNewPdfInChat) {
+        newlyAddedPdfItem = newAttItem;
+      }
+      workingAttachments = [...workingAttachments, newAttItem];
       setAttachments(workingAttachments);
 
       // Persist binary in browser IndexedDB Vault and server chunk store
-      saveAttachmentBinaryToVault(newPdfItem).catch(() => {});
-      uploadAttachmentInChunks(newPdfItem).catch(() => {});
+      saveAttachmentBinaryToVault(newAttItem).catch(() => {});
+      uploadAttachmentInChunks(newAttItem).catch(() => {});
     }
 
     const userMsg: FaultChatMessage = {
@@ -1321,7 +1351,7 @@ export default function App() {
     const rawInitialList: DiagramAttachment[] = (
       saved.attachmentMetadata || []
     ).map((meta) => {
-      // Preserve base64Data if this attachment is already in memory in current state
+      // Preserve base64Data if this attachment is already in memory in current state or embedded as previewBase64
       const existingInMemory = attachments.find(
         (a) =>
           a.base64Data &&
@@ -1331,7 +1361,7 @@ export default function App() {
       );
       return {
         ...meta,
-        base64Data: existingInMemory?.base64Data || '',
+        base64Data: existingInMemory?.base64Data || meta.previewBase64 || '',
         addedAtTimestamp: saved.createdAt,
         serverUploadStatus: 'synced',
         uploadProgress: 100,
@@ -1346,9 +1376,141 @@ export default function App() {
     setIsLeftSidebarCollapsed(true);
     setActiveNavTab('bancada');
 
-    // Automatically hydrate full PDF binaries from CacheStorage, IndexedDB Vault, or Supabase Cloud Vault
+    // Automatically hydrate full PDF/image binaries from CacheStorage, IndexedDB Vault, or Supabase Cloud Vault
     const hydrated = await hydrateAttachmentsFromVault(initialList);
     setAttachments(hydrated);
+  };
+
+  // Field Camera Capture Handler (Celular em Campo ➔ Sala de Comando no Notebook)
+  const handleFieldPhotoCaptureSubmit = async (
+    payload: FieldPhotoCapturePayload
+  ) => {
+    const nextSeq = attachments.length + 1;
+    const newFieldAtt: DiagramAttachment = {
+      id: `att_field_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      name: payload.fileName,
+      mimeType: payload.mimeType,
+      sizeBytes: payload.sizeBytes,
+      base64Data: payload.base64,
+      sequenceIndex: nextSeq,
+      categoryTag: 'FOTO CAMPO',
+      panelName: payload.panelName,
+      addedAtTimestamp: new Date().toLocaleTimeString('pt-BR', {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+      serverUploadStatus: 'synced',
+      uploadProgress: 100,
+    };
+
+    const updatedAttachments = deduplicateAttachments([
+      ...attachments,
+      newFieldAtt,
+    ]);
+    setAttachments(updatedAttachments);
+
+    // Persist in local IndexedDB vault and upload chunks to Supabase server
+    saveAttachmentBinaryToVault(newFieldAtt).catch(() => {});
+    uploadAttachmentInChunks(newFieldAtt).catch(() => {});
+
+    if (payload.mode === 'sync_only') {
+      const nowIso = new Date().toISOString();
+      if (turns.length === 0) {
+        const fieldTurn: DiagnosticTurn = {
+          id: `turn_field_${Date.now()}`,
+          timestamp: nowIso,
+          userQuery: `[Captura em Campo - ${payload.panelName}] ${payload.fieldNote}`,
+          attachedFileNames: updatedAttachments.map(
+            (a) => `#${a.sequenceIndex} ${a.name} (${a.categoryTag})`
+          ),
+          sequenceCountAtTurn: updatedAttachments.length,
+          markdownResponse: [
+            `### 1. REGISTRO DE INSPEÇÃO EM CAMPO (CELULAR ➔ SALA DE COMANDO)`,
+            `- **Painel / Cubículo Inspecionado:** \`${payload.panelName}\``,
+            `- **Arquivo Fotográfico Sincronizado:** \`${payload.fileName}\` (Salvo no Cofre em Nuvem Supabase)`,
+            `- **Observação / Sintoma Registrado em Campo:** ${payload.fieldNote}`,
+            ``,
+            `### 2. COMO CONTINUAR NO NOTEBOOK DA SALA DE COMANDO`,
+            `- Esta investigação já está salva e sincronizada automaticamente no **Histórico de Falhas** e na barra **Recentes** do topo.`,
+            `- Ao abrir o aplicativo no notebook da Sala de Comando, clique na miniatura da foto acima (**Ampliar Pan + Zoom**) para inspecionar anilhas, bornes e LEDs em até \`600%\`, anexe o caderno de diagramas em PDF do painel \`${payload.panelName}\` ou clique em **"Inspecionar com IA"** para cruzar a foto com o esquema funcional.`,
+          ].join('\n'),
+          requiresNextDrawing: true,
+          chatMessages: [
+            {
+              id: `cmsg_field_${Date.now()}`,
+              role: 'user',
+              content: `[Foto capturada no celular em campo - Painel ${payload.panelName}]: ${payload.fieldNote}`,
+              timestamp: nowIso,
+              attachedImageName: payload.fileName,
+              attachedFileCategory: 'FOTO CAMPO',
+              attachedPanelName: payload.panelName,
+              attachedPreviewDataUrl: payload.previewDataUrl,
+            },
+          ],
+        };
+        setTurns([fieldTurn]);
+        setIsLeftSidebarCollapsed(true);
+      } else {
+        const targetTurnId = turns[turns.length - 1].id;
+        const fieldChatMsg: FaultChatMessage = {
+          id: `cmsg_field_${Date.now()}`,
+          role: 'user',
+          content: `[Foto capturada em campo - Painel ${payload.panelName}]: ${payload.fieldNote}`,
+          timestamp: nowIso,
+          attachedImageName: payload.fileName,
+          attachedFileCategory: 'FOTO CAMPO',
+          attachedPanelName: payload.panelName,
+          attachedPreviewDataUrl: payload.previewDataUrl,
+        };
+        setTurns((prev) =>
+          prev.map((t) =>
+            t.id === targetTurnId
+              ? {
+                  ...t,
+                  attachedFileNames: updatedAttachments.map(
+                    (a) => `#${a.sequenceIndex} ${a.name} (${a.categoryTag})`
+                  ),
+                  sequenceCountAtTurn: updatedAttachments.length,
+                  chatMessages: [...(t.chatMessages || []), fieldChatMsg],
+                }
+              : t
+          )
+        );
+      }
+
+      setActiveNavTab('bancada');
+      setFieldSyncBanner(
+        `Foto do painel ${payload.panelName} sincronizada na Nuvem! Abra o app no Notebook da Sala de Comando para continuar.`
+      );
+      setTimeout(() => setFieldSyncBanner(null), 7000);
+      return;
+    }
+
+    // Mode === 'analyze_now'
+    setActiveNavTab('bancada');
+    if (turns.length > 0) {
+      await handleSendChatMessage(
+        turns[turns.length - 1].id,
+        `[Foto de Campo - Painel ${payload.panelName}] ${payload.fieldNote}`,
+        {
+          base64: payload.base64,
+          mimeType: payload.mimeType,
+          name: payload.fileName,
+          sizeBytes: payload.sizeBytes,
+          categoryTag: 'FOTO CAMPO',
+          panelName: payload.panelName,
+          previewDataUrl: payload.previewDataUrl,
+        }
+      );
+    } else {
+      const effectiveQuery = `[Painel ${payload.panelName}] ${payload.fieldNote}`;
+      setQuery(effectiveQuery);
+      await executeDiagnosisCore(
+        updatedAttachments,
+        effectiveQuery,
+        activeFocusTopic
+      );
+    }
   };
 
   const handleToggleFavorite = (id: string) => {
@@ -1542,6 +1704,16 @@ export default function App() {
         <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
+            onClick={() => setFieldCameraOpen(true)}
+            title="Tirar foto de painel/borne no celular em campo e sincronizar automaticamente com o Notebook da Sala de Comando"
+            className="px-3 py-2 text-xs font-semibold text-emerald-200 bg-emerald-600/25 hover:bg-emerald-600/35 border border-emerald-500/50 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+          >
+            <Camera className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Foto de Campo</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setFieldContrastMode((prev) => !prev)}
             title="Alternar Modo Alto Contraste de Campo (Casa de Força / Painel)"
             className={`px-3 py-2 text-xs font-medium rounded-md border transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
@@ -1566,10 +1738,10 @@ export default function App() {
             href="/api/backup/download-zip"
             download
             title="Baixar cópia completa do código-fonte em .ZIP"
-            className="px-3 py-2 text-xs font-semibold text-emerald-200 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+            className="hidden sm:flex px-3 py-2 text-xs font-semibold text-emerald-200 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 rounded-md transition-colors whitespace-nowrap shrink-0 items-center gap-1.5 cursor-pointer"
           >
             <Download className="w-3.5 h-3.5 text-emerald-400" />
-            <span className="hidden sm:inline">Backup (.ZIP)</span>
+            <span className="hidden xl:inline">Backup (.ZIP)</span>
           </a>
 
           <button
@@ -1578,7 +1750,7 @@ export default function App() {
             className="px-3.5 py-2 text-xs font-medium text-white bg-sky-600 hover:bg-sky-500 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
           >
             <Plus className="w-3.5 h-3.5" />
-            <span>Nova Investigação</span>
+            <span className="hidden sm:inline">Nova Investigação</span>
           </button>
         </div>
       </header>
@@ -1703,11 +1875,35 @@ export default function App() {
                     <PlusCircle className="w-3 h-3" />
                     <span>+ Desenho</span>
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setFieldCameraOpen(true)}
+                    className="px-2 py-0.5 rounded bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-[11px] font-medium flex items-center gap-1 cursor-pointer transition-colors shrink-0"
+                    title="Tirar foto em campo pelo celular ou webcam e sincronizar com a Sala de Comando"
+                  >
+                    <Camera className="w-3 h-3" />
+                    <span>+ Foto Campo</span>
+                  </button>
                 </div>
               </div>
 
-              {/* Right Side of Command Bar: Quick Recent Faults Recall */}
+              {/* Right Side of Command Bar: Quick Recent Faults Recall + Cloud Sync */}
               <div className="flex flex-wrap items-center gap-2 min-w-0 ml-auto">
+                <button
+                  type="button"
+                  onClick={() => handleSyncHistoryWithCloud()}
+                  disabled={isSyncingCloud}
+                  className="px-2 py-1 rounded bg-[#0B111E] hover:bg-slate-800 border border-slate-800 text-[11px] text-emerald-300 flex items-center gap-1 cursor-pointer transition-colors shrink-0"
+                  title="Sincronizar fotos e investigações salvas pelo celular em campo (Supabase Cloud)"
+                >
+                  <RefreshCw
+                    className={`w-3 h-3 text-emerald-400 ${
+                      isSyncingCloud ? 'animate-spin' : ''
+                    }`}
+                  />
+                  <span className="hidden sm:inline">Sincronizar Campo</span>
+                </button>
+
                 {savedInvestigations.length > 0 && (
                   <>
                     <div className="hidden xl:flex items-center gap-1.5 min-w-0">
@@ -1718,6 +1914,9 @@ export default function App() {
                       {quickFilteredHistory.slice(0, 3).map((item) => {
                         const isActive =
                           item.id === sessionId && turns.length > 0;
+                        const hasFieldPhoto = item.attachmentMetadata?.some(
+                          (m) => m.mimeType !== 'application/pdf'
+                        );
                         return (
                           <button
                             key={item.id}
@@ -1732,6 +1931,9 @@ export default function App() {
                           >
                             {item.status === 'resolvida' && (
                               <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
+                            )}
+                            {hasFieldPhoto && (
+                              <Smartphone className="w-3 h-3 text-emerald-400 shrink-0" />
                             )}
                             <span className="truncate">{item.title}</span>
                           </button>
@@ -1758,6 +1960,22 @@ export default function App() {
               </div>
             </div>
 
+            {fieldSyncBanner && (
+              <div className="px-3.5 py-2 rounded-lg bg-emerald-950/60 border border-emerald-500/50 text-emerald-200 text-xs flex items-center justify-between gap-3 no-print">
+                <div className="flex items-center gap-2">
+                  <Smartphone className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>{fieldSyncBanner}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setFieldSyncBanner(null)}
+                  className="text-[11px] font-mono text-emerald-300 hover:text-white cursor-pointer"
+                >
+                  Fechar
+                </button>
+              </div>
+            )}
+
             {/* Split-Workspace Grid: Independent Scroll Columns on Desktop */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start flex-1">
               {/* Left Input Drawer: Independent Scroll on Desktop so it never pushes the page down */}
@@ -1778,6 +1996,7 @@ export default function App() {
                   isUploading={isUploading}
                   sequenceModalOpen={sequenceModalOpen}
                   setSequenceModalOpen={setSequenceModalOpen}
+                  onOpenFieldCamera={() => setFieldCameraOpen(true)}
                 />
 
                 <FaultQueryPanel
@@ -1806,6 +2025,7 @@ export default function App() {
                   progressStep={progressStep}
                   error={error}
                   onOpenSequenceUpload={() => setSequenceModalOpen(true)}
+                  onOpenFieldCamera={() => setFieldCameraOpen(true)}
                   onQuickFollowUp={async (followUpPrompt) => {
                     setQuery(followUpPrompt);
                     await executeDiagnosisCore(
@@ -2230,6 +2450,13 @@ export default function App() {
         {/* TAB 5: PUBLICAR NO GITHUB (@marcondi) */}
         {activeNavTab === 'github' && <GitHubDeployPanel />}
       </main>
+
+      <FieldCameraModal
+        isOpen={fieldCameraOpen}
+        onClose={() => setFieldCameraOpen(false)}
+        onCaptureSubmit={handleFieldPhotoCaptureSubmit}
+        activeInvestigationTitle={turns[0]?.userQuery}
+      />
 
       <footer className="mt-auto border-t border-slate-800/80 px-6 py-4 text-xs text-slate-500 flex flex-wrap items-center justify-between gap-4 no-print">
         <span>
