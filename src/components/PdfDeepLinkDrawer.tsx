@@ -20,6 +20,7 @@ import {
   RotateCcw,
   Circle,
   MoveUpRight,
+  Undo2,
   Trash2,
 } from 'lucide-react';
 import { DiagramAttachment } from '../types';
@@ -292,7 +293,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     };
   }, [isOpen, isLoadingPage, useNativeIframe, isDragging]);
 
-  // Close drawer with ESC key (and navigate pages with ArrowLeft / ArrowRight when not typing in input)
+  // Handle ESC key: if drawing tool ('circle' or 'arrow') is active, ESC deactivates drawing and returns to 'pan' (Mãozinha); otherwise closes drawer. Also supports Ctrl+Z / Cmd+Z to undo last annotation.
   useEffect(() => {
     if (!isOpen) return;
 
@@ -313,6 +314,11 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       if (e.key === 'Escape' || e.key === 'Esc') {
         e.preventDefault();
         e.stopPropagation();
+        if (interactionMode !== 'pan' || activeSheetShape !== null) {
+          setActiveSheetShape(null);
+          setInteractionMode('pan');
+          return;
+        }
         onClose();
         return;
       }
@@ -322,6 +328,24 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
         activeTag === 'input' ||
         activeTag === 'textarea' ||
         activeTag === 'select';
+
+      if (
+        !isTyping &&
+        (e.ctrlKey || e.metaKey) &&
+        e.key.toLowerCase() === 'z'
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        setSheetAnnotations((prev) => {
+          const list = prev[pageAnnotationKey] || [];
+          if (list.length === 0) return prev;
+          return {
+            ...prev,
+            [pageAnnotationKey]: list.slice(0, -1),
+          };
+        });
+        return;
+      }
 
       if (!isTyping && !isLoadingPage) {
         if (e.key === 'ArrowLeft' && currentPage > 1) {
@@ -344,7 +368,16 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       clearInterval(focusGuardInterval);
       window.removeEventListener('keydown', handleKeyDown, true);
     };
-  }, [isOpen, onClose, currentPage, effectiveTotalPages, isLoadingPage]);
+  }, [
+    isOpen,
+    onClose,
+    currentPage,
+    effectiveTotalPages,
+    isLoadingPage,
+    interactionMode,
+    activeSheetShape,
+    pageAnnotationKey,
+  ]);
 
   useEffect(() => {
     if (isOpen) {
@@ -799,7 +832,10 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
           <div className="flex flex-wrap items-center gap-1.5">
             <button
               type="button"
-              onClick={() => setInteractionMode('pan')}
+              onClick={() => {
+                setActiveSheetShape(null);
+                setInteractionMode('pan');
+              }}
               className={`px-2.5 py-1 rounded text-xs font-mono font-medium flex items-center gap-1.5 border transition-colors cursor-pointer ${
                 interactionMode === 'pan'
                   ? isDragging || isLeftClickWheelZooming
@@ -807,7 +843,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                     : 'bg-sky-500/20 border-sky-500/50 text-sky-200 font-semibold'
                   : 'bg-[#0B111E] border-slate-700 text-slate-300 hover:text-white'
               }`}
-              title="Modo Mãozinha (CAD Pan): Clique esq. e arraste para mover a folha; Clique esq. + Roda para Zoom"
+              title="Modo Mãozinha (CAD Pan): Clique esq. e arraste para mover a folha; Clique esq. + Roda para Zoom (Atalho: Tecla ESC quando estiver desenhando)"
             >
               {isDragging ? (
                 <Grab className="w-3.5 h-3.5 text-amber-300" />
@@ -821,17 +857,26 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                     ? 'Arrastando Folha...'
                     : 'Mãozinha (Pan)'}
               </span>
+              {interactionMode !== 'pan' && (
+                <span className="ml-0.5 px-1 py-0.2 rounded bg-slate-800 border border-slate-600 text-[9px] text-sky-300">
+                  ESC
+                </span>
+              )}
             </button>
 
             <button
               type="button"
-              onClick={() => setInteractionMode('circle')}
+              onClick={() =>
+                setInteractionMode((prev) =>
+                  prev === 'circle' ? 'pan' : 'circle'
+                )
+              }
               className={`px-2.5 py-1 rounded text-xs font-mono font-medium flex items-center gap-1 border transition-colors cursor-pointer ${
                 interactionMode === 'circle'
                   ? 'bg-rose-500/25 border-rose-500 text-rose-200 font-semibold'
                   : 'bg-[#0B111E] border-slate-700 text-slate-300 hover:text-white'
               }`}
-              title="Caneta de Inspeção: Circular borne, relé ou componente em vermelho"
+              title="Caneta de Inspeção: Circular borne, relé ou componente em vermelho (Pressione ESC para sair do modo desenho)"
             >
               <Circle className="w-3 h-3 text-rose-400" />
               <span>Circular Borne</span>
@@ -839,16 +884,44 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
 
             <button
               type="button"
-              onClick={() => setInteractionMode('arrow')}
+              onClick={() =>
+                setInteractionMode((prev) =>
+                  prev === 'arrow' ? 'pan' : 'arrow'
+                )
+              }
               className={`px-2.5 py-1 rounded text-xs font-mono font-medium flex items-center gap-1 border transition-colors cursor-pointer ${
                 interactionMode === 'arrow'
                   ? 'bg-rose-500/25 border-rose-500 text-rose-200 font-semibold'
                   : 'bg-[#0B111E] border-slate-700 text-slate-300 hover:text-white'
               }`}
-              title="Caneta de Inspeção: Desenhar seta vermelha apontando o ponto de medição"
+              title="Caneta de Inspeção: Desenhar seta vermelha apontando o ponto de medição (Pressione ESC para sair do modo desenho)"
             >
               <MoveUpRight className="w-3 h-3 text-rose-400" />
               <span>Seta</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={currentPageShapes.length === 0}
+              onClick={() =>
+                setSheetAnnotations((prev) => {
+                  const list = prev[pageAnnotationKey] || [];
+                  if (list.length === 0) return prev;
+                  return {
+                    ...prev,
+                    [pageAnnotationKey]: list.slice(0, -1),
+                  };
+                })
+              }
+              className={`px-2.5 py-1 rounded text-xs font-mono font-medium flex items-center gap-1 border transition-colors ${
+                currentPageShapes.length > 0
+                  ? 'bg-amber-500/15 hover:bg-amber-500/25 border-amber-500/40 text-amber-200 cursor-pointer'
+                  : 'bg-[#0B111E] border-slate-800 text-slate-500 opacity-50 cursor-not-allowed'
+              }`}
+              title="Desfazer última marcação feita nesta página (Atalho: Ctrl+Z)"
+            >
+              <Undo2 className="w-3.5 h-3.5 text-amber-400" />
+              <span>Desfazer</span>
             </button>
 
             {currentPageShapes.length > 0 && (
@@ -861,7 +934,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                   }))
                 }
                 className="px-2 py-1 rounded text-[11px] font-mono bg-rose-950/60 hover:bg-rose-900/60 border border-rose-700/50 text-rose-200 flex items-center gap-1 cursor-pointer"
-                title="Limpar marcações desta página"
+                title="Limpar todas as marcações desta página"
               >
                 <Trash2 className="w-3 h-3" />
                 <span>Limpar ({currentPageShapes.length})</span>
