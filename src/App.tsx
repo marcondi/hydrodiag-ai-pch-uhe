@@ -226,7 +226,10 @@ export default function App() {
     useState<boolean>(false);
   const [isMobilePocketMode, setIsMobilePocketMode] = useState<boolean>(() => {
     try {
-      return new URLSearchParams(window.location.search).get('mobile') === '1';
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('mobile') === '1') return true;
+      if (params.get('mobile') === '0') return false;
+      return window.innerWidth < 768;
     } catch {
       return false;
     }

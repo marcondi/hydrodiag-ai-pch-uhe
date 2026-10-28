@@ -1,29 +1,24 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  ArrowLeft,
   BookOpen,
   Camera,
   CheckCircle2,
-  ChevronRight,
-  Cpu,
   FileText,
+  FolderOpen,
   Image as ImageIcon,
   Laptop,
   Loader2,
-  MessageSquare,
   Mic,
   MicOff,
-  Plus,
-  RefreshCw,
   Send,
   Smartphone,
   Sparkles,
   Sun,
   Trash2,
-  Upload,
   Volume2,
   VolumeX,
-  Zap,
 } from 'lucide-react';
 import {
   ChatAttachmentPayload,
@@ -80,23 +75,6 @@ interface MobileFieldPocketViewProps {
   onExitMobileMode: () => void;
 }
 
-type PocketTab = 'alarme' | 'bornes' | 'folhas' | 'chat';
-
-const QUICK_SCADA_ALARMS = [
-  'Alarme Supervisório: Falha de Pressão de Óleo na UHLM / Disparo 86',
-  'Disjuntor 52G não fecha pelo supervisório (verificar intertravamento e bobina)',
-  'Falta de tensão 125 Vcc na régua de bornes / entrada digital do CLP-SASE',
-  'Falha de comunicação ou cartão de entrada digital (XED) sem sinal no painel',
-  'Relé de bloqueio 86 atuado — rastrear qual contato disparou a bobina',
-];
-
-const QUICK_MOBILE_CHAT_CHIPS = [
-  'Medi 125 Vcc neste borne. Qual o próximo ponto a jusante?',
-  'Medi 0 Vcc neste borne. Qual contato ou fusível a montante abriu?',
-  'Onde fica fisicamente este componente no painel (/ME) e qual o código (/RM)?',
-  'É seguro fazer este teste com a máquina rodando ou há risco de Trip?',
-];
-
 function extractCitedPagesFromMarkdown(markdown: string): number[] {
   const pages = new Set<number>();
   const regex =
@@ -128,8 +106,6 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
   onUpdateStatus,
   fieldContrastMode,
   onToggleFieldContrast,
-  isSyncingCloud,
-  onSyncCloud,
   onLoadInvestigation,
   onNewInvestigation,
   onAddFiles,
@@ -141,35 +117,28 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
   onSendChatMessage,
   onExitMobileMode,
 }) => {
-  const [activeTab, setActiveTab] = useState<PocketTab>(() =>
-    turns.length > 0 ? 'bornes' : 'alarme'
+  // Two simple screens: 'input' (Passo 1, 2, 3 para enviar a falha) or 'result' (Bornes + PDF + Chat)
+  const [screen, setScreen] = useState<'input' | 'result'>(() =>
+    turns.length > 0 ? 'result' : 'input'
   );
-  const [manualPageInput, setManualPageInput] = useState<string>('1');
+  const [showSavedList, setShowSavedList] = useState<boolean>(false);
+  const [showFullLaudo, setShowFullLaudo] = useState<boolean>(false);
+  const [manualPageInput, setManualPageInput] = useState<string>('');
   const [chatInput, setChatInput] = useState<string>('');
   const [isDictatingQuery, setIsDictatingQuery] = useState<boolean>(false);
   const [isDictatingChat, setIsDictatingChat] = useState<boolean>(false);
   const [voiceStatus, setVoiceStatus] = useState<string | null>(null);
   const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
-  const [showFullReportMobile, setShowFullReportMobile] =
-    useState<boolean>(false);
+
+  // Mobile PDF Drawer state
   const [mobilePdfOpen, setMobilePdfOpen] = useState<boolean>(false);
   const [mobilePdfPage, setMobilePdfPage] = useState<number>(1);
   const [mobilePdfAttachmentId, setMobilePdfAttachmentId] = useState<
     string | undefined
   >(undefined);
 
-  const handleOpenMobilePdfSheet = (
-    pageNumber: number,
-    attachmentId?: string
-  ) => {
-    setMobilePdfPage(pageNumber);
-    setMobilePdfAttachmentId(attachmentId);
-    setMobilePdfOpen(true);
-    onOpenPdfPage(pageNumber, attachmentId);
-  };
-
-  const scadaPhotoInputRef = useRef<HTMLInputElement | null>(null);
-  const pdfUploadInputRef = useRef<HTMLInputElement | null>(null);
+  const photoGalleryInputRef = useRef<HTMLInputElement | null>(null);
+  const pdfFileInputRef = useRef<HTMLInputElement | null>(null);
   const voiceEngineRef = useRef<UniversalVoiceDictation | null>(null);
   const queryRef = useRef<string>(query);
   queryRef.current = query;
@@ -179,10 +148,10 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
   const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
   const prevTurnsCountRef = useRef<number>(turns.length);
 
-  // Automatically jump to "Bornes & Multímetro" tab when a new diagnostic turn arrives
+  // Automatically switch to Result screen when diagnosis completes
   useEffect(() => {
     if (turns.length > prevTurnsCountRef.current && turns.length > 0) {
-      setActiveTab('bornes');
+      setScreen('result');
     }
     prevTurnsCountRef.current = turns.length;
   }, [turns.length]);
@@ -252,6 +221,16 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
     await engine.start();
   };
 
+  const handleOpenMobilePdfSheet = (
+    pageNumber: number,
+    attachmentId?: string
+  ) => {
+    setMobilePdfPage(pageNumber);
+    setMobilePdfAttachmentId(attachmentId);
+    setMobilePdfOpen(true);
+    onOpenPdfPage(pageNumber, attachmentId);
+  };
+
   const handleToggleSpeech = () => {
     if (!latestTurn) return;
     technicalSpeechEngine.toggleSpeak(
@@ -275,12 +254,6 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
     ? extractCitedPagesFromMarkdown(latestTurn.markdownResponse)
     : [];
 
-  const handleQuickMeasurementReply = async (measurementMsg: string) => {
-    if (!latestTurn) return;
-    setActiveTab('chat');
-    await onSendChatMessage(latestTurn.id, measurementMsg);
-  };
-
   const handleSendMobileChat = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     const text = chatInput.trim();
@@ -291,10 +264,10 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
   };
 
   return (
-    <div className="min-h-screen bg-[#070B14] text-slate-100 flex flex-col pb-20 select-none">
-      {/* Hidden Direct Inputs for Supervisorio Photo & PDF */}
+    <div className="min-h-screen bg-[#070B14] text-slate-100 flex flex-col">
+      {/* Hidden File Inputs */}
       <input
-        ref={scadaPhotoInputRef}
+        ref={photoGalleryInputRef}
         type="file"
         accept="image/*"
         multiple
@@ -307,7 +280,7 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
         className="hidden"
       />
       <input
-        ref={pdfUploadInputRef}
+        ref={pdfFileInputRef}
         type="file"
         accept=".pdf,application/pdf,image/*"
         multiple
@@ -320,246 +293,233 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
         className="hidden"
       />
 
-      {/* Top Mobile Header */}
-      <header className="sticky top-0 z-30 bg-[#0B111E]/95 backdrop-blur-md border-b border-slate-800 px-3 py-2.5 flex flex-col gap-2">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <div className="w-8 h-8 rounded-lg bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shrink-0">
-              <Smartphone className="w-4 h-4" />
-            </div>
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5">
-                <span className="text-sm font-bold text-white truncate">
-                  HydroDiag Campo
-                </span>
-                <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-[10px] font-mono text-emerald-300 shrink-0">
-                  CELULAR
-                </span>
-              </div>
-              <p className="text-[11px] text-slate-400 truncate">
-                {latestTurn
-                  ? latestTurn.userQuery
-                  : 'Pronto p/ foto do Supervisório ou consulta'}
-              </p>
-            </div>
+      {/* TOP BAR SIMPLES E DIRETA */}
+      <header className="sticky top-0 z-30 bg-[#0B111E] border-b border-slate-800 px-3.5 py-2.5 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="w-8 h-8 rounded-lg bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shrink-0">
+            <Smartphone className="w-4 h-4" />
           </div>
-
-          <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              type="button"
-              onClick={onToggleFieldContrast}
-              className={`p-2 rounded-lg border cursor-pointer ${
-                fieldContrastMode
-                  ? 'bg-amber-400 text-slate-950 border-amber-300'
-                  : 'bg-[#111827] text-amber-400 border-slate-700'
-              }`}
-              title="Alternar Alto Contraste de Campo"
-            >
-              <Sun className="w-4 h-4" />
-            </button>
-
-            <button
-              type="button"
-              onClick={onSyncCloud}
-              disabled={isSyncingCloud}
-              className="p-2 rounded-lg bg-[#111827] border border-slate-700 text-emerald-400 cursor-pointer"
-              title="Sincronizar com Notebook (Supabase)"
-            >
-              <RefreshCw
-                className={`w-4 h-4 ${isSyncingCloud ? 'animate-spin' : ''}`}
-              />
-            </button>
-
-            <button
-              type="button"
-              onClick={onExitMobileMode}
-              className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 text-xs font-mono font-semibold text-sky-300 flex items-center gap-1 cursor-pointer"
-              title="Voltar para a versão completa de Notebook / Bancada"
-            >
-              <Laptop className="w-3.5 h-3.5" />
-              <span>Bancada PC</span>
-            </button>
+          <div className="min-w-0">
+            <h1 className="text-sm font-bold text-white truncate">
+              HydroDiag Celular
+            </h1>
+            <p className="text-[11px] text-slate-400 truncate">
+              {screen === 'input'
+                ? '1. Envie a falha para diagnosticar'
+                : '2. Guia de Bornes, Folha PDF e Chat'}
+            </p>
           </div>
         </div>
 
-        {/* Quick Recent Investigations Selector & New Button */}
-        <div className="flex items-center gap-2">
-          <select
-            aria-label="Selecionar investigação sincronizada"
-            value={
-              turns.length > 0 &&
-              savedInvestigations.some((i) => i.id === sessionId)
-                ? sessionId
-                : ''
-            }
-            onChange={(e) => {
-              const found = savedInvestigations.find(
-                (i) => i.id === e.target.value
-              );
-              if (found) {
-                onLoadInvestigation(found);
-                setActiveTab('bornes');
-              }
-            }}
-            className="flex-1 bg-[#111827] border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-sky-200 font-mono truncate focus:outline-none"
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            type="button"
+            onClick={onToggleFieldContrast}
+            className={`p-2 rounded-lg border text-xs cursor-pointer ${
+              fieldContrastMode
+                ? 'bg-amber-400 text-slate-950 border-amber-300 font-bold'
+                : 'bg-slate-800/90 text-amber-300 border-slate-700'
+            }`}
+            title="Alto Contraste"
           >
-            <option value="">
-              📂 Investigações Sincronizadas ({savedInvestigations.length})...
-            </option>
-            {savedInvestigations.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.status === 'resolvida' ? '✓ ' : '⚡ '}
-                {item.title}
-              </option>
-            ))}
-          </select>
+            <Sun className="w-4 h-4" />
+          </button>
 
           <button
             type="button"
-            onClick={() => {
-              onNewInvestigation();
-              setActiveTab('alarme');
-            }}
-            className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold flex items-center gap-1 shrink-0 cursor-pointer"
+            onClick={onExitMobileMode}
+            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-medium flex items-center gap-1.5 cursor-pointer"
           >
-            <Plus className="w-3.5 h-3.5" />
-            <span>Nova</span>
+            <Laptop className="w-3.5 h-3.5 text-sky-400" />
+            <span>Versão PC</span>
           </button>
         </div>
       </header>
 
-      {/* Live Analysis / Upload Banner */}
-      {(isAnalyzing || isUploading) && (
-        <div className="mx-3 mt-3 p-3.5 rounded-xl bg-sky-950/80 border-2 border-sky-500/60 flex items-center gap-3 shadow-lg">
-          <Loader2 className="w-6 h-6 text-sky-400 animate-spin shrink-0" />
-          <div className="min-w-0">
-            <p className="text-xs font-bold text-white">
-              {isUploading
-                ? 'Carregando foto / diagrama...'
-                : 'Engenheiro IA analisando falha e bornes...'}
-            </p>
-            <p className="text-[11px] font-mono text-sky-300 truncate">
-              {progressStep || 'Rastreando réguas de bornes e folhas PDF...'}
-            </p>
+      {/* CORPO PRINCIPAL */}
+      <div className="flex-1 p-3.5 max-w-lg w-full mx-auto space-y-4 pb-10">
+        {/* Banner de carregamento quando a IA está analisando */}
+        {(isAnalyzing || isUploading) && (
+          <div className="p-4 rounded-2xl bg-sky-950/90 border-2 border-sky-500/60 shadow-lg flex items-center gap-3">
+            <Loader2 className="w-6 h-6 text-sky-400 animate-spin shrink-0" />
+            <div>
+              <p className="text-sm font-bold text-white">
+                {isUploading
+                  ? 'Carregando foto / arquivo PDF...'
+                  : 'Analisando falha e localizando bornes...'}
+              </p>
+              <p className="text-xs text-sky-200 mt-0.5">
+                {progressStep || 'Aguarde alguns segundos...'}
+              </p>
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {error && (
-        <div className="mx-3 mt-3 p-3 rounded-xl bg-rose-950/80 border border-rose-500/60 text-xs text-rose-200 flex items-start gap-2">
-          <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-          <span>{error}</span>
-        </div>
-      )}
+        {/* Erro se houver */}
+        {error && (
+          <div className="p-3.5 rounded-xl bg-rose-950/80 border border-rose-500/60 text-xs text-rose-200 flex items-start gap-2.5">
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <span>{error}</span>
+          </div>
+        )}
 
-      {/* Main Tab Body */}
-      <div className="flex-1 p-3 space-y-3 max-w-xl w-full mx-auto">
-        {/* =====================================================================
-            ABA 1: FALHA / SUPERVISÓRIO (SUBIR FOTO DA FALHA OU ESCREVER/DITAR)
-           ===================================================================== */}
-        {activeTab === 'alarme' && (
-          <div className="space-y-3">
-            {/* Step 1: Giant Photo / Upload Buttons */}
-            <div className="p-3.5 rounded-xl bg-[#111827] border border-slate-800 space-y-3 shadow-lg">
-              <div className="flex items-center justify-between">
-                <h2 className="text-xs font-mono uppercase tracking-wider text-emerald-400 font-bold flex items-center gap-1.5">
-                  <Camera className="w-4 h-4" />
-                  <span>1. Foto da Falha no Supervisório / Painel</span>
-                </h2>
-                <span className="text-[11px] font-mono text-slate-400">
-                  {attachments.length} arq.
+        {/* ===================================================================
+            TELA 1: INFORMAR A FALHA (PASSO 1, PASSO 2 E BOTÃO DE DIAGNÓSTICO)
+           =================================================================== */}
+        {screen === 'input' && (
+          <div className="space-y-4">
+            {/* Se já existe um diagnóstico pronto na sessão, mostra botão para voltar a ele */}
+            {latestTurn && (
+              <button
+                type="button"
+                onClick={() => setScreen('result')}
+                className="w-full py-3 px-4 rounded-xl bg-sky-500/20 border border-sky-500/50 text-sky-200 font-bold text-xs flex items-center justify-between cursor-pointer"
+              >
+                <span>📋 Você já tem um diagnóstico aberto nesta sessão</span>
+                <span className="underline">Ver Resultado →</span>
+              </button>
+            )}
+
+            {/* Atalho opcional: Abrir falha já salva no PC/Nuvem */}
+            {savedInvestigations.length > 0 && (
+              <div className="rounded-xl bg-[#111827] border border-slate-800 p-3">
+                <button
+                  type="button"
+                  onClick={() => setShowSavedList((prev) => !prev)}
+                  className="w-full flex items-center justify-between text-xs font-semibold text-sky-300 cursor-pointer"
+                >
+                  <span className="flex items-center gap-2">
+                    <FolderOpen className="w-4 h-4 text-sky-400" />
+                    <span>
+                      Abrir falha já iniciada no PC ({savedInvestigations.length})
+                    </span>
+                  </span>
+                  <span>{showSavedList ? 'Fechar ▲' : 'Escolher ▼'}</span>
+                </button>
+
+                {showSavedList && (
+                  <div className="mt-2.5 pt-2.5 border-t border-slate-800 space-y-1.5 max-h-52 overflow-y-auto">
+                    {savedInvestigations.slice(0, 12).map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => {
+                          onLoadInvestigation(item);
+                          setShowSavedList(false);
+                          setScreen('result');
+                        }}
+                        className={`w-full text-left p-2.5 rounded-lg border text-xs transition-colors cursor-pointer ${
+                          item.id === sessionId
+                            ? 'bg-sky-500/20 border-sky-500/50 text-white font-semibold'
+                            : 'bg-[#0B111E] border-slate-800 text-slate-200 hover:bg-slate-800'
+                        }`}
+                      >
+                        <div className="truncate">{item.title}</div>
+                        <div className="text-[10px] text-slate-400 mt-0.5">
+                          {item.attachmentMetadata.length} arq. • Toque para abrir no celular
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* PASSO 1: SUBIR FOTO DO SUPERVISÓRIO OU PDF */}
+            <div className="rounded-2xl bg-[#111827] border border-slate-800 p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <span className="w-6 h-6 rounded-full bg-emerald-500 text-slate-950 font-bold text-xs flex items-center justify-center shrink-0">
+                  1
                 </span>
+                <h2 className="text-sm font-bold text-white">
+                  Subir Foto da Falha ou PDF (Opcional)
+                </h2>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                {/* Button A: Open Field Camera with Red Pen to photograph SCADA / Panel */}
+              <div className="grid grid-cols-2 gap-2.5">
                 <button
                   type="button"
                   onClick={onOpenFieldCamera}
-                  className="w-full py-3.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm flex items-center justify-center gap-2.5 shadow-lg cursor-pointer active:scale-[0.99]"
+                  className="p-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex flex-col items-center justify-center gap-1.5 shadow cursor-pointer"
                 >
-                  <Camera className="w-5 h-5 shrink-0" />
-                  <span>Fotografar Supervisório / Painel</span>
+                  <Camera className="w-6 h-6" />
+                  <span className="text-center leading-tight">
+                    Tirar Foto da Tela / Painel
+                  </span>
                 </button>
 
-                {/* Button B: Quick Gallery Upload (Print of SCADA or PDF) */}
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => scadaPhotoInputRef.current?.click()}
-                    className="py-3 px-2.5 rounded-xl bg-[#0B111E] hover:bg-slate-800 border border-emerald-500/40 text-emerald-200 font-semibold text-xs flex flex-col items-center justify-center gap-1 cursor-pointer"
-                  >
-                    <ImageIcon className="w-4 h-4 text-emerald-400" />
-                    <span>Subir Foto/Print</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => pdfUploadInputRef.current?.click()}
-                    className="py-3 px-2.5 rounded-xl bg-[#0B111E] hover:bg-slate-800 border border-sky-500/40 text-sky-200 font-semibold text-xs flex flex-col items-center justify-center gap-1 cursor-pointer"
-                  >
-                    <Upload className="w-4 h-4 text-sky-400" />
-                    <span>Subir PDF (/EL)</span>
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => photoGalleryInputRef.current?.click()}
+                  className="p-3.5 rounded-xl bg-[#0B111E] hover:bg-slate-800 border border-emerald-500/40 text-emerald-200 font-semibold text-xs flex flex-col items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <ImageIcon className="w-6 h-6 text-emerald-400" />
+                  <span className="text-center leading-tight">
+                    Escolher Foto da Galeria
+                  </span>
+                </button>
               </div>
 
-              {/* Attached Files List */}
+              <button
+                type="button"
+                onClick={() => pdfFileInputRef.current?.click()}
+                className="w-full py-2.5 px-3 rounded-xl bg-[#0B111E] hover:bg-slate-800 border border-slate-700 text-sky-300 font-medium text-xs flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <FileText className="w-4 h-4 text-sky-400" />
+                <span>Anexar Diagrama Elétrico em PDF</span>
+              </button>
+
+              {/* Lista de arquivos já anexados */}
               {attachments.length > 0 && (
-                <div className="pt-2 border-t border-slate-800/80 space-y-1.5">
-                  <p className="text-[11px] font-mono text-slate-400">
-                    Arquivos anexados nesta investigação (toque para abrir):
+                <div className="pt-2 border-t border-slate-800 space-y-1.5">
+                  <p className="text-[11px] font-mono text-emerald-400 font-semibold">
+                    ✓ {attachments.length} arquivo(s) anexado(s):
                   </p>
-                  <div className="flex flex-col gap-1.5">
-                    {attachments.map((att) => (
-                      <div
-                        key={att.id}
-                        className="px-3 py-2 rounded-lg bg-[#0B111E] border border-slate-800 flex items-center justify-between gap-2"
+                  {attachments.map((att) => (
+                    <div
+                      key={att.id}
+                      className="px-2.5 py-2 rounded-lg bg-[#0B111E] border border-slate-800 flex items-center justify-between gap-2 text-xs"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => handleOpenMobilePdfSheet(1, att.id)}
+                        className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
                       >
-                        <button
-                          type="button"
-                          onClick={() => onOpenPdfPage(1, att.id)}
-                          className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
-                        >
-                          <BookOpen className="w-4 h-4 text-sky-400 shrink-0" />
-                          <div className="min-w-0">
-                            <span className="text-xs font-mono font-semibold text-slate-100 block truncate">
-                              #{att.sequenceIndex} {att.name}
-                            </span>
-                            <span className="text-[10px] font-mono text-sky-400">
-                              {att.categoryTag}{' '}
-                              {att.panelName ? `• ${att.panelName}` : ''} (Toque
-                              p/ abrir)
-                            </span>
-                          </div>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onRemoveAttachment(att.id)}
-                          className="p-1.5 text-slate-400 hover:text-rose-400 cursor-pointer"
-                          title="Remover arquivo"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
+                        <BookOpen className="w-4 h-4 text-sky-400 shrink-0" />
+                        <span className="truncate text-slate-200">
+                          {att.name}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onRemoveAttachment(att.id)}
+                        className="p-1 text-slate-400 hover:text-rose-400 cursor-pointer"
+                        title="Remover arquivo"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
 
-            {/* Step 2: Write or Dictate the Fault from SCADA / Field */}
-            <div className="p-3.5 rounded-xl bg-[#111827] border border-slate-800 space-y-3 shadow-lg">
+            {/* PASSO 2: ESCREVER OU FALAR A FALHA */}
+            <div className="rounded-2xl bg-[#111827] border border-slate-800 p-4 space-y-3">
               <div className="flex items-center justify-between gap-2">
-                <h2 className="text-xs font-mono uppercase tracking-wider text-sky-400 font-bold flex items-center gap-1.5">
-                  <Zap className="w-4 h-4" />
-                  <span>2. Escrever ou Ditar a Falha / Alarme</span>
-                </h2>
+                <div className="flex items-center gap-2">
+                  <span className="w-6 h-6 rounded-full bg-sky-500 text-slate-950 font-bold text-xs flex items-center justify-center shrink-0">
+                    2
+                  </span>
+                  <h2 className="text-sm font-bold text-white">
+                    Escreva ou Fale qual é a Falha
+                  </h2>
+                </div>
 
                 <button
                   type="button"
                   onClick={toggleVoiceForQuery}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-mono font-bold flex items-center gap-1.5 border cursor-pointer ${
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer ${
                     isDictatingQuery
                       ? 'bg-rose-600 text-white border-rose-400 animate-pulse'
                       : 'bg-sky-500/20 text-sky-200 border-sky-500/40'
@@ -567,20 +527,20 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                 >
                   {isDictatingQuery ? (
                     <>
-                      <MicOff className="w-3.5 h-3.5" />
+                      <MicOff className="w-4 h-4" />
                       <span>Parar Voz</span>
                     </>
                   ) : (
                     <>
-                      <Mic className="w-3.5 h-3.5 text-sky-400" />
-                      <span>Ditar por Voz</span>
+                      <Mic className="w-4 h-4 text-sky-400" />
+                      <span>Falar no Microfone</span>
                     </>
                   )}
                 </button>
               </div>
 
-              {voiceStatus && isDictatingQuery && (
-                <div className="px-3 py-1.5 rounded-lg bg-rose-950/60 border border-rose-500/40 text-xs font-mono text-rose-200">
+              {voiceStatus && (
+                <div className="px-3 py-1.5 rounded-lg bg-sky-950 border border-sky-500/40 text-xs text-sky-200">
                   🎙️ {voiceStatus}
                 </div>
               )}
@@ -589,591 +549,390 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                 rows={3}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Escreva aqui o alarme que apareceu no Supervisório / IHM ou o sintoma em campo (ex: Alarme Falha Pressão de Óleo UHLM, relé 86 atuado, disjuntor 52G não fecha)..."
-                className="w-full rounded-xl bg-[#0B111E] border border-slate-700 focus:border-sky-500 p-3 text-sm text-white placeholder:text-slate-500 focus:outline-none"
+                placeholder="Digite aqui o alarme que apareceu no supervisório (ex: Falha pressão de óleo UHLM, Disjuntor 52G não fecha, Falta 125 Vcc)..."
+                className="w-full bg-[#0B111E] border border-slate-700 focus:border-sky-500 rounded-xl p-3 text-sm text-white placeholder-slate-400 focus:outline-none"
               />
+            </div>
 
-              {/* Quick Alarm Presets */}
-              <div className="space-y-1">
-                <span className="text-[11px] font-mono text-slate-400 block">
-                  Ou toque em um alarme rápido:
-                </span>
-                <div className="flex flex-wrap gap-1.5">
-                  {QUICK_SCADA_ALARMS.map((preset) => (
-                    <button
-                      key={preset}
-                      type="button"
-                      onClick={() => setQuery(preset)}
-                      className="text-left px-2.5 py-1.5 rounded-lg bg-[#0B111E] hover:bg-slate-800 border border-slate-800 text-xs text-slate-200 cursor-pointer"
-                    >
-                      + {preset}
-                    </button>
-                  ))}
-                </div>
-              </div>
+            {/* PASSO 3: BOTÃO GIGANTE DE DIAGNOSTICAR */}
+            <button
+              type="button"
+              disabled={
+                isAnalyzing ||
+                isUploading ||
+                (!query.trim() && attachments.length === 0)
+              }
+              onClick={() =>
+                onRunDiagnosis(
+                  query.trim() ||
+                    'Analise a foto/diagrama anexado, identifique a falha e mostre os bornes para testar com o multímetro.'
+                )
+              }
+              className="w-full py-4 px-5 rounded-2xl bg-sky-500 hover:bg-sky-400 disabled:opacity-40 text-slate-950 font-extrabold text-base flex items-center justify-center gap-2.5 shadow-xl cursor-pointer"
+            >
+              <Sparkles className="w-5 h-5" />
+              <span>3. VER DIAGNÓSTICO E BORNES AGORA</span>
+            </button>
+          </div>
+        )}
 
-              {/* Giant Run Diagnosis Button */}
+        {/* ===================================================================
+            TELA 2: RESULTADO DIRETO (BORNES + ABRIR FOLHA PDF + CHAT WHATSAPP)
+           =================================================================== */}
+        {screen === 'result' && latestTurn && (
+          <div className="space-y-4">
+            {/* Barra de Topo do Resultado: Voltar p/ enviar outra falha ou Ouvir no alto-falante */}
+            <div className="flex items-center justify-between gap-2">
               <button
                 type="button"
-                disabled={isAnalyzing || isUploading}
-                onClick={() => onRunDiagnosis()}
-                className="w-full py-4 px-4 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-bold text-base flex items-center justify-center gap-2 shadow-xl cursor-pointer active:scale-[0.99]"
+                onClick={() => setScreen('input')}
+                className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-bold text-slate-200 flex items-center gap-1.5 cursor-pointer"
               >
-                {isAnalyzing ? (
-                  <>
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                    <span>Diagnosticando Falha...</span>
-                  </>
-                ) : (
-                  <>
-                    <Sparkles className="w-5 h-5" />
-                    <span>Diagnosticar Falha Agora</span>
-                  </>
-                )}
+                <ArrowLeft className="w-4 h-4 text-sky-400" />
+                <span>Subir Foto / Trocar Falha</span>
+              </button>
+
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={handleToggleSpeech}
+                  className={`px-3 py-2 rounded-xl border text-xs font-bold flex items-center gap-1.5 cursor-pointer ${
+                    isSpeaking
+                      ? 'bg-amber-400 text-slate-950 border-amber-300'
+                      : 'bg-sky-500/20 text-sky-200 border-sky-500/40'
+                  }`}
+                >
+                  {isSpeaking ? (
+                    <>
+                      <VolumeX className="w-4 h-4" />
+                      <span>Parar Áudio</span>
+                    </>
+                  ) : (
+                    <>
+                      <Volume2 className="w-4 h-4 text-sky-400" />
+                      <span>Ouvir Áudio</span>
+                    </>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    onNewInvestigation();
+                    setScreen('input');
+                  }}
+                  className="px-2.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs text-slate-300 cursor-pointer"
+                  title="Nova Investigação Limpa"
+                >
+                  + Nova
+                </button>
+              </div>
+            </div>
+
+            {/* Resumo da Falha Atual + Status */}
+            <div className="p-3.5 rounded-2xl bg-[#111827] border border-slate-800 flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <span className="text-[10px] font-mono uppercase text-sky-400 block">
+                  Falha em Atendimento
+                </span>
+                <h2 className="text-sm font-bold text-white truncate">
+                  {latestTurn.userQuery}
+                </h2>
+              </div>
+
+              <button
+                type="button"
+                onClick={() =>
+                  onUpdateStatus(
+                    investigationStatus === 'resolvida'
+                      ? 'em_investigacao'
+                      : 'resolvida'
+                  )
+                }
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border shrink-0 cursor-pointer ${
+                  investigationStatus === 'resolvida'
+                    ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
+                    : 'bg-amber-500/20 border-amber-500/50 text-amber-300'
+                }`}
+              >
+                {investigationStatus === 'resolvida'
+                  ? '✓ Resolvida'
+                  : 'Em Campo'}
               </button>
             </div>
-          </div>
-        )}
 
-        {/* =====================================================================
-            ABA 2: BORNES & MULTÍMETRO (PONTOS DE PROVA + ÁUDIO + RESPOSTA RÁPIDA)
-           ===================================================================== */}
-        {activeTab === 'bornes' && (
-          <div className="space-y-3">
-            {!latestTurn ? (
-              <div className="p-6 rounded-xl bg-[#111827] border border-slate-800 text-center space-y-3">
-                <Cpu className="w-10 h-10 text-sky-400 mx-auto" />
-                <h3 className="text-sm font-bold text-white">
-                  Nenhum diagnóstico aberto ainda
+            {/* BLOCO 1: BORNES PARA MEDIR COM MULTÍMETRO + BOTÃO DIRETO DA PÁGINA DO PDF */}
+            <div className="p-4 rounded-2xl bg-[#111827] border-2 border-amber-500/40 space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-mono uppercase tracking-wider text-amber-400 font-bold">
+                  📟 1. Onde Medir com o Multímetro (Bornes)
                 </h3>
-                <p className="text-xs text-slate-400">
-                  Suba uma foto da falha no Supervisório, escreva o alarme na
-                  aba <strong>Falha / Supervisório</strong> ou selecione uma
-                  investigação sincronizada no topo.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('alarme')}
-                  className="px-4 py-2.5 rounded-xl bg-sky-600 text-white text-xs font-bold cursor-pointer"
-                >
-                  Ir para Falha / Supervisório
-                </button>
-              </div>
-            ) : (
-              <>
-                {/* Active Fault Header Card + Audio Read Aloud */}
-                <div className="p-3.5 rounded-xl bg-[#111827] border border-slate-800 space-y-2.5">
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <span className="text-[10px] font-mono uppercase tracking-wider text-sky-400 font-bold">
-                        FALHA EM INVESTIGAÇÃO
-                      </span>
-                      <h2 className="text-sm font-bold text-white mt-0.5">
-                        {latestTurn.userQuery}
-                      </h2>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        onUpdateStatus(
-                          investigationStatus === 'resolvida'
-                            ? 'em_investigacao'
-                            : 'resolvida'
-                        )
-                      }
-                      className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold border shrink-0 cursor-pointer ${
-                        investigationStatus === 'resolvida'
-                          ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
-                          : 'bg-amber-500/20 border-amber-500/50 text-amber-300'
-                      }`}
-                    >
-                      {investigationStatus === 'resolvida'
-                        ? '✓ Resolvida'
-                        : '⚡ Em Campo'}
-                    </button>
-                  </div>
-
-                  {/* Giant Audio Speaker Button + Quick Camera Button */}
-                  <div className="grid grid-cols-2 gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={handleToggleSpeech}
-                      className={`py-2.5 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-2 border cursor-pointer ${
-                        isSpeaking
-                          ? 'bg-amber-500 text-slate-950 border-amber-300'
-                          : 'bg-[#0B111E] text-sky-200 border-sky-500/40'
-                      }`}
-                    >
-                      {isSpeaking ? (
-                        <>
-                          <VolumeX className="w-4 h-4 shrink-0" />
-                          <span>Parar Leitura</span>
-                        </>
-                      ) : (
-                        <>
-                          <Volume2 className="w-4 h-4 text-sky-400 shrink-0" />
-                          <span>Ouvir no Alto-Falante</span>
-                        </>
-                      )}
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={onOpenFieldCamera}
-                      className="py-2.5 px-3 rounded-xl bg-emerald-600/25 border border-emerald-500/50 text-emerald-200 font-bold text-xs flex items-center justify-center gap-2 cursor-pointer"
-                    >
-                      <Camera className="w-4 h-4 text-emerald-400 shrink-0" />
-                      <span>Fotografar Borne</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* Circuit Division Checkpoints (Ponto #1, Ponto #2, Ponto #3) */}
-                {measurementPoints.length > 0 && (
-                  <div className="p-3.5 rounded-xl bg-[#111827] border border-slate-800 space-y-2.5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-mono uppercase tracking-wider text-amber-400 font-bold">
-                        📟 Guia Rápido de Ponta de Prova (Bornes)
-                      </span>
-                      <span className="text-[11px] font-mono text-slate-400">
-                        Toque na Pág. p/ abrir PDF
-                      </span>
-                    </div>
-
-                    <div className="space-y-2">
-                      {measurementPoints.map((pt, idx) => (
-                        <div
-                          key={pt.id}
-                          className="p-3 rounded-xl bg-[#0B111E] border border-slate-800 flex items-center justify-between gap-2.5"
-                        >
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1.5">
-                              <span className="px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 font-mono text-[10px] font-bold">
-                                PONTO #{idx + 1}
-                              </span>
-                              <span className="text-xs font-bold text-white truncate">
-                                {pt.stepLabel}
-                              </span>
-                            </div>
-                            <p className="text-xs font-mono text-amber-300 mt-1">
-                              (+) {pt.terminalOrBorne}
-                            </p>
-                            <p className="text-[11px] text-slate-300 mt-0.5">
-                              (-) {pt.referenceCommon} • Esperado:{' '}
-                              <strong className="text-emerald-300 font-mono">
-                                {pt.expectedSpec}
-                              </strong>
-                            </p>
-                          </div>
-
-                          {pt.pageNumber && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                handleOpenMobilePdfSheet(pt.pageNumber!)
-                              }
-                              className="px-3 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-mono font-bold text-xs flex flex-col items-center justify-center shrink-0 shadow cursor-pointer"
-                            >
-                              <BookOpen className="w-4 h-4 mb-0.5" />
-                              <span>Pág. {pt.pageNumber}</span>
-                            </button>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Quick Cited Pages Bar */}
-                {citedPages.length > 0 && (
-                  <div className="p-3.5 rounded-xl bg-[#111827] border border-slate-800 space-y-2">
-                    <span className="text-xs font-mono uppercase tracking-wider text-sky-400 font-bold block">
-                      📐 Abrir Folha do PDF Direto nos Bornes Citados:
-                    </span>
-                    <div className="flex flex-wrap gap-2">
-                      {citedPages.map((pg) => (
-                        <button
-                          key={pg}
-                          type="button"
-                          onClick={() => handleOpenMobilePdfSheet(pg)}
-                          className="px-3.5 py-2 rounded-xl bg-sky-500/20 hover:bg-sky-500/30 border border-sky-500/50 text-sky-200 font-mono font-bold text-xs flex items-center gap-1.5 cursor-pointer"
-                        >
-                          <BookOpen className="w-3.5 h-3.5 text-sky-400" />
-                          <span>Abrir Pág. {pg}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* 1-Tap Multimeter Feedback Buttons */}
-                <div className="p-3.5 rounded-xl bg-[#111827] border border-slate-800 space-y-2">
-                  <span className="text-xs font-mono uppercase tracking-wider text-emerald-400 font-bold block">
-                    ⚡ Informar Leitura do Multímetro (1 Toque):
-                  </span>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      disabled={isChatSending}
-                      onClick={() =>
-                        handleQuickMeasurementReply(
-                          'Medi 125 Vcc (tensão normal) no borne inicial. Qual o próximo borne a jusante devo medir agora?'
-                        )
-                      }
-                      className="py-3 px-3 rounded-xl bg-emerald-600/25 hover:bg-emerald-600/35 border border-emerald-500/50 text-emerald-200 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
-                    >
-                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                      <span>Mediu 125 Vcc (OK)</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      disabled={isChatSending}
-                      onClick={() =>
-                        handleQuickMeasurementReply(
-                          'Medi 0 Vcc (sem tensão / aberto) neste borne. Qual contato, fusível ou relé a montante está bloqueando o sinal?'
-                        )
-                      }
-                      className="py-3 px-3 rounded-xl bg-rose-600/25 hover:bg-rose-600/35 border border-rose-500/50 text-rose-200 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
-                    >
-                      <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
-                      <span>Mediu 0 Vcc (Falha)</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* Full Diagnostic Text (Collapsible or Direct View) */}
-                <div className="p-3.5 rounded-xl bg-[#111827] border border-slate-800 space-y-2.5">
+                {probeSummary?.locationPage && (
                   <button
                     type="button"
-                    onClick={() => setShowFullReportMobile((prev) => !prev)}
-                    className="w-full flex items-center justify-between text-left cursor-pointer"
+                    onClick={() =>
+                      handleOpenMobilePdfSheet(probeSummary.locationPage!)
+                    }
+                    className="px-2.5 py-1 rounded-lg bg-sky-600 text-white font-mono font-bold text-xs flex items-center gap-1 cursor-pointer"
                   >
-                    <span className="text-xs font-mono uppercase tracking-wider text-slate-200 font-bold">
-                      📋 Laudo Técnico Completo (Passo a Passo)
-                    </span>
-                    <span className="text-xs font-mono text-sky-400">
-                      {showFullReportMobile ? 'Recolher ▲' : 'Expandir ▼'}
-                    </span>
+                    <BookOpen className="w-3.5 h-3.5" />
+                    <span>Ver Pág. {probeSummary.locationPage}</span>
                   </button>
-
-                  {showFullReportMobile && (
-                    <div className="pt-2 border-t border-slate-800 text-xs text-slate-200 leading-relaxed whitespace-pre-wrap font-sans space-y-2">
-                      {latestTurn.markdownResponse}
-                    </div>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {/* =====================================================================
-            ABA 3: FOLHAS PDF & ANOTAÇÕES DE CAMPO
-           ===================================================================== */}
-        {activeTab === 'folhas' && (
-          <div className="space-y-3">
-            {/* Direct Page Number Launcher */}
-            <div className="p-3.5 rounded-xl bg-[#111827] border border-slate-800 space-y-2.5">
-              <h2 className="text-xs font-mono uppercase tracking-wider text-sky-400 font-bold flex items-center gap-1.5">
-                <BookOpen className="w-4 h-4" />
-                <span>Abrir Página Específica do PDF (Com Anotações)</span>
-              </h2>
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  const num = parseInt(manualPageInput, 10);
-                  if (!isNaN(num) && num >= 1) {
-                    handleOpenMobilePdfSheet(num);
-                  }
-                }}
-                className="flex items-center gap-2"
-              >
-                <input
-                  type="number"
-                  min={1}
-                  value={manualPageInput}
-                  onChange={(e) => setManualPageInput(e.target.value)}
-                  placeholder="Nº da página..."
-                  className="w-28 bg-[#0B111E] border border-slate-700 rounded-xl px-3 py-2.5 text-sm font-mono text-white text-center focus:outline-none focus:border-sky-500"
-                />
-                <button
-                  type="submit"
-                  className="flex-1 py-2.5 px-4 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-sm flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  <BookOpen className="w-4 h-4" />
-                  <span>Abrir Folha #{manualPageInput || 1}</span>
-                </button>
-              </form>
-            </div>
-
-            {/* Cited Pages in Current Diagnosis */}
-            {citedPages.length > 0 && (
-              <div className="p-3.5 rounded-xl bg-[#111827] border border-slate-800 space-y-2.5">
-                <span className="text-xs font-mono uppercase tracking-wider text-amber-400 font-bold block">
-                  Folhas Citadas no Diagnóstico Atual:
-                </span>
-                <div className="grid grid-cols-2 gap-2">
-                  {citedPages.map((pg) => (
-                    <button
-                      key={pg}
-                      type="button"
-                      onClick={() => handleOpenMobilePdfSheet(pg)}
-                      className="p-3 rounded-xl bg-[#0B111E] hover:bg-sky-500/20 border border-sky-500/40 text-left flex items-center justify-between cursor-pointer"
-                    >
-                      <div>
-                        <span className="text-xs font-mono font-bold text-sky-300 block">
-                          Página {pg}
-                        </span>
-                        <span className="text-[10px] text-slate-400">
-                          Ver diagrama / bornes
-                        </span>
-                      </div>
-                      <ChevronRight className="w-4 h-4 text-sky-400" />
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Attached PDFs / Photos List */}
-            <div className="p-3.5 rounded-xl bg-[#111827] border border-slate-800 space-y-2.5">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-mono uppercase tracking-wider text-slate-300 font-bold">
-                  Cadernos PDF e Fotos Anexadas ({attachments.length})
-                </span>
-                <button
-                  type="button"
-                  onClick={() => pdfUploadInputRef.current?.click()}
-                  className="px-2.5 py-1 rounded-lg bg-sky-500/20 border border-sky-500/40 text-xs font-mono text-sky-300 cursor-pointer"
-                >
-                  + Anexar PDF
-                </button>
+                )}
               </div>
 
-              {attachments.length === 0 ? (
-                <p className="text-xs text-slate-400 py-3 text-center">
-                  Nenhum arquivo anexado ainda. Toque em "+ Anexar PDF" acima.
-                </p>
-              ) : (
+              {measurementPoints.length > 0 ? (
                 <div className="space-y-2">
-                  {attachments.map((att) => (
-                    <button
-                      key={att.id}
-                      type="button"
-                      onClick={() => handleOpenMobilePdfSheet(1, att.id)}
-                      className="w-full p-3 rounded-xl bg-[#0B111E] hover:bg-slate-800 border border-slate-800 flex items-center justify-between gap-2 text-left cursor-pointer"
+                  {measurementPoints.map((pt, idx) => (
+                    <div
+                      key={pt.id}
+                      className="p-3 rounded-xl bg-[#0B111E] border border-slate-800 flex items-center justify-between gap-2.5"
                     >
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <FileText className="w-5 h-5 text-sky-400 shrink-0" />
-                        <div className="min-w-0">
-                          <span className="text-xs font-mono font-bold text-white block truncate">
-                            #{att.sequenceIndex} {att.name}
-                          </span>
-                          <span className="text-[11px] font-mono text-slate-400">
-                            {att.categoryTag} • Toque para inspecionar e anotar
-                          </span>
-                        </div>
+                      <div className="min-w-0 flex-1">
+                        <span className="text-[11px] font-mono font-bold text-sky-400 block">
+                          PONTO #{idx + 1} — {pt.stepLabel}
+                        </span>
+                        <p className="text-xs font-mono text-amber-300 mt-0.5">
+                          🔴 Ponta (+): {pt.terminalOrBorne}
+                        </p>
+                        <p className="text-xs text-slate-300 mt-0.5">
+                          ⚫ Ponta (-): {pt.referenceCommon}
+                        </p>
+                        <p className="text-xs text-emerald-300 font-mono font-bold mt-1">
+                          Esperado: {pt.expectedSpec}
+                        </p>
                       </div>
-                      <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />
-                    </button>
+
+                      {pt.pageNumber && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleOpenMobilePdfSheet(pt.pageNumber!)
+                          }
+                          className="px-3 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-mono font-bold text-xs flex flex-col items-center justify-center shrink-0 shadow cursor-pointer"
+                        >
+                          <BookOpen className="w-4 h-4 mb-0.5" />
+                          <span>Pág. {pt.pageNumber}</span>
+                        </button>
+                      )}
+                    </div>
                   ))}
+                </div>
+              ) : (
+                <p className="text-xs text-slate-300">
+                  Veja os detalhes de medição no laudo abaixo ou abra a folha do
+                  PDF.
+                </p>
+              )}
+
+              {/* Botões grandes para abrir qualquer folha citada do PDF */}
+              {(citedPages.length > 0 || attachments.length > 0) && (
+                <div className="pt-2 border-t border-slate-800 space-y-2">
+                  <span className="text-xs font-bold text-sky-300 block">
+                    📐 Toque para abrir o Desenho PDF (Zoom e Anotações):
+                  </span>
+                  <div className="flex flex-wrap gap-2">
+                    {citedPages.map((pg) => (
+                      <button
+                        key={pg}
+                        type="button"
+                        onClick={() => handleOpenMobilePdfSheet(pg)}
+                        className="px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-mono font-bold text-xs flex items-center gap-1.5 shadow cursor-pointer"
+                      >
+                        <BookOpen className="w-3.5 h-3.5" />
+                        <span>Abrir Pág. {pg}</span>
+                      </button>
+                    ))}
+                    {citedPages.length === 0 &&
+                      attachments.map((att) => (
+                        <button
+                          key={att.id}
+                          type="button"
+                          onClick={() => handleOpenMobilePdfSheet(1, att.id)}
+                          className="px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-mono font-bold text-xs flex items-center gap-1.5 shadow cursor-pointer"
+                        >
+                          <BookOpen className="w-3.5 h-3.5" />
+                          <span>Abrir PDF #{att.sequenceIndex}</span>
+                        </button>
+                      ))}
+                  </div>
+
+                  {/* Digitar nº de página direto se quiser outra folha */}
+                  {attachments.length > 0 && (
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        const n = parseInt(manualPageInput, 10);
+                        if (!isNaN(n) && n >= 1) {
+                          handleOpenMobilePdfSheet(n);
+                        }
+                      }}
+                      className="flex items-center gap-2 pt-1"
+                    >
+                      <input
+                        type="number"
+                        min={1}
+                        value={manualPageInput}
+                        onChange={(e) => setManualPageInput(e.target.value)}
+                        placeholder="Ir p/ pág. nº..."
+                        className="w-32 bg-[#0B111E] border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-white"
+                      />
+                      <button
+                        type="submit"
+                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-sky-300 font-semibold cursor-pointer"
+                      >
+                        Abrir Folha
+                      </button>
+                    </form>
+                  )}
                 </div>
               )}
             </div>
-          </div>
-        )}
 
-        {/* =====================================================================
-            ABA 4: CHAT RÁPIDO DE CAMPO & VOZ COM O ENGENHEIRO IA
-           ===================================================================== */}
-        {activeTab === 'chat' && (
-          <div className="space-y-3">
-            {!latestTurn ? (
-              <div className="p-6 rounded-xl bg-[#111827] border border-slate-800 text-center space-y-3">
-                <MessageSquare className="w-10 h-10 text-sky-400 mx-auto" />
-                <p className="text-xs text-slate-300">
-                  Inicie primeiro o diagnóstico na aba{' '}
-                  <strong>Falha / Supervisório</strong> para conversar com o
-                  Engenheiro Especialista sobre os bornes.
-                </p>
+            {/* BLOCO 2: LAUDO TÉCNICO COMPLETO (EXPANSÍVEL COM 1 TOQUE) */}
+            <div className="p-4 rounded-2xl bg-[#111827] border border-slate-800 space-y-2.5">
+              <button
+                type="button"
+                onClick={() => setShowFullLaudo((prev) => !prev)}
+                className="w-full flex items-center justify-between text-left cursor-pointer"
+              >
+                <span className="text-xs font-mono uppercase tracking-wider text-slate-200 font-bold">
+                  📋 2. Explicação Completa e Passo a Passo
+                </span>
+                <span className="px-2.5 py-1 rounded-lg bg-slate-800 text-xs font-mono text-sky-400">
+                  {showFullLaudo ? 'Ocultar ▲' : 'Ler Tudo ▼'}
+                </span>
+              </button>
+
+              {showFullLaudo && (
+                <div className="pt-2.5 border-t border-slate-800 text-xs text-slate-200 leading-relaxed whitespace-pre-wrap">
+                  {latestTurn.markdownResponse}
+                </div>
+              )}
+            </div>
+
+            {/* BLOCO 3: RESPOSTA RÁPIDA DE CAMPO & CHAT (ESTILO WHATSAPP) */}
+            <div className="p-4 rounded-2xl bg-[#111827] border border-slate-800 space-y-3">
+              <h3 className="text-xs font-mono uppercase tracking-wider text-emerald-400 font-bold">
+                💬 3. O que você encontrou no painel? (Conte p/ a IA)
+              </h3>
+
+              {/* 2 Botões rápidos de medição */}
+              <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
-                  onClick={() => setActiveTab('alarme')}
-                  className="px-4 py-2 rounded-xl bg-sky-600 text-white text-xs font-bold cursor-pointer"
+                  disabled={isChatSending}
+                  onClick={() =>
+                    onSendChatMessage(
+                      latestTurn.id,
+                      'Medi 125 Vcc (tensão normal) neste borne. Qual o próximo borne a jusante devo medir agora?'
+                    )
+                  }
+                  className="py-2.5 px-3 rounded-xl bg-emerald-600/25 hover:bg-emerald-600/35 border border-emerald-500/50 text-emerald-200 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
                 >
-                  Subir Falha / Iniciar
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>Tem 125 Vcc (OK)</span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={isChatSending}
+                  onClick={() =>
+                    onSendChatMessage(
+                      latestTurn.id,
+                      'Medi 0 Vcc (sem tensão) neste borne. Qual contato ou fusível antes dele está aberto?'
+                    )
+                  }
+                  className="py-2.5 px-3 rounded-xl bg-rose-600/25 hover:bg-rose-600/35 border border-rose-500/50 text-rose-200 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                  <span>Deu 0 Vcc (Falha)</span>
                 </button>
               </div>
-            ) : (
-              <div className="p-3.5 rounded-xl bg-[#111827] border border-slate-800 flex flex-col gap-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-mono uppercase tracking-wider text-sky-400 font-bold">
-                    💬 Chat de Campo c/ Engenheiro IA
-                  </span>
-                  <button
-                    type="button"
-                    onClick={onOpenFieldCamera}
-                    className="px-2.5 py-1 rounded-lg bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 text-xs font-mono flex items-center gap-1 cursor-pointer"
-                  >
-                    <Camera className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Enviar Foto</span>
-                  </button>
-                </div>
 
-                {/* Messages History */}
-                <div className="max-h-[42vh] overflow-y-auto space-y-2.5 pr-1">
-                  {(latestTurn.chatMessages || []).length === 0 ? (
-                    <p className="text-xs text-slate-400 py-4 text-center">
-                      Toque em uma pergunta rápida abaixo ou dite o valor medido
-                      no multímetro.
-                    </p>
-                  ) : (
-                    (latestTurn.chatMessages || []).map((msg) => (
-                      <div
-                        key={msg.id}
-                        className={`p-3 rounded-xl text-xs leading-relaxed ${
-                          msg.role === 'user'
-                            ? 'bg-sky-600/25 border border-sky-500/40 text-sky-100 ml-4'
-                            : 'bg-[#0B111E] border border-slate-800 text-slate-200 mr-2 whitespace-pre-wrap'
-                        }`}
-                      >
-                        <div className="text-[10px] font-mono text-slate-400 mb-1">
-                          {msg.role === 'user'
-                            ? '👷 Você em Campo'
-                            : '⚡ Engenheiro IA'}
-                        </div>
-                        {msg.content}
-                      </div>
-                    ))
-                  )}
-
-                  {isChatSending && (
-                    <div className="p-3 rounded-xl bg-sky-950/60 border border-sky-500/40 flex items-center gap-2 text-xs text-sky-200">
-                      <Loader2 className="w-4 h-4 animate-spin text-sky-400 shrink-0" />
-                      <span>
-                        {chatProgressStep || 'Engenheiro analisando medição...'}
-                      </span>
-                    </div>
-                  )}
-                </div>
-
-                {/* Quick Field Questions */}
-                <div className="flex flex-wrap gap-1.5 pt-1 border-t border-slate-800">
-                  {QUICK_MOBILE_CHAT_CHIPS.map((chip) => (
-                    <button
-                      key={chip}
-                      type="button"
-                      disabled={isChatSending}
-                      onClick={() => onSendChatMessage(latestTurn.id, chip)}
-                      className="text-left px-2.5 py-1.5 rounded-lg bg-[#0B111E] hover:bg-slate-800 border border-slate-800 text-[11px] text-slate-200 cursor-pointer"
+              {/* Histórico de mensagens do Chat */}
+              {(latestTurn.chatMessages || []).length > 0 && (
+                <div className="max-h-64 overflow-y-auto space-y-2 pt-2 border-t border-slate-800">
+                  {(latestTurn.chatMessages || []).map((msg) => (
+                    <div
+                      key={msg.id}
+                      className={`p-3 rounded-xl text-xs leading-relaxed ${
+                        msg.role === 'user'
+                          ? 'bg-sky-600/25 border border-sky-500/40 text-sky-100 ml-6'
+                          : 'bg-[#0B111E] border border-slate-800 text-slate-200 mr-2 whitespace-pre-wrap'
+                      }`}
                     >
-                      + {chip}
-                    </button>
+                      <div className="text-[10px] font-mono text-slate-400 mb-1">
+                        {msg.role === 'user' ? '👷 Você' : '⚡ Engenheiro IA'}
+                      </div>
+                      {msg.content}
+                    </div>
                   ))}
                 </div>
+              )}
 
-                {/* Voice + Text Input Bar */}
-                <form
-                  onSubmit={handleSendMobileChat}
-                  className="flex items-center gap-2 pt-1"
+              {isChatSending && (
+                <div className="p-3 rounded-xl bg-sky-950/60 border border-sky-500/40 flex items-center gap-2 text-xs text-sky-200">
+                  <Loader2 className="w-4 h-4 animate-spin text-sky-400 shrink-0" />
+                  <span>
+                    {chatProgressStep || 'Analisando sua resposta...'}
+                  </span>
+                </div>
+              )}
+
+              {/* Barra estilo WhatsApp: Foto + Microfone + Texto + Enviar */}
+              <form
+                onSubmit={handleSendMobileChat}
+                className="flex items-center gap-1.5 pt-1"
+              >
+                <button
+                  type="button"
+                  onClick={onOpenFieldCamera}
+                  className="p-2.5 rounded-xl bg-emerald-600/25 border border-emerald-500/40 text-emerald-300 shrink-0 cursor-pointer"
+                  title="Enviar foto do painel/borne"
                 >
-                  <button
-                    type="button"
-                    onClick={toggleVoiceForChat}
-                    className={`p-3 rounded-xl border shrink-0 cursor-pointer ${
-                      isDictatingChat
-                        ? 'bg-rose-600 text-white border-rose-400 animate-pulse'
-                        : 'bg-[#0B111E] text-sky-400 border-slate-700'
-                    }`}
-                    title="Ditar mensagem por voz"
-                  >
-                    {isDictatingChat ? (
-                      <MicOff className="w-5 h-5" />
-                    ) : (
-                      <Mic className="w-5 h-5" />
-                    )}
-                  </button>
+                  <Camera className="w-5 h-5" />
+                </button>
 
-                  <input
-                    type="text"
-                    value={chatInput}
-                    onChange={(e) => setChatInput(e.target.value)}
-                    placeholder="Escreva ou dite a leitura (ex: 0 Vcc em X2:65)..."
-                    className="flex-1 bg-[#0B111E] border border-slate-700 focus:border-sky-500 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none"
-                  />
+                <button
+                  type="button"
+                  onClick={toggleVoiceForChat}
+                  className={`p-2.5 rounded-xl border shrink-0 cursor-pointer ${
+                    isDictatingChat
+                      ? 'bg-rose-600 text-white border-rose-400 animate-pulse'
+                      : 'bg-[#0B111E] text-sky-400 border-slate-700'
+                  }`}
+                  title="Falar por voz"
+                >
+                  {isDictatingChat ? (
+                    <MicOff className="w-5 h-5" />
+                  ) : (
+                    <Mic className="w-5 h-5" />
+                  )}
+                </button>
 
-                  <button
-                    type="submit"
-                    disabled={!chatInput.trim() || isChatSending}
-                    className="p-3 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-40 text-white shrink-0 cursor-pointer"
-                  >
-                    <Send className="w-5 h-5" />
-                  </button>
-                </form>
-              </div>
-            )}
+                <input
+                  type="text"
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  placeholder="Pergunte ou digite a medição..."
+                  className="flex-1 min-w-0 bg-[#0B111E] border border-slate-700 focus:border-sky-500 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none"
+                />
+
+                <button
+                  type="submit"
+                  disabled={!chatInput.trim() || isChatSending}
+                  className="p-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-40 text-white shrink-0 cursor-pointer"
+                >
+                  <Send className="w-5 h-5" />
+                </button>
+              </form>
+            </div>
           </div>
         )}
       </div>
 
-      {/* Bottom Thumb Navigation Bar (4 Large Buttons for One-Hand Operation) */}
-      <nav className="fixed bottom-0 inset-x-0 z-30 bg-[#0B111E]/95 backdrop-blur-md border-t border-slate-800 px-2 py-1.5 grid grid-cols-4 gap-1.5 no-print">
-        <button
-          type="button"
-          onClick={() => setActiveTab('alarme')}
-          className={`py-2 px-1 rounded-xl flex flex-col items-center justify-center gap-1 text-[11px] font-bold cursor-pointer transition-colors ${
-            activeTab === 'alarme'
-              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/50'
-              : 'text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          <Camera className="w-4 h-4" />
-          <span>1. Supervisório</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveTab('bornes')}
-          className={`py-2 px-1 rounded-xl flex flex-col items-center justify-center gap-1 text-[11px] font-bold cursor-pointer transition-colors ${
-            activeTab === 'bornes'
-              ? 'bg-sky-500/20 text-sky-300 border border-sky-500/50'
-              : 'text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          <Cpu className="w-4 h-4" />
-          <span>2. Bornes/Laudo</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveTab('folhas')}
-          className={`py-2 px-1 rounded-xl flex flex-col items-center justify-center gap-1 text-[11px] font-bold cursor-pointer transition-colors ${
-            activeTab === 'folhas'
-              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/50'
-              : 'text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          <BookOpen className="w-4 h-4" />
-          <span>3. Folha PDF</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveTab('chat')}
-          className={`py-2 px-1 rounded-xl flex flex-col items-center justify-center gap-1 text-[11px] font-bold cursor-pointer transition-colors ${
-            activeTab === 'chat'
-              ? 'bg-sky-500/20 text-sky-300 border border-sky-500/50'
-              : 'text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          <MessageSquare className="w-4 h-4" />
-          <span>4. Chat/Voz</span>
-        </button>
-      </nav>
-
-      {/* Interactive PDF Sheet Deep-Link Drawer (Mobile Mode) */}
+      {/* Inspetor de Folha PDF com Zoom, Desenho, Caixa de Texto e Print p/ Campo */}
       <PdfDeepLinkDrawer
         isOpen={mobilePdfOpen}
         onClose={() => setMobilePdfOpen(false)}
@@ -1185,7 +944,7 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
           latestTurn
             ? (pageNum, attName) => {
                 setMobilePdfOpen(false);
-                setActiveTab('chat');
+                setScreen('result');
                 onSendChatMessage(
                   latestTurn.id,
                   `Inspecionei a Página ${pageNum} do arquivo "${attName}" no Inspetor Deep-Link. Detalhe os bornes de medição (+ / -), contatos NA/NF e referências cruzadas visíveis nesta folha para isolar a falha.`
@@ -1195,7 +954,7 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
         }
         onRequestReupload={() => {
           setMobilePdfOpen(false);
-          setActiveTab('alarme');
+          setScreen('input');
         }}
         onRelinkAttachmentBinary={onRelinkAttachmentBinary}
       />
