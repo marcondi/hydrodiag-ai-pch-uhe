@@ -59,6 +59,7 @@ import {
   FieldPhotoCapturePayload,
 } from './components/FieldCameraModal';
 import { MobileQrHandoffModal } from './components/MobileQrHandoffModal';
+import { MobileFieldPocketView } from './components/MobileFieldPocketView';
 import {
   deduplicateAttachments,
   extractSignalChainFromContext,
@@ -223,6 +224,13 @@ export default function App() {
   const [fieldSyncBanner, setFieldSyncBanner] = useState<string | null>(null);
   const [isLeftSidebarCollapsed, setIsLeftSidebarCollapsed] =
     useState<boolean>(false);
+  const [isMobilePocketMode, setIsMobilePocketMode] = useState<boolean>(() => {
+    try {
+      return new URLSearchParams(window.location.search).get('mobile') === '1';
+    } catch {
+      return false;
+    }
+  });
 
   // Close Hamburger ("Modo Sanduíche") menu on outside click or Escape key
   useEffect(() => {
@@ -1661,8 +1669,58 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#0B111E] text-slate-100 flex flex-col">
-      {/* Top Bar Contract: Modo Sanduíche Puro (Zero repetição de botões entre a barra e o menu) */}
-      <header className="sticky top-0 z-40 w-full border-b border-slate-800 bg-[#0B111E]/95 backdrop-blur-md no-print">
+      {isMobilePocketMode ? (
+        <MobileFieldPocketView
+          attachments={attachments}
+          turns={turns}
+          query={query}
+          setQuery={setQuery}
+          isUploading={isUploading}
+          isAnalyzing={isAnalyzing}
+          progressStep={progressStep}
+          isChatSending={isChatSending}
+          chatProgressStep={chatProgressStep}
+          error={error}
+          savedInvestigations={savedInvestigations}
+          sessionId={sessionId}
+          investigationStatus={investigationStatus}
+          onUpdateStatus={setInvestigationStatus}
+          fieldContrastMode={fieldContrastMode}
+          onToggleFieldContrast={() => setFieldContrastMode((prev) => !prev)}
+          isSyncingCloud={isSyncingCloud}
+          onSyncCloud={() => handleSyncHistoryWithCloud()}
+          onLoadInvestigation={handleLoadInvestigation}
+          onNewInvestigation={handleNewInvestigation}
+          onAddFiles={(files) => handleAddAttachments(files, false)}
+          onRemoveAttachment={handleRemoveAttachment}
+          onRunDiagnosis={async (customQuery) => {
+            if (customQuery !== undefined) {
+              setQuery(customQuery);
+              await executeDiagnosisCore(
+                attachments,
+                customQuery,
+                activeFocusTopic
+              );
+            } else {
+              await handleRunDiagnosis();
+            }
+          }}
+          onOpenFieldCamera={() => setFieldCameraOpen(true)}
+          onOpenPdfPage={(pageNumber, attachmentId) =>
+            setExternalPdfInspectRequest({
+              attachmentId,
+              page: pageNumber,
+              timestamp: Date.now(),
+            })
+          }
+          onRelinkAttachmentBinary={handleRelinkAttachmentBinary}
+          onSendChatMessage={handleSendChatMessage}
+          onExitMobileMode={() => setIsMobilePocketMode(false)}
+        />
+      ) : (
+        <>
+          {/* Top Bar Contract: Modo Sanduíche Puro (Zero repetição de botões entre a barra e o menu) */}
+          <header className="sticky top-0 z-40 w-full border-b border-slate-800 bg-[#0B111E]/95 backdrop-blur-md no-print">
         <div className="max-w-[1440px] w-full mx-auto flex items-center justify-between gap-3 px-4 sm:px-6 py-3">
           {/* Esquerda: Marca + Módulo Ativo Atual */}
           <div className="flex items-center gap-2.5 min-w-0">
@@ -1704,8 +1762,18 @@ export default function App() {
           {/* Direita: Apenas Nova Investigação + Botão Menu Sanduíche (Zero repetição com o conteúdo do menu) */}
           <div
             ref={headerMenuRef}
-            className="relative flex items-center gap-2.5 shrink-0"
+            className="relative flex items-center gap-2 shrink-0"
           >
+            <button
+              type="button"
+              onClick={() => setIsMobilePocketMode(true)}
+              title="Abrir versão prática para Celular em Campo (com foto da falha no supervisório, ditado por voz e guia de bornes)"
+              className="px-3 py-2 text-xs font-semibold text-emerald-200 bg-emerald-600/20 hover:bg-emerald-600/35 border border-emerald-500/40 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+            >
+              <Smartphone className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span>Modo Celular</span>
+            </button>
+
             <button
               type="button"
               onClick={handleNewInvestigation}
@@ -1863,6 +1931,21 @@ export default function App() {
                     Ferramentas de Campo &amp; Utilitários
                   </div>
                   <div className="flex flex-col gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsMobilePocketMode(true);
+                        setIsHeaderMenuOpen(false);
+                      }}
+                      className="w-full px-3 py-2 rounded-lg text-left text-xs font-semibold bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 border border-emerald-500/40 flex items-center justify-between transition-colors cursor-pointer"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Smartphone className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>Modo Celular (Pocket Campo — Supervisório &amp; Bornes)</span>
+                      </span>
+                      <ArrowRight className="w-3.5 h-3.5 text-emerald-300" />
+                    </button>
+
                     <button
                       type="button"
                       onClick={() => {
@@ -2640,6 +2723,8 @@ export default function App() {
         {/* TAB 5: PUBLICAR NO GITHUB (@marcondi) */}
         {activeNavTab === 'github' && <GitHubDeployPanel />}
       </main>
+      </>
+      )}
 
       <FieldCameraModal
         isOpen={fieldCameraOpen}

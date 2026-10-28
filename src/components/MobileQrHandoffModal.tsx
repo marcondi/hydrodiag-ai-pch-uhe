@@ -36,6 +36,7 @@ export const MobileQrHandoffModal: React.FC<MobileQrHandoffModalProps> = ({
     if (typeof window === 'undefined') return '';
     const url = new URL(window.location.href);
     url.searchParams.set('session', sessionId);
+    url.searchParams.set('mobile', '1');
     if (openCameraDirectly) {
       url.searchParams.set('camera', '1');
     } else {

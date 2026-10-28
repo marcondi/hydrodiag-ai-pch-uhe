@@ -2407,6 +2407,7 @@ Sistema especialista multimodal desenvolvido para engenharia de manutenção, pr
     'src/components/PdfDeepLinkDrawer.tsx',
     'src/components/FieldCameraModal.tsx',
     'src/components/MobileQrHandoffModal.tsx',
+    'src/components/MobileFieldPocketView.tsx',
     'src/components/GitHubDeployModal.tsx',
   ];
 
