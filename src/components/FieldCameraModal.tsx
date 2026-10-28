@@ -40,7 +40,7 @@ interface FieldCameraModalProps {
   onCaptureSubmit: (payload: FieldPhotoCapturePayload) => Promise<void>;
 }
 
-type AnnotationTool = 'circle' | 'arrow' | 'pen';
+export type AnnotationTool = 'circle' | 'arrow' | 'pen' | 'text';
 
 interface NormalizedPoint {
   x: number; // 0..1
@@ -52,6 +52,7 @@ export interface PhotoAnnotationShape {
   tool: AnnotationTool;
   color: string;
   points: NormalizedPoint[];
+  text?: string;
 }
 
 const QUICK_PANEL_TAGS = [
@@ -84,7 +85,9 @@ export function drawAnnotationShapeOnCtx(
   width: number,
   height: number
 ) {
-  if (shape.points.length < 2) return;
+  if (shape.points.length < 1) return;
+  if (shape.tool !== 'text' && shape.points.length < 2) return;
+
   const strokeWidth = Math.max(3, Math.round(Math.min(width, height) * 0.0075));
   ctx.save();
   ctx.strokeStyle = shape.color;
@@ -102,7 +105,86 @@ export function drawAnnotationShapeOnCtx(
   const x2 = last.x * width;
   const y2 = last.y * height;
 
-  if (shape.tool === 'circle') {
+  if (shape.tool === 'text') {
+    const rawText = (shape.text || '').trim();
+    if (!rawText) {
+      ctx.restore();
+      return;
+    }
+    const fontSize = Math.max(13, Math.round(Math.min(width, height) * 0.0175));
+    ctx.font = `bold ${fontSize}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace`;
+
+    // Wrap text if needed (max ~42 chars per line)
+    const words = rawText.split(/\s+/);
+    const lines: string[] = [];
+    let currentLine = '';
+    for (const w of words) {
+      const testLine = currentLine ? `${currentLine} ${w}` : w;
+      if (testLine.length > 42 && currentLine) {
+        lines.push(currentLine);
+        currentLine = w;
+      } else {
+        currentLine = testLine;
+      }
+    }
+    if (currentLine) lines.push(currentLine);
+
+    const padX = Math.max(8, Math.round(fontSize * 0.55));
+    const padY = Math.max(6, Math.round(fontSize * 0.45));
+    const lineHeight = Math.round(fontSize * 1.28);
+
+    let maxTextWidth = 0;
+    for (const line of lines) {
+      const m = ctx.measureText(line);
+      if (m.width > maxTextWidth) maxTextWidth = m.width;
+    }
+
+    const boxW = maxTextWidth + padX * 2;
+    const boxH = lines.length * lineHeight + padY * 2;
+
+    // Keep box inside canvas bounds
+    const boxX = Math.min(Math.max(8, x1 + 10), Math.max(8, width - boxW - 8));
+    const boxY = Math.min(
+      Math.max(8, y1 - boxH / 2),
+      Math.max(8, height - boxH - 8)
+    );
+
+    // Leader pin dot at exact clicked point + short connector line
+    ctx.beginPath();
+    ctx.arc(x1, y1, Math.max(4, strokeWidth * 0.9), 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(boxX, boxY + boxH / 2);
+    ctx.lineWidth = Math.max(2, strokeWidth * 0.65);
+    ctx.stroke();
+
+    // Box background (high-contrast dark slate so text is readable on white schematics and dark photos)
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.94)';
+    ctx.strokeStyle = shape.color;
+    ctx.lineWidth = Math.max(2.5, strokeWidth * 0.75);
+    ctx.beginPath();
+    if (typeof ctx.roundRect === 'function') {
+      ctx.roundRect(boxX, boxY, boxW, boxH, 6);
+    } else {
+      ctx.rect(boxX, boxY, boxW, boxH);
+    }
+    ctx.fill();
+    ctx.stroke();
+
+    // Left accent bar
+    ctx.fillStyle = shape.color;
+    ctx.fillRect(boxX, boxY, Math.max(4, Math.round(padX * 0.45)), boxH);
+
+    // Draw text lines
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#F8FAFC';
+    ctx.textBaseline = 'top';
+    lines.forEach((line, idx) => {
+      ctx.fillText(line, boxX + padX + 2, boxY + padY + idx * lineHeight);
+    });
+  } else if (shape.tool === 'circle') {
     const cx = (x1 + x2) / 2;
     const cy = (y1 + y2) / 2;
     const rx = Math.max(8, Math.abs(x2 - x1) / 2);

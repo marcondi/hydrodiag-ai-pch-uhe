@@ -48,14 +48,27 @@
   background: #334155;
 }
 
-/* Print layout for field maintenance work orders */
+/* Print layout for field maintenance work orders and annotated PDF sheets */
 @media print {
   body {
     background-color: #FFFFFF !important;
     color: #0F172A !important;
   }
-  .no-print {
+  html:not(.printing-pdf-sheet) .no-print {
     display: none !important;
+  }
+  html.printing-pdf-sheet .no-print-when-sheet {
+    display: none !important;
+  }
+  html.printing-pdf-sheet .pdf-field-print-sheet {
+    display: block !important;
+    position: fixed !important;
+    inset: 0 !important;
+    z-index: 99999 !important;
+    background: #FFFFFF !important;
+    color: #0F172A !important;
+    padding: 0 !important;
+    margin: 0 !important;
   }
   .print-only {
     display: block !important;
