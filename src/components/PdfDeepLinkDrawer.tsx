@@ -1268,8 +1268,6 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     };
   }, [isOpen, activeAttachmentId, effectiveBase64, currentPage]);
 
-  if (!isOpen) return null;
-
   const matchingBatch = cachedBatches?.find(
     (b) => currentPage >= b.startPage && currentPage <= b.endPage
   );
@@ -1547,6 +1545,8 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       window.removeEventListener('touchend', onWinTouchEnd);
     };
   }, [isDraggingShape]);
+
+  if (!isOpen) return null;
 
   const handleViewportMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0 || useNativeIframe) return;
