@@ -145,11 +145,11 @@ export function drawAnnotationShapeOnCtx(
     const boxW = maxTextWidth + padX * 2;
     const boxH = lines.length * lineHeight + padY * 2;
 
-    // Keep box inside canvas bounds
-    const boxX = Math.min(Math.max(8, x1 + 10), Math.max(8, width - boxW - 8));
+    // Keep box inside canvas bounds while allowing it to reach the very bottom/top/left/right edges of the sheet
+    const boxX = Math.min(Math.max(2, x1 + 8), Math.max(2, width - boxW - 2));
     const boxY = Math.min(
-      Math.max(8, y1 - boxH / 2),
-      Math.max(8, height - boxH - 8)
+      Math.max(2, y1 - boxH / 2),
+      Math.max(2, height - boxH - 2)
     );
 
     // Leader pin dot at exact clicked point + short connector line

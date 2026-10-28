@@ -132,10 +132,10 @@ function getTextAnnotationBoxMetrics(
 
   const boxW = maxTextWidth + padX * 2;
   const boxH = lines.length * lineHeight + padY * 2;
-  const boxX = Math.min(Math.max(8, x1 + 10), Math.max(8, width - boxW - 8));
+  const boxX = Math.min(Math.max(2, x1 + 8), Math.max(2, width - boxW - 2));
   const boxY = Math.min(
-    Math.max(8, y1 - boxH / 2),
-    Math.max(8, height - boxH - 8)
+    Math.max(2, y1 - boxH / 2),
+    Math.max(2, height - boxH - 2)
   );
 
   return { x1, y1, boxX, boxY, boxW, boxH };
@@ -699,6 +699,9 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     pageImageUrl,
     currentPage,
     useNativeIframe,
+    imgNaturalSize,
+    windowState,
+    sheetFitMode,
   ]);
 
   // Lookup cached AI summary for the current page if available
@@ -1342,14 +1345,34 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     const rect = canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
 
-    const normX = Math.min(
-      1,
-      Math.max(0, (clientX - rect.left) / rect.width)
-    );
-    const normY = Math.min(
-      1,
-      Math.max(0, (clientY - rect.top) / rect.height)
-    );
+    // Auto-pan viewport when dragging a shape near the bottom/top/left/right edge of the visible viewport so user can reach the end of zoomed/tall pages
+    const vpEl = viewportRef.current;
+    if (vpEl) {
+      const vpRect = vpEl.getBoundingClientRect();
+      const edgeZone = 32;
+      let panStepX = 0;
+      let panStepY = 0;
+      if (clientY > vpRect.bottom - edgeZone && rect.bottom > vpRect.bottom - 8) {
+        panStepY = -14;
+      } else if (clientY < vpRect.top + edgeZone && rect.top < vpRect.top + 8) {
+        panStepY = 14;
+      }
+      if (clientX > vpRect.right - edgeZone && rect.right > vpRect.right - 8) {
+        panStepX = -14;
+      } else if (clientX < vpRect.left + edgeZone && rect.left < vpRect.left + 8) {
+        panStepX = 14;
+      }
+      if (panStepX !== 0 || panStepY !== 0) {
+        setPan((prev) => ({
+          x: prev.x + panStepX,
+          y: prev.y + panStepY,
+        }));
+      }
+    }
+
+    // Compute unclamped pointer position first so grabbing the bottom/right side of a text box or circle still allows moving its anchor all the way to 100% of the page
+    const normX = (clientX - rect.left) / rect.width;
+    const normY = (clientY - rect.top) / rect.height;
     const rawDx = normX - drag.startNormX;
     const rawDy = normY - drag.startNormY;
 
@@ -1371,8 +1394,8 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
           return {
             ...s,
             points: drag.initialPoints.map((p) => ({
-              x: Number((p.x + clampedDx).toFixed(4)),
-              y: Number((p.y + clampedDy).toFixed(4)),
+              x: Number(Math.min(1, Math.max(0, p.x + clampedDx)).toFixed(4)),
+              y: Number(Math.min(1, Math.max(0, p.y + clampedDy)).toFixed(4)),
             })),
           };
         }
@@ -1803,6 +1826,9 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     };
   })();
 
+  const canvasLogicalWidth = Math.max(800, imgNaturalSize.width || 1600);
+  const canvasLogicalHeight = Math.max(600, imgNaturalSize.height || 1131);
+
   const renderInteractiveShapesOverlay = () => {
     if (currentPageShapes.length === 0 || activeSheetShape !== null) {
       return null;
@@ -2069,11 +2095,16 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
 
           if (s.tool === 'text' && s.points.length >= 1) {
             const { x1, y1, boxX, boxY, boxW, boxH } =
-              getTextAnnotationBoxMetrics(null, s, 1200, 900);
-            const leftPct = (boxX / 1200) * 100;
-            const topPct = (boxY / 900) * 100;
-            const widthPct = (boxW / 1200) * 100;
-            const heightPct = (boxH / 900) * 100;
+              getTextAnnotationBoxMetrics(
+                null,
+                s,
+                canvasLogicalWidth,
+                canvasLogicalHeight
+              );
+            const leftPct = (boxX / canvasLogicalWidth) * 100;
+            const topPct = (boxY / canvasLogicalHeight) * 100;
+            const widthPct = (boxW / canvasLogicalWidth) * 100;
+            const heightPct = (boxH / canvasLogicalHeight) * 100;
 
             return (
               <React.Fragment key={s.id}>
@@ -2106,8 +2137,8 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                     );
                   }}
                   style={{
-                    left: `${(x1 / 1200) * 100}%`,
-                    top: `${(y1 / 900) * 100}%`,
+                    left: `${(x1 / canvasLogicalWidth) * 100}%`,
+                    top: `${(y1 / canvasLogicalHeight) * 100}%`,
                   }}
                   className="absolute -translate-x-1/2 -translate-y-1/2 w-5 h-5 rounded-full pointer-events-auto cursor-move"
                 />
@@ -3215,6 +3246,8 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                       style={{
                         width: `${sheetDisplaySize.width}px`,
                         height: `${sheetDisplaySize.height}px`,
+                        minWidth: `${sheetDisplaySize.width}px`,
+                        minHeight: `${sheetDisplaySize.height}px`,
                       }}
                       className="relative shrink-0 rounded shadow-2xl bg-white select-none"
                     >
@@ -3231,13 +3264,21 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                             });
                           }
                         }}
+                        style={{
+                          width: `${sheetDisplaySize.width}px`,
+                          height: `${sheetDisplaySize.height}px`,
+                        }}
                         className="w-full h-full object-fill rounded pointer-events-none select-none block"
                       />
                       <canvas
                         ref={sheetCanvasRef}
-                        width={1200}
-                        height={900}
-                        className="absolute inset-0 w-full h-full pointer-events-none"
+                        width={canvasLogicalWidth}
+                        height={canvasLogicalHeight}
+                        style={{
+                          width: `${sheetDisplaySize.width}px`,
+                          height: `${sheetDisplaySize.height}px`,
+                        }}
+                        className="absolute inset-0 w-full h-full pointer-events-none block"
                       />
                       {renderInteractiveShapesOverlay()}
                     </div>
@@ -3252,8 +3293,8 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                     >
                       <canvas
                         ref={sheetCanvasRef}
-                        width={1200}
-                        height={900}
+                        width={canvasLogicalWidth}
+                        height={canvasLogicalHeight}
                         className="absolute inset-0 w-full h-full pointer-events-none z-20"
                       />
                       {renderInteractiveShapesOverlay()}

@@ -2358,15 +2358,19 @@ Sistema especialista multimodal desenvolvido para engenharia de manutenção, pr
     }
   });
 
-  app.get('/sw.js', (_req, res) => {
+  app.get(['/sw.js', '/dev-sw.js', '/registerSW.js'], (req, res) => {
     res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
-    const swPath = path.join(__dirname, 'public', 'sw.js');
+    if (req.path === '/registerSW.js') {
+      return res.send('// No-op registerSW');
+    }
+    const targetFile = req.path === '/dev-sw.js' ? 'dev-sw.js' : 'sw.js';
+    const swPath = path.join(__dirname, 'public', targetFile);
     if (fs.existsSync(swPath)) {
       return res.sendFile(swPath);
     }
     return res.send(
-      "self.addEventListener('install', () => self.skipWaiting()); self.addEventListener('activate', (e) => e.waitUntil(caches.keys().then((ks) => Promise.all(ks.map((k) => caches.delete(k)))).then(() => self.clients.claim())));"
+      "self.addEventListener('install', () => self.skipWaiting()); self.addEventListener('activate', (e) => e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => !k.includes('pdf_binary_cache')).map((k) => caches.delete(k)))).then(() => self.clients.claim())));"
     );
   });
 
@@ -2386,6 +2390,7 @@ Sistema especialista multimodal desenvolvido para engenharia de manutenção, pr
     'supabase_hydrodiag_schema.sql',
     'public/icon.svg',
     'public/sw.js',
+    'public/dev-sw.js',
     'server.ts',
     'src/main.tsx',
     'src/index.css',
