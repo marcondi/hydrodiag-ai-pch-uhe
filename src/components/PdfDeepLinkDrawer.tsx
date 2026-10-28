@@ -25,8 +25,12 @@ import {
   Type,
   Pencil,
   Printer,
+  Move,
   Undo2,
   Trash2,
+  Minus,
+  Maximize2,
+  Minimize2,
 } from 'lucide-react';
 import { DiagramAttachment } from '../types';
 import {
@@ -42,6 +46,300 @@ import {
 } from '../utils/pdfClientEngine';
 
 const PDF_ANNOTATIONS_STORAGE_KEY = 'hydrodiag_pdf_sheet_annotations_v2';
+
+type ShapeDragMode = 'move' | 'p0' | 'p1' | 'resize-br';
+
+interface ShapeHitResult {
+  shape: PhotoAnnotationShape;
+  mode: ShapeDragMode;
+}
+
+function distToSegment(
+  px: number,
+  py: number,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number
+): number {
+  const l2 = (x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1);
+  if (l2 === 0) return Math.hypot(px - x1, py - y1);
+  let t = ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / l2;
+  t = Math.max(0, Math.min(1, t));
+  const projX = x1 + t * (x2 - x1);
+  const projY = y1 + t * (y2 - y1);
+  return Math.hypot(px - projX, py - projY);
+}
+
+function getTextAnnotationBoxMetrics(
+  ctx: CanvasRenderingContext2D,
+  shape: PhotoAnnotationShape,
+  width: number,
+  height: number
+) {
+  const first = shape.points[0] || { x: 0.5, y: 0.5 };
+  const x1 = first.x * width;
+  const y1 = first.y * height;
+  const rawText = (shape.text || '').trim() || 'Nota';
+  const fontSize = Math.max(13, Math.round(Math.min(width, height) * 0.0175));
+
+  ctx.save();
+  ctx.font = `bold ${fontSize}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace`;
+  const words = rawText.split(/\s+/);
+  const lines: string[] = [];
+  let currentLine = '';
+  for (const w of words) {
+    const testLine = currentLine ? `${currentLine} ${w}` : w;
+    if (testLine.length > 42 && currentLine) {
+      lines.push(currentLine);
+      currentLine = w;
+    } else {
+      currentLine = testLine;
+    }
+  }
+  if (currentLine) lines.push(currentLine);
+
+  const padX = Math.max(8, Math.round(fontSize * 0.55));
+  const padY = Math.max(6, Math.round(fontSize * 0.45));
+  const lineHeight = Math.round(fontSize * 1.28);
+
+  let maxTextWidth = 0;
+  for (const line of lines) {
+    const m = ctx.measureText(line);
+    if (m.width > maxTextWidth) maxTextWidth = m.width;
+  }
+  ctx.restore();
+
+  const boxW = maxTextWidth + padX * 2;
+  const boxH = lines.length * lineHeight + padY * 2;
+  const boxX = Math.min(Math.max(8, x1 + 10), Math.max(8, width - boxW - 8));
+  const boxY = Math.min(
+    Math.max(8, y1 - boxH / 2),
+    Math.max(8, height - boxH - 8)
+  );
+
+  return { x1, y1, boxX, boxY, boxW, boxH };
+}
+
+function hitTestAnnotationShapes(
+  ctx: CanvasRenderingContext2D,
+  shapes: PhotoAnnotationShape[],
+  normX: number,
+  normY: number,
+  width: number,
+  height: number,
+  selectedShapeId: string | null
+): ShapeHitResult | null {
+  const px = normX * width;
+  const py = normY * height;
+
+  // 0. If a shape is already selected, check its endpoint/resize handles first
+  if (selectedShapeId) {
+    const sel = shapes.find((s) => s.id === selectedShapeId);
+    if (sel && sel.points.length >= 2) {
+      const x1 = sel.points[0].x * width;
+      const y1 = sel.points[0].y * height;
+      const x2 = sel.points[sel.points.length - 1].x * width;
+      const y2 = sel.points[sel.points.length - 1].y * height;
+
+      if (sel.tool === 'arrow' && Math.hypot(x2 - x1, y2 - y1) > 42) {
+        if (Math.hypot(px - x1, py - y1) <= 12) {
+          return { shape: sel, mode: 'p0' };
+        }
+        if (Math.hypot(px - x2, py - y2) <= 12) {
+          return { shape: sel, mode: 'p1' };
+        }
+      } else if (sel.tool === 'circle') {
+        const brX = Math.max(x1, x2);
+        const brY = Math.max(y1, y2);
+        if (Math.hypot(px - brX, py - brY) <= 14) {
+          return { shape: sel, mode: 'resize-br' };
+        }
+      }
+    }
+  }
+
+  // 1. Pass 1: Check text boxes, arrows, and circle borders (top-most first)
+  for (let i = shapes.length - 1; i >= 0; i--) {
+    const s = shapes[i];
+    if (s.points.length < 1) continue;
+
+    if (s.tool === 'text') {
+      const { x1, y1, boxX, boxY, boxW, boxH } = getTextAnnotationBoxMetrics(
+        ctx,
+        s,
+        width,
+        height
+      );
+      const inBox =
+        px >= boxX - 8 &&
+        px <= boxX + boxW + 8 &&
+        py >= boxY - 8 &&
+        py <= boxY + boxH + 8;
+      const nearPin = Math.hypot(px - x1, py - y1) <= 16;
+      const nearConnector =
+        distToSegment(px, py, x1, y1, boxX, boxY + boxH / 2) <= 10;
+      if (inBox || nearPin || nearConnector) {
+        return { shape: s, mode: 'move' };
+      }
+    } else if (s.tool === 'arrow' && s.points.length >= 2) {
+      const x1 = s.points[0].x * width;
+      const y1 = s.points[0].y * height;
+      const x2 = s.points[s.points.length - 1].x * width;
+      const y2 = s.points[s.points.length - 1].y * height;
+      const segDist = distToSegment(px, py, x1, y1, x2, y2);
+      const headDist = Math.hypot(px - x2, py - y2);
+      if (segDist <= 18 || headDist <= 22) {
+        return { shape: s, mode: 'move' };
+      }
+    } else if (s.tool === 'circle' && s.points.length >= 2) {
+      const x1 = s.points[0].x * width;
+      const y1 = s.points[0].y * height;
+      const x2 = s.points[s.points.length - 1].x * width;
+      const y2 = s.points[s.points.length - 1].y * height;
+      const cx = (x1 + x2) / 2;
+      const cy = (y1 + y2) / 2;
+      const rx = Math.max(8, Math.abs(x2 - x1) / 2);
+      const ry = Math.max(8, Math.abs(y2 - y1) / 2);
+      const normDist = Math.hypot(
+        (px - cx) / Math.max(1, rx),
+        (py - cy) / Math.max(1, ry)
+      );
+      const avgR = (rx + ry) / 2;
+      const approxPxDistFromRing = Math.abs(normDist - 1) * avgR;
+      if (approxPxDistFromRing <= 18) {
+        return { shape: s, mode: 'move' };
+      }
+    }
+  }
+
+  // 2. Pass 2: Check inside circle interior so user can grab anywhere inside a circle to move it
+  for (let i = shapes.length - 1; i >= 0; i--) {
+    const s = shapes[i];
+    if (s.tool === 'circle' && s.points.length >= 2) {
+      const x1 = s.points[0].x * width;
+      const y1 = s.points[0].y * height;
+      const x2 = s.points[s.points.length - 1].x * width;
+      const y2 = s.points[s.points.length - 1].y * height;
+      const cx = (x1 + x2) / 2;
+      const cy = (y1 + y2) / 2;
+      const rx = Math.max(8, Math.abs(x2 - x1) / 2);
+      const ry = Math.max(8, Math.abs(y2 - y1) / 2);
+      const normDist = Math.hypot(
+        (px - cx) / Math.max(1, rx),
+        (py - cy) / Math.max(1, ry)
+      );
+      if (normDist <= 1.05) {
+        return { shape: s, mode: 'move' };
+      }
+    }
+  }
+
+  return null;
+}
+
+function drawShapeSelectionHighlightOnCtx(
+  ctx: CanvasRenderingContext2D,
+  shape: PhotoAnnotationShape,
+  width: number,
+  height: number,
+  isSelected: boolean
+) {
+  if (shape.points.length < 1) return;
+  ctx.save();
+  ctx.strokeStyle = isSelected ? '#38BDF8' : 'rgba(56, 189, 248, 0.75)';
+  ctx.lineWidth = isSelected ? 2.5 : 2;
+  ctx.setLineDash([6, 5]);
+
+  if (shape.tool === 'text') {
+    const { x1, y1, boxX, boxY, boxW, boxH } = getTextAnnotationBoxMetrics(
+      ctx,
+      shape,
+      width,
+      height
+    );
+    const minX = Math.min(x1 - 8, boxX - 6);
+    const minY = Math.min(y1 - 8, boxY - 6);
+    const maxX = boxX + boxW + 6;
+    const maxY = Math.max(y1 + 8, boxY + boxH + 6);
+    ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
+
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#0284C7';
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(x1, y1, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  } else if (shape.tool === 'circle' && shape.points.length >= 2) {
+    const x1 = shape.points[0].x * width;
+    const y1 = shape.points[0].y * height;
+    const x2 = shape.points[shape.points.length - 1].x * width;
+    const y2 = shape.points[shape.points.length - 1].y * height;
+    const minX = Math.min(x1, x2) - 6;
+    const minY = Math.min(y1, y2) - 6;
+    const maxX = Math.max(x1, x2) + 6;
+    const maxY = Math.max(y1, y2) + 6;
+    ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
+
+    if (isSelected) {
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#0284C7';
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(Math.max(x1, x2), Math.max(y1, y2), 6.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+  } else if (shape.tool === 'arrow' && shape.points.length >= 2) {
+    const x1 = shape.points[0].x * width;
+    const y1 = shape.points[0].y * height;
+    const x2 = shape.points[shape.points.length - 1].x * width;
+    const y2 = shape.points[shape.points.length - 1].y * height;
+    const minX = Math.min(x1, x2) - 10;
+    const minY = Math.min(y1, y2) - 10;
+    const maxX = Math.max(x1, x2) + 10;
+    const maxY = Math.max(y1, y2) + 10;
+    ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
+
+    if (isSelected) {
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#0284C7';
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 2;
+      for (const pt of [
+        { x: x1, y: y1 },
+        { x: x2, y: y2 },
+      ]) {
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+  }
+
+  ctx.restore();
+}
+
+function sanitizeShapesList(
+  shapes: PhotoAnnotationShape[]
+): PhotoAnnotationShape[] {
+  if (!Array.isArray(shapes)) return [];
+  return shapes.filter((s) => {
+    if (!s || !Array.isArray(s.points) || s.points.length === 0) return false;
+    if (s.tool === 'circle' || s.tool === 'arrow') {
+      if (s.points.length < 2) return false;
+      const p0 = s.points[0];
+      const p1 = s.points[s.points.length - 1];
+      // Filter out accidental 0-size single-click dots
+      if (Math.hypot(p1.x - p0.x, p1.y - p0.y) < 0.008) return false;
+    }
+    return true;
+  });
+}
 
 const QUICK_PDF_TEXT_NOTES = [
   'Medir 125Vcc neste borne',
@@ -180,8 +478,31 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     y: number;
   } | null>(null);
   const [pendingTextValue, setPendingTextValue] = useState<string>('');
+  const [editingTextShapeId, setEditingTextShapeId] = useState<string | null>(
+    null
+  );
+  const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
+  const [hoveredShapeId, setHoveredShapeId] = useState<string | null>(null);
+  const [isDraggingShape, setIsDraggingShape] = useState<boolean>(false);
+  const draggingShapeRef = useRef<{
+    shapeId: string;
+    mode: ShapeDragMode;
+    startNormX: number;
+    startNormY: number;
+    initialPoints: { x: number; y: number }[];
+  } | null>(null);
+
   const [isFieldPrintModalOpen, setIsFieldPrintModalOpen] =
     useState<boolean>(false);
+  const [windowState, setWindowState] = useState<
+    'normal' | 'maximized' | 'minimized'
+  >('normal');
+  const [textBoxWindowState, setTextBoxWindowState] = useState<
+    'normal' | 'maximized' | 'minimized'
+  >('normal');
+  const [printModalWindowState, setPrintModalWindowState] = useState<
+    'normal' | 'maximized' | 'minimized'
+  >('normal');
   const [isGeneratingFieldPrint, setIsGeneratingFieldPrint] =
     useState<boolean>(false);
   const [annotatedPrintDataUrl, setAnnotatedPrintDataUrl] = useState<
@@ -199,7 +520,11 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       if (raw) {
         const parsed = JSON.parse(raw);
         if (parsed && typeof parsed === 'object') {
-          return parsed;
+          const cleaned: Record<string, PhotoAnnotationShape[]> = {};
+          for (const [k, v] of Object.entries(parsed)) {
+            cleaned[k] = sanitizeShapesList(v as PhotoAnnotationShape[]);
+          }
+          return cleaned;
         }
       }
     } catch {
@@ -268,6 +593,9 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     sheetAnnotations[legacyPageKey] ||
     [];
 
+  const selectedShape =
+    currentPageShapes.find((s) => s.id === selectedShapeId) || null;
+
   const updateCurrentPageShapes = (
     updater: (prevList: PhotoAnnotationShape[]) => PhotoAnnotationShape[]
   ) => {
@@ -292,9 +620,14 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     setActiveSheetShape(null);
     setPendingTextPoint(null);
     setPendingTextValue('');
+    setEditingTextShapeId(null);
+    setSelectedShapeId(null);
+    setHoveredShapeId(null);
+    setIsDraggingShape(false);
+    draggingShapeRef.current = null;
   }, [currentPage, activeAttachmentId, isOpen]);
 
-  // Render annotations on the sheet overlay canvas
+  // Render annotations + interactive selection/hover outlines on the sheet overlay canvas
   useEffect(() => {
     const canvas = sheetCanvasRef.current;
     if (!canvas) return;
@@ -306,10 +639,21 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       : currentPageShapes;
     for (const s of shapesToDraw) {
       drawAnnotationShapeOnCtx(ctx, s, canvas.width, canvas.height);
+      if (s.id === selectedShapeId || s.id === hoveredShapeId) {
+        drawShapeSelectionHighlightOnCtx(
+          ctx,
+          s,
+          canvas.width,
+          canvas.height,
+          s.id === selectedShapeId
+        );
+      }
     }
   }, [
     currentPageShapes,
     activeSheetShape,
+    selectedShapeId,
+    hoveredShapeId,
     pageImageUrl,
     currentPage,
     useNativeIframe,
@@ -331,8 +675,9 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     currentPage
   );
 
-  // Automatically build composite PNG + modified PDF blob whenever pageImageUrl or annotations change
+  // Automatically build composite PNG + modified PDF blob whenever pageImageUrl or annotations change (skipping while actively dragging a shape)
   useEffect(() => {
+    if (isDraggingShape) return;
     let activeModPdfUrl: string | null = null;
     let isCancelled = false;
 
@@ -489,6 +834,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     };
   }, [
     isOpen,
+    isDraggingShape,
     pageImageUrl,
     currentPageShapes,
     currentPage,
@@ -572,7 +918,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     };
   }, [isOpen, isLoadingPage, useNativeIframe, isDragging]);
 
-  // Handle ESC key: closes open sub-modals/menus first, then deactivates drawing tool ('circle', 'arrow', 'text') back to 'pan', otherwise closes drawer. Also supports Ctrl+Z to undo.
+  // Handle ESC key: closes open sub-modals/menus first, then deactivates drawing tool ('circle', 'arrow', 'text') back to 'pan', otherwise closes drawer. Also supports Ctrl+Z to undo and Delete/Backspace to remove selected shape.
   useEffect(() => {
     if (!isOpen) return;
 
@@ -591,15 +937,19 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' || e.key === 'Esc') {
+        if (windowState === 'minimized') return;
         e.preventDefault();
         e.stopPropagation();
         if (isFieldPrintModalOpen) {
           setIsFieldPrintModalOpen(false);
+          setPrintModalWindowState('normal');
           return;
         }
         if (pendingTextPoint !== null) {
           setPendingTextPoint(null);
           setPendingTextValue('');
+          setEditingTextShapeId(null);
+          setTextBoxWindowState('normal');
           return;
         }
         if (isAnnotationMenuOpen) {
@@ -611,6 +961,10 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
           setInteractionMode('pan');
           return;
         }
+        if (selectedShapeId !== null) {
+          setSelectedShapeId(null);
+          return;
+        }
         onClose();
         return;
       }
@@ -620,6 +974,22 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
         activeTag === 'input' ||
         activeTag === 'textarea' ||
         activeTag === 'select';
+
+      if (
+        !isTyping &&
+        selectedShapeId &&
+        (e.key === 'Delete' || e.key === 'Backspace')
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        const idToRemove = selectedShapeId;
+        updateCurrentPageShapes((list) =>
+          list.filter((s) => s.id !== idToRemove)
+        );
+        setSelectedShapeId(null);
+        setHoveredShapeId(null);
+        return;
+      }
 
       if (
         !isTyping &&
@@ -663,15 +1033,18 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     isLoadingPage,
     interactionMode,
     activeSheetShape,
+    selectedShapeId,
     canonicalPageKey,
     legacyPageKey,
     isFieldPrintModalOpen,
     pendingTextPoint,
     isAnnotationMenuOpen,
+    windowState,
   ]);
 
   useEffect(() => {
     if (isOpen) {
+      setWindowState((prev) => (prev === 'minimized' ? 'normal' : prev));
       const targetPage = Math.max(1, initialPage || 1);
       setCurrentPage(targetPage);
       setPageInput(String(targetPage));
@@ -825,6 +1198,22 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     ).trim();
     if (!pendingTextPoint || !textToUse) return;
 
+    if (editingTextShapeId) {
+      const targetId = editingTextShapeId;
+      updateCurrentPageShapes((prev) =>
+        prev.map((s) =>
+          s.id === targetId
+            ? { ...s, text: textToUse, color: annotationColor }
+            : s
+        )
+      );
+      setSelectedShapeId(targetId);
+      setEditingTextShapeId(null);
+      setPendingTextPoint(null);
+      setPendingTextValue('');
+      return;
+    }
+
     const newTextShape: PhotoAnnotationShape = {
       id: `s_txt_${Date.now()}`,
       tool: 'text',
@@ -833,6 +1222,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       text: textToUse,
     };
     updateCurrentPageShapes((prev) => [...prev, newTextShape]);
+    setSelectedShapeId(newTextShape.id);
     setPendingTextPoint(null);
     setPendingTextValue('');
   };
@@ -858,30 +1248,74 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       return;
     }
 
-    if (interactionMode !== 'pan' && sheetCanvasRef.current) {
-      e.preventDefault();
-      const rect = sheetCanvasRef.current.getBoundingClientRect();
+    const canvas = sheetCanvasRef.current;
+    if (canvas) {
+      const rect = canvas.getBoundingClientRect();
       if (rect.width > 0 && rect.height > 0) {
-        const x = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-        const y = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+        const normX = Math.min(
+          1,
+          Math.max(0, (e.clientX - rect.left) / rect.width)
+        );
+        const normY = Math.min(
+          1,
+          Math.max(0, (e.clientY - rect.top) / rect.height)
+        );
+        const ctx = canvas.getContext('2d');
 
-        if (interactionMode === 'text') {
-          setPendingTextPoint({ x, y });
-          setPendingTextValue('');
-          return;
+        // 1. First check if the user clicked on ANY existing annotation (Circle, Arrow, or Text Box) to move/reposition it!
+        if (ctx && currentPageShapes.length > 0) {
+          const hit = hitTestAnnotationShapes(
+            ctx,
+            currentPageShapes,
+            normX,
+            normY,
+            canvas.width,
+            canvas.height,
+            selectedShapeId
+          );
+          if (hit) {
+            e.preventDefault();
+            setSelectedShapeId(hit.shape.id);
+            setHoveredShapeId(hit.shape.id);
+            setIsDraggingShape(true);
+            draggingShapeRef.current = {
+              shapeId: hit.shape.id,
+              mode: hit.mode,
+              startNormX: normX,
+              startNormY: normY,
+              initialPoints: hit.shape.points.map((p) => ({ ...p })),
+            };
+            return;
+          }
         }
 
-        setActiveSheetShape({
-          id: `s_ann_${Date.now()}`,
-          tool: interactionMode === 'circle' ? 'circle' : 'arrow',
-          color: annotationColor,
-          points: [
-            { x, y },
-            { x, y },
-          ],
-        });
+        // Clicked on empty sheet space -> clear selection
+        if (selectedShapeId !== null) {
+          setSelectedShapeId(null);
+        }
+
+        // 2. If an annotation tool is active, start creating a new shape at (normX, normY)
+        if (interactionMode !== 'pan') {
+          e.preventDefault();
+          if (interactionMode === 'text') {
+            setEditingTextShapeId(null);
+            setPendingTextPoint({ x: normX, y: normY });
+            setPendingTextValue('');
+            return;
+          }
+
+          setActiveSheetShape({
+            id: `s_ann_${Date.now()}`,
+            tool: interactionMode === 'circle' ? 'circle' : 'arrow',
+            color: annotationColor,
+            points: [
+              { x: normX, y: normY },
+              { x: normX, y: normY },
+            ],
+          });
+          return;
+        }
       }
-      return;
     }
 
     e.preventDefault();
@@ -895,9 +1329,130 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
   };
 
   const handleViewportMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (activeSheetShape && sheetCanvasRef.current) {
+    const canvas = sheetCanvasRef.current;
+
+    // 1. Live drag/reposition or endpoint adjustment of an existing Circle, Arrow, or Text Box
+    if (draggingShapeRef.current && canvas) {
+      if ((e.buttons & 1) === 0) {
+        draggingShapeRef.current = null;
+        setIsDraggingShape(false);
+        return;
+      }
       e.preventDefault();
-      const rect = sheetCanvasRef.current.getBoundingClientRect();
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        const normX = Math.min(
+          1,
+          Math.max(0, (e.clientX - rect.left) / rect.width)
+        );
+        const normY = Math.min(
+          1,
+          Math.max(0, (e.clientY - rect.top) / rect.height)
+        );
+        const drag = draggingShapeRef.current;
+        const rawDx = normX - drag.startNormX;
+        const rawDy = normY - drag.startNormY;
+
+        updateCurrentPageShapes((prevList) =>
+          prevList.map((s) => {
+            if (s.id !== drag.shapeId) return s;
+
+            if (drag.mode === 'move') {
+              const xs = drag.initialPoints.map((p) => p.x);
+              const ys = drag.initialPoints.map((p) => p.y);
+              const minX = Math.min(...xs);
+              const maxX = Math.max(...xs);
+              const minY = Math.min(...ys);
+              const maxY = Math.max(...ys);
+
+              const clampedDx = Math.min(
+                1 - maxX,
+                Math.max(-minX, rawDx)
+              );
+              const clampedDy = Math.min(
+                1 - maxY,
+                Math.max(-minY, rawDy)
+              );
+
+              return {
+                ...s,
+                points: drag.initialPoints.map((p) => ({
+                  x: Number((p.x + clampedDx).toFixed(4)),
+                  y: Number((p.y + clampedDy).toFixed(4)),
+                })),
+              };
+            }
+
+            if (drag.mode === 'p0' && drag.initialPoints.length >= 2) {
+              const p0 = drag.initialPoints[0];
+              const p1 = drag.initialPoints[drag.initialPoints.length - 1];
+              return {
+                ...s,
+                points: [
+                  {
+                    x: Math.min(1, Math.max(0, p0.x + rawDx)),
+                    y: Math.min(1, Math.max(0, p0.y + rawDy)),
+                  },
+                  p1,
+                ],
+              };
+            }
+
+            if (drag.mode === 'p1' && drag.initialPoints.length >= 2) {
+              const p0 = drag.initialPoints[0];
+              const p1 = drag.initialPoints[drag.initialPoints.length - 1];
+              return {
+                ...s,
+                points: [
+                  p0,
+                  {
+                    x: Math.min(1, Math.max(0, p1.x + rawDx)),
+                    y: Math.min(1, Math.max(0, p1.y + rawDy)),
+                  },
+                ],
+              };
+            }
+
+            if (drag.mode === 'resize-br' && drag.initialPoints.length >= 2) {
+              const x1 = Math.min(
+                drag.initialPoints[0].x,
+                drag.initialPoints[drag.initialPoints.length - 1].x
+              );
+              const y1 = Math.min(
+                drag.initialPoints[0].y,
+                drag.initialPoints[drag.initialPoints.length - 1].y
+              );
+              const x2 = Math.max(
+                drag.initialPoints[0].x,
+                drag.initialPoints[drag.initialPoints.length - 1].x
+              );
+              const y2 = Math.max(
+                drag.initialPoints[0].y,
+                drag.initialPoints[drag.initialPoints.length - 1].y
+              );
+              return {
+                ...s,
+                points: [
+                  { x: x1, y: y1 },
+                  {
+                    x: Math.min(1, Math.max(x1 + 0.015, x2 + rawDx)),
+                    y: Math.min(1, Math.max(y1 + 0.015, y2 + rawDy)),
+                  },
+                ],
+              };
+            }
+
+            return s;
+          })
+        );
+      }
+      return;
+    }
+
+    // 2. Live drawing of a new Circle or Arrow
+    if (activeSheetShape && canvas) {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
       if (rect.width > 0 && rect.height > 0) {
         const x = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
         const y = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
@@ -907,6 +1462,36 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       }
       return;
     }
+
+    // 3. Hover detection over existing shapes when not panning
+    if (!isDragging && !useNativeIframe && canvas && currentPageShapes.length > 0) {
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        const normX = (e.clientX - rect.left) / rect.width;
+        const normY = (e.clientY - rect.top) / rect.height;
+        if (normX >= 0 && normX <= 1 && normY >= 0 && normY <= 1) {
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            const hit = hitTestAnnotationShapes(
+              ctx,
+              currentPageShapes,
+              normX,
+              normY,
+              canvas.width,
+              canvas.height,
+              selectedShapeId
+            );
+            const nextHoverId = hit ? hit.shape.id : null;
+            if (nextHoverId !== hoveredShapeId) {
+              setHoveredShapeId(nextHoverId);
+            }
+          }
+        } else if (hoveredShapeId !== null) {
+          setHoveredShapeId(null);
+        }
+      }
+    }
+
     if (!isDragging || useNativeIframe) return;
     if ((e.buttons & 1) === 0) {
       setIsDragging(false);
@@ -922,9 +1507,20 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
   };
 
   const handleViewportMouseUpOrLeave = () => {
+    if (draggingShapeRef.current) {
+      draggingShapeRef.current = null;
+      setIsDraggingShape(false);
+    }
     if (activeSheetShape) {
       const finishedShape = activeSheetShape;
-      updateCurrentPageShapes((prev) => [...prev, finishedShape]);
+      const p0 = finishedShape.points[0];
+      const p1 = finishedShape.points[finishedShape.points.length - 1];
+      const dragDist = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+      // Only commit circle/arrow if user actually dragged a visible distance (prevents accidental single-click dots)
+      if (dragDist >= 0.01) {
+        updateCurrentPageShapes((prev) => [...prev, finishedShape]);
+        setSelectedShapeId(finishedShape.id);
+      }
       setActiveSheetShape(null);
     }
     if (isDragging) {
@@ -945,6 +1541,38 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     ) {
       return;
     }
+
+    // Double-clicking an existing Text Box opens it for editing
+    const canvas = sheetCanvasRef.current;
+    if (canvas && currentPageShapes.length > 0) {
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        const normX = (e.clientX - rect.left) / rect.width;
+        const normY = (e.clientY - rect.top) / rect.height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          const hit = hitTestAnnotationShapes(
+            ctx,
+            currentPageShapes,
+            normX,
+            normY,
+            canvas.width,
+            canvas.height,
+            selectedShapeId
+          );
+          if (hit && hit.shape.tool === 'text') {
+            e.preventDefault();
+            setSelectedShapeId(hit.shape.id);
+            setEditingTextShapeId(hit.shape.id);
+            setAnnotationColor(hit.shape.color);
+            setPendingTextPoint(hit.shape.points[0]);
+            setPendingTextValue(hit.shape.text || '');
+            return;
+          }
+        }
+      }
+    }
+
     if (zoom > 1.35) {
       handleResetView();
     } else {
@@ -963,7 +1591,15 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
   );
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/75 flex justify-end no-print">
+    <div
+      className={
+        windowState === 'minimized'
+          ? 'fixed bottom-4 right-4 z-50 no-print'
+          : windowState === 'maximized'
+            ? 'fixed inset-0 z-50 bg-black/85 flex items-center justify-center no-print'
+            : 'fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-2 sm:p-4 no-print'
+      }
+    >
       {/* Dedicated Full-Sheet Print Surface when user clicks "Imprimir Folha c/ Anotações Agora" */}
       {annotatedPrintDataUrl && (
         <div className="hidden pdf-field-print-sheet">
@@ -975,12 +1611,76 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
         </div>
       )}
 
-      {/* Backdrop click to close */}
-      <div
-        className="flex-1 cursor-pointer no-print-when-sheet"
-        onClick={onClose}
-        aria-hidden="true"
-      />
+      {/* Backdrop click to close when in normal windowed mode */}
+      {windowState !== 'minimized' && (
+        <div
+          className="fixed inset-0 -z-10 cursor-pointer no-print-when-sheet"
+          onClick={onClose}
+          aria-hidden="true"
+        />
+      )}
+
+      {/* Floating Minimized Taskbar Dock when Window is Minimized */}
+      {windowState === 'minimized' && (
+        <div className="bg-[#111827] border-2 border-sky-500/70 rounded-xl shadow-2xl px-3.5 py-2.5 flex items-center gap-3 max-w-[95vw] sm:max-w-xl backdrop-blur-md">
+          <div
+            onClick={() => setWindowState('normal')}
+            className="flex items-center gap-2.5 min-w-0 cursor-pointer group"
+            title="Clique para restaurar a janela do Inspetor de Diagrama PDF"
+          >
+            <div className="w-8 h-8 rounded-lg bg-sky-500/20 border border-sky-500/40 flex items-center justify-center text-sky-400 shrink-0 group-hover:bg-sky-500/30 transition-colors">
+              <BookOpen className="w-4 h-4" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-mono font-bold text-white truncate">
+                  {activeAttachment?.name || 'Diagrama PDF'}
+                </span>
+                <span className="px-1.5 py-0.5 rounded bg-sky-500/20 border border-sky-500/40 text-[10px] font-mono text-sky-300 shrink-0">
+                  Pág. {currentPage}/{effectiveTotalPages}
+                </span>
+                {currentPageShapes.length > 0 && (
+                  <span className="px-1.5 py-0.5 rounded bg-rose-500/25 border border-rose-500/40 text-[10px] font-mono text-rose-200 shrink-0">
+                    {currentPageShapes.length} anot.
+                  </span>
+                )}
+              </div>
+              <p className="text-[10px] font-mono text-slate-400 truncate">
+                Janela minimizada • Folha #{reconstructedSheet.folhaSelo} (Zoom{' '}
+                {zoomPercent}%)
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5 shrink-0 border-l border-slate-700 pl-2.5">
+            <button
+              type="button"
+              onClick={() => setWindowState('normal')}
+              className="px-2.5 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 text-white text-xs font-mono font-semibold flex items-center gap-1 cursor-pointer transition-colors"
+              title="Restaurar janela ao tamanho normal"
+            >
+              <Minimize2 className="w-3.5 h-3.5" />
+              <span>Restaurar</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setWindowState('maximized')}
+              className="p-1.5 rounded-md bg-slate-800 hover:bg-sky-600/30 border border-slate-700 hover:border-sky-500/50 text-slate-200 hover:text-white cursor-pointer transition-colors"
+              title="Maximizar janela em Tela Cheia"
+            >
+              <Maximize2 className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 rounded-md bg-slate-800 hover:bg-rose-600/40 border border-slate-700 hover:border-rose-500/60 text-slate-300 hover:text-white cursor-pointer transition-colors"
+              title="Fechar janela (ESC)"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Hidden input for attaching raw vector PDF anytime */}
       <input
@@ -1036,7 +1736,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
         }}
       />
 
-      {/* Slide-over Inspector Panel */}
+      {/* Inspector Window Panel (Supports Normal Windowed, Maximized Fullscreen, and Hidden when Minimized) */}
       <aside
         ref={drawerRef}
         tabIndex={-1}
@@ -1049,10 +1749,25 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
           }
         }}
         aria-label="Visualizador Interativo de Folha do PDF (Deep-Link)"
-        className="w-full max-w-5xl bg-[#0B111E] border-l border-slate-800 h-full flex flex-col shadow-2xl focus:outline-none no-print-when-sheet"
+        className={
+          windowState === 'minimized'
+            ? 'hidden'
+            : windowState === 'maximized'
+              ? 'w-screen h-screen max-w-none max-h-none rounded-none bg-[#0B111E] flex flex-col shadow-2xl focus:outline-none no-print-when-sheet'
+              : 'w-full max-w-6xl h-[90vh] rounded-xl bg-[#0B111E] border border-slate-700 flex flex-col shadow-2xl overflow-hidden focus:outline-none no-print-when-sheet'
+        }
       >
-        {/* Top Control Bar */}
-        <div className="px-4 py-3 bg-[#111827] border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 shrink-0">
+        {/* Top Control Bar (Double-click toggles Maximize/Restore) */}
+        <div
+          onDoubleClick={(e) => {
+            const target = e.target as HTMLElement;
+            if (target.closest('button, a, input, select, form')) return;
+            setWindowState((prev) =>
+              prev === 'maximized' ? 'normal' : 'maximized'
+            );
+          }}
+          className="px-4 py-2.5 bg-[#111827] border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 shrink-0 select-none"
+        >
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="w-8 h-8 rounded-md bg-sky-500/15 border border-sky-500/30 flex items-center justify-center text-sky-400 shrink-0">
               <BookOpen className="w-4 h-4" />
@@ -1171,15 +1886,55 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
               </button>
             )}
 
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-2 py-1.5 text-slate-300 hover:text-white bg-slate-800/80 hover:bg-rose-600/30 border border-slate-700 hover:border-rose-500/50 rounded-md transition-colors cursor-pointer flex items-center gap-1"
-              title="Fechar Inspetor (Tecla Esc)"
-            >
-              <span className="text-[10px] font-mono text-slate-400">ESC</span>
-              <X className="w-4 h-4" />
-            </button>
+            {/* Window Controls Group: Minimizar, Maximizar/Restaurar, Fechar */}
+            <div className="flex items-center gap-1 bg-[#0B111E] border border-slate-700 rounded-lg p-1 ml-1">
+              <button
+                type="button"
+                onClick={() => setWindowState('minimized')}
+                className="px-2 py-1 text-xs font-mono text-slate-300 hover:text-white hover:bg-slate-800 rounded transition-colors cursor-pointer flex items-center gap-1"
+                title="Minimizar janela para o rodapé (permite ler o Laudo e usar o Chat sem perder a folha aberta)"
+              >
+                <Minus className="w-3.5 h-3.5 text-amber-400" />
+                <span className="hidden md:inline">Minimizar</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setWindowState((prev) =>
+                    prev === 'maximized' ? 'normal' : 'maximized'
+                  )
+                }
+                className="px-2 py-1 text-xs font-mono text-slate-300 hover:text-white hover:bg-sky-500/20 rounded transition-colors cursor-pointer flex items-center gap-1"
+                title={
+                  windowState === 'maximized'
+                    ? 'Restaurar tamanho normal da janela'
+                    : 'Maximizar janela em Tela Cheia (100%)'
+                }
+              >
+                {windowState === 'maximized' ? (
+                  <>
+                    <Minimize2 className="w-3.5 h-3.5 text-sky-400" />
+                    <span className="hidden md:inline">Restaurar</span>
+                  </>
+                ) : (
+                  <>
+                    <Maximize2 className="w-3.5 h-3.5 text-sky-400" />
+                    <span className="hidden md:inline">Maximizar</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-2 py-1 text-xs font-mono text-slate-300 hover:text-white hover:bg-rose-600/35 rounded transition-colors cursor-pointer flex items-center gap-1"
+                title="Fechar janela (Tecla Esc)"
+              >
+                <X className="w-3.5 h-3.5 text-rose-400" />
+                <span className="hidden md:inline">Fechar</span>
+              </button>
+            </div>
           </div>
         </div>
 
@@ -1307,7 +2062,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                       <span>
                         <strong className="block">Circular Borne</strong>
                         <span className="text-[10px] text-slate-400 font-sans">
-                          Arraste para destacar borne, relé ou TAG
+                          Arraste p/ criar • Clique e arraste p/ mover
                         </span>
                       </span>
                     </span>
@@ -1340,7 +2095,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                       <span>
                         <strong className="block">Seta Indicadora</strong>
                         <span className="text-[10px] text-slate-400 font-sans">
-                          Apontar ponto exato de medição / falha
+                          Apontar medição • Clique e arraste p/ mover
                         </span>
                       </span>
                     </span>
@@ -1374,7 +2129,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                           Caixa de Texto (Anotação)
                         </strong>
                         <span className="text-[10px] text-slate-400 font-sans">
-                          Clique na folha para escrever nota técnica
+                          Escrever nota • Clique e arraste p/ mover
                         </span>
                       </span>
                     </span>
@@ -1395,7 +2150,18 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                         <button
                           key={c.hex}
                           type="button"
-                          onClick={() => setAnnotationColor(c.hex)}
+                          onClick={() => {
+                            setAnnotationColor(c.hex);
+                            if (selectedShapeId) {
+                              updateCurrentPageShapes((list) =>
+                                list.map((s) =>
+                                  s.id === selectedShapeId
+                                    ? { ...s, color: c.hex }
+                                    : s
+                                )
+                              );
+                            }
+                          }}
                           className={`flex-1 py-1 px-1.5 rounded border text-[10px] font-mono flex items-center justify-center gap-1 cursor-pointer ${
                             annotationColor === c.hex
                               ? 'bg-slate-800 border-white text-white font-semibold'
@@ -1437,11 +2203,62 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
               <span>Desfazer</span>
             </button>
 
+            {/* 3.5 Selected Shape Contextual Actions (Move / Edit Text / Delete Single Shape) */}
+            {selectedShape && (
+              <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-sky-500/15 border border-sky-500/50 text-[11px] font-mono text-sky-200">
+                <Move className="w-3 h-3 text-sky-400 shrink-0" />
+                <span className="hidden md:inline">
+                  {selectedShape.tool === 'circle'
+                    ? 'Círculo'
+                    : selectedShape.tool === 'arrow'
+                      ? 'Seta'
+                      : 'Caixa de Texto'}{' '}
+                  (arraste p/ mover)
+                </span>
+                {selectedShape.tool === 'text' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingTextShapeId(selectedShape.id);
+                      setAnnotationColor(selectedShape.color);
+                      setPendingTextPoint(selectedShape.points[0]);
+                      setPendingTextValue(selectedShape.text || '');
+                    }}
+                    className="ml-1 px-1.5 py-0.5 rounded bg-amber-500/25 hover:bg-amber-500/40 border border-amber-400/50 text-amber-200 flex items-center gap-1 cursor-pointer"
+                    title="Editar o texto desta anotação (ou dê duplo-clique na caixa)"
+                  >
+                    <Pencil className="w-2.5 h-2.5" />
+                    <span>Editar</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const idToRemove = selectedShape.id;
+                    updateCurrentPageShapes((list) =>
+                      list.filter((s) => s.id !== idToRemove)
+                    );
+                    setSelectedShapeId(null);
+                    setHoveredShapeId(null);
+                  }}
+                  className="ml-1 px-1.5 py-0.5 rounded bg-rose-500/25 hover:bg-rose-500/45 border border-rose-500/50 text-rose-200 flex items-center gap-1 cursor-pointer"
+                  title="Excluir apenas esta marcação selecionada (Atalho: Delete)"
+                >
+                  <Trash2 className="w-2.5 h-2.5" />
+                  <span>Excluir</span>
+                </button>
+              </div>
+            )}
+
             {/* 4. Limpar */}
             {currentPageShapes.length > 0 && (
               <button
                 type="button"
-                onClick={() => updateCurrentPageShapes(() => [])}
+                onClick={() => {
+                  updateCurrentPageShapes(() => []);
+                  setSelectedShapeId(null);
+                  setHoveredShapeId(null);
+                }}
                 className="px-2 py-1 rounded text-[11px] font-mono bg-rose-950/60 hover:bg-rose-900/60 border border-rose-700/50 text-rose-200 flex items-center gap-1 cursor-pointer"
                 title="Limpar todas as marcações desta página"
               >
@@ -1532,8 +2349,9 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
               <Type className="w-3.5 h-3.5 text-amber-400 shrink-0" />
               <span>
                 <strong>Modo Caixa de Texto ativo:</strong> Clique em qualquer
-                borne ou ponto da folha abaixo para digitar e fixar sua
-                anotação.
+                ponto vazio da folha para digitar uma nota, ou{' '}
+                <strong>clique e arraste</strong> qualquer círculo, seta ou
+                caixa de texto existente para movê-la.
               </span>
             </span>
             <button
@@ -1548,67 +2366,145 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
 
         {/* Main Interactive Pan & Zoom Viewport */}
         <div className="flex-1 bg-[#070B14] p-2 sm:p-3 overflow-hidden flex flex-col relative">
-          {/* Floating Text Box Input Popover when user clicks a point on the sheet in 'text' mode */}
+          {/* Floating Text Box Input Window when user clicks a point on the sheet in 'text' mode or edits an existing text box */}
           {pendingTextPoint && (
             <div
               data-no-pan="true"
-              className="absolute top-4 left-1/2 -translate-x-1/2 z-40 w-[94%] max-w-lg rounded-xl bg-[#0F172A]/95 border-2 border-amber-500/70 shadow-2xl p-3.5 space-y-2.5 backdrop-blur-md"
+              className={`absolute z-40 rounded-xl bg-[#0F172A]/95 border-2 border-amber-500/70 shadow-2xl backdrop-blur-md transition-all ${
+                textBoxWindowState === 'minimized'
+                  ? 'bottom-3 right-3 w-auto max-w-md p-2.5'
+                  : textBoxWindowState === 'maximized'
+                    ? 'top-3 left-1/2 -translate-x-1/2 w-[96%] max-w-3xl p-4 space-y-3'
+                    : 'top-4 left-1/2 -translate-x-1/2 w-[94%] max-w-lg p-3.5 space-y-2.5'
+              }`}
             >
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-xs font-mono font-semibold text-amber-300 flex items-center gap-1.5">
-                  <Type className="w-4 h-4 text-amber-400" />
-                  Inserir Caixa de Texto na Folha (Pág. {currentPage})
-                </span>
-                <button
-                  type="button"
+              <div className="flex items-center justify-between gap-3">
+                <span
                   onClick={() => {
-                    setPendingTextPoint(null);
-                    setPendingTextValue('');
+                    if (textBoxWindowState === 'minimized') {
+                      setTextBoxWindowState('normal');
+                    }
                   }}
-                  className="text-slate-400 hover:text-white text-xs font-mono px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 cursor-pointer"
+                  className="text-xs font-mono font-semibold text-amber-300 flex items-center gap-1.5 cursor-pointer"
                 >
-                  Cancelar (ESC)
-                </button>
-              </div>
+                  <Type className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>
+                    {editingTextShapeId
+                      ? `Editar Caixa de Texto (Pág. ${currentPage})`
+                      : `Inserir Caixa de Texto (Pág. ${currentPage})`}
+                  </span>
+                </span>
 
-              {/* Quick field note chips */}
-              <div className="flex flex-wrap gap-1">
-                {QUICK_PDF_TEXT_NOTES.map((note) => (
+                {/* Window Controls for Text Box Floating Window */}
+                <div className="flex items-center gap-1 bg-slate-900/90 border border-slate-700 rounded-md p-0.5 shrink-0">
                   <button
-                    key={note}
                     type="button"
-                    onClick={() => handleConfirmTextAnnotation(note)}
-                    className="px-2 py-1 rounded bg-slate-800/90 hover:bg-sky-500/20 border border-slate-700 hover:border-sky-500/50 text-[11px] font-mono text-slate-200 hover:text-sky-200 transition-colors cursor-pointer"
-                    title="Clique para inserir esta nota imediatamente"
+                    onClick={() =>
+                      setTextBoxWindowState((prev) =>
+                        prev === 'minimized' ? 'normal' : 'minimized'
+                      )
+                    }
+                    className="px-1.5 py-0.5 rounded text-[11px] font-mono text-slate-300 hover:text-white hover:bg-slate-800 flex items-center gap-1 cursor-pointer"
+                    title={
+                      textBoxWindowState === 'minimized'
+                        ? 'Restaurar janela de texto'
+                        : 'Minimizar janela de texto para ver o circuito atrás'
+                    }
                   >
-                    + {note}
+                    <Minus className="w-3 h-3 text-amber-400" />
+                    <span className="hidden sm:inline">
+                      {textBoxWindowState === 'minimized'
+                        ? 'Restaurar'
+                        : 'Minimizar'}
+                    </span>
                   </button>
-                ))}
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setTextBoxWindowState((prev) =>
+                        prev === 'maximized' ? 'normal' : 'maximized'
+                      )
+                    }
+                    className="px-1.5 py-0.5 rounded text-[11px] font-mono text-slate-300 hover:text-white hover:bg-sky-500/20 flex items-center gap-1 cursor-pointer"
+                    title={
+                      textBoxWindowState === 'maximized'
+                        ? 'Restaurar tamanho padrão'
+                        : 'Maximizar caixa de edição de texto'
+                    }
+                  >
+                    {textBoxWindowState === 'maximized' ? (
+                      <>
+                        <Minimize2 className="w-3 h-3 text-sky-400" />
+                        <span className="hidden sm:inline">Restaurar</span>
+                      </>
+                    ) : (
+                      <>
+                        <Maximize2 className="w-3 h-3 text-sky-400" />
+                        <span className="hidden sm:inline">Maximizar</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingTextShapeId(null);
+                      setPendingTextPoint(null);
+                      setPendingTextValue('');
+                      setTextBoxWindowState('normal');
+                    }}
+                    className="px-1.5 py-0.5 rounded text-[11px] font-mono text-slate-300 hover:text-white hover:bg-rose-600/35 flex items-center gap-1 cursor-pointer"
+                    title="Fechar caixa de texto (ESC)"
+                  >
+                    <X className="w-3 h-3 text-rose-400" />
+                    <span className="hidden sm:inline">Fechar</span>
+                  </button>
+                </div>
               </div>
 
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  handleConfirmTextAnnotation();
-                }}
-                className="flex items-center gap-2"
-              >
-                <input
-                  type="text"
-                  autoFocus
-                  value={pendingTextValue}
-                  onChange={(e) => setPendingTextValue(e.target.value)}
-                  placeholder="Digite sua anotação técnica (ex: Medir 125Vcc no borne X3:56)..."
-                  className="flex-1 bg-[#090D16] border border-slate-700 focus:border-amber-400 rounded-lg px-3 py-1.5 text-xs font-mono text-white focus:outline-none"
-                />
-                <button
-                  type="submit"
-                  disabled={!pendingTextValue.trim()}
-                  className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-slate-950 font-mono font-bold text-xs cursor-pointer shrink-0"
-                >
-                  Fixar Nota
-                </button>
-              </form>
+              {textBoxWindowState !== 'minimized' && (
+                <>
+                  {/* Quick field note chips */}
+                  <div className="flex flex-wrap gap-1">
+                    {QUICK_PDF_TEXT_NOTES.map((note) => (
+                      <button
+                        key={note}
+                        type="button"
+                        onClick={() => handleConfirmTextAnnotation(note)}
+                        className="px-2 py-1 rounded bg-slate-800/90 hover:bg-sky-500/20 border border-slate-700 hover:border-sky-500/50 text-[11px] font-mono text-slate-200 hover:text-sky-200 transition-colors cursor-pointer"
+                        title="Clique para inserir esta nota imediatamente"
+                      >
+                        + {note}
+                      </button>
+                    ))}
+                  </div>
+
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      handleConfirmTextAnnotation();
+                    }}
+                    className="flex items-center gap-2"
+                  >
+                    <input
+                      type="text"
+                      autoFocus
+                      value={pendingTextValue}
+                      onChange={(e) => setPendingTextValue(e.target.value)}
+                      placeholder="Digite sua anotação técnica (ex: Medir 125Vcc no borne X3:56)..."
+                      className="flex-1 bg-[#090D16] border border-slate-700 focus:border-amber-400 rounded-lg px-3 py-1.5 text-xs font-mono text-white focus:outline-none"
+                    />
+                    <button
+                      type="submit"
+                      disabled={!pendingTextValue.trim()}
+                      className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-slate-950 font-mono font-bold text-xs cursor-pointer shrink-0"
+                    >
+                      {editingTextShapeId ? 'Salvar Nota' : 'Fixar Nota'}
+                    </button>
+                  </form>
+                </>
+              )}
             </div>
           )}
 
@@ -1653,18 +2549,22 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                 onDoubleClick={handleViewportDoubleClick}
                 style={{
                   cursor:
-                    interactionMode !== 'pan'
-                      ? 'crosshair'
-                      : isDragging
-                        ? 'grabbing'
-                        : 'grab',
+                    isDraggingShape || hoveredShapeId
+                      ? 'move'
+                      : interactionMode !== 'pan'
+                        ? 'crosshair'
+                        : isDragging
+                          ? 'grabbing'
+                          : 'grab',
                 }}
                 className={`flex-1 flex flex-col min-h-0 rounded-lg overflow-hidden border border-slate-800 bg-[#050912] relative select-none ${
-                  interactionMode !== 'pan'
-                    ? 'cursor-crosshair'
-                    : isDragging
-                      ? 'cursor-grabbing'
-                      : 'cursor-grab'
+                  isDraggingShape || hoveredShapeId
+                    ? 'cursor-move'
+                    : interactionMode !== 'pan'
+                      ? 'cursor-crosshair'
+                      : isDragging
+                        ? 'cursor-grabbing'
+                        : 'cursor-grab'
                 }`}
               >
                 {/* Transformed Pan + Zoom Layer */}
@@ -1952,13 +2852,33 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       {isFieldPrintModalOpen && (
         <div
           data-no-pan="true"
-          className="fixed inset-0 z-[60] bg-black/85 flex items-center justify-center p-3 sm:p-6 no-print-when-sheet"
+          className={
+            printModalWindowState === 'minimized'
+              ? 'fixed bottom-4 left-4 z-[60] no-print-when-sheet'
+              : printModalWindowState === 'maximized'
+                ? 'fixed inset-0 z-[60] bg-black/90 flex items-center justify-center no-print-when-sheet'
+                : 'fixed inset-0 z-[60] bg-black/85 flex items-center justify-center p-3 sm:p-6 no-print-when-sheet'
+          }
         >
-          <div className="w-full max-w-4xl max-h-[92vh] bg-[#0B111E] border border-slate-700 rounded-xl shadow-2xl flex flex-col overflow-hidden">
+          <div
+            className={
+              printModalWindowState === 'minimized'
+                ? 'bg-[#111827] border-2 border-emerald-500/70 rounded-xl shadow-2xl px-4 py-2.5 flex items-center gap-3'
+                : printModalWindowState === 'maximized'
+                  ? 'w-screen h-screen bg-[#0B111E] flex flex-col overflow-hidden'
+                  : 'w-full max-w-4xl max-h-[92vh] bg-[#0B111E] border border-slate-700 rounded-xl shadow-2xl flex flex-col overflow-hidden'
+            }
+          >
             {/* Modal Header */}
-            <div className="px-4 py-3 bg-[#111827] border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
+            <div
+              className={
+                printModalWindowState === 'minimized'
+                  ? 'flex items-center justify-between gap-4'
+                  : 'px-4 py-3 bg-[#111827] border-b border-slate-800 flex flex-wrap items-center justify-between gap-3'
+              }
+            >
               <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg bg-emerald-500/15 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
+                <div className="w-8 h-8 rounded-lg bg-emerald-500/15 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shrink-0">
                   <Printer className="w-4 h-4" />
                 </div>
                 <div>
@@ -1966,88 +2886,157 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                     Print de Campo — Folha Modificada com Anotações (Pág.{' '}
                     {currentPage})
                   </h4>
-                  <p className="text-[11px] text-slate-400">
-                    Suas marcações ({currentPageShapes.length}) ficam salvas
-                    automaticamente nesta folha e já estão gravadas no Print e
-                    no PDF abaixo.
-                  </p>
+                  {printModalWindowState !== 'minimized' && (
+                    <p className="text-[11px] text-slate-400">
+                      Suas marcações ({currentPageShapes.length}) ficam salvas
+                      automaticamente nesta folha e já estão gravadas no Print e
+                      no PDF abaixo.
+                    </p>
+                  )}
                 </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handlePrintAnnotatedSheetNow}
-                  className="px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-mono font-semibold flex items-center gap-1.5 cursor-pointer shadow"
-                  title="Abrir janela de impressão da folha com todas as anotações para levar ao campo"
-                >
-                  <Printer className="w-3.5 h-3.5" />
-                  <span>Imprimir p/ Campo Agora</span>
-                </button>
+                {printModalWindowState !== 'minimized' && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handlePrintAnnotatedSheetNow}
+                      className="px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-mono font-semibold flex items-center gap-1.5 cursor-pointer shadow"
+                      title="Abrir janela de impressão da folha com todas as anotações para levar ao campo"
+                    >
+                      <Printer className="w-3.5 h-3.5" />
+                      <span>Imprimir p/ Campo Agora</span>
+                    </button>
 
-                {(annotatedPdfBlobUrl || blobUrl) && (
-                  <a
-                    href={annotatedPdfBlobUrl || blobUrl || '#'}
-                    download={`${cleanDocBaseName}_Folha_${currentPage}_Anotada_Campo.pdf`}
-                    className="px-3 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 text-white text-xs font-mono font-semibold flex items-center gap-1.5 cursor-pointer shadow"
-                    title="Baixar arquivo PDF modificado contendo a folha e todas as anotações desenhadas"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>Baixar PDF Modificado (.pdf)</span>
-                  </a>
+                    {(annotatedPdfBlobUrl || blobUrl) && (
+                      <a
+                        href={annotatedPdfBlobUrl || blobUrl || '#'}
+                        download={`${cleanDocBaseName}_Folha_${currentPage}_Anotada_Campo.pdf`}
+                        className="px-3 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 text-white text-xs font-mono font-semibold flex items-center gap-1.5 cursor-pointer shadow"
+                        title="Baixar arquivo PDF modificado contendo a folha e todas as anotações desenhadas"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>Baixar PDF Modificado (.pdf)</span>
+                      </a>
+                    )}
+
+                    {annotatedPrintDataUrl && (
+                      <a
+                        href={annotatedPrintDataUrl}
+                        download={`${cleanDocBaseName}_Folha_${currentPage}_Print_Campo.png`}
+                        className="px-3 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-100 text-xs font-mono flex items-center gap-1.5 cursor-pointer"
+                        title="Baixar imagem PNG em alta resolução com carimbo técnico e anotações"
+                      >
+                        <Download className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Baixar Imagem Print (.png)</span>
+                      </a>
+                    )}
+                  </>
                 )}
 
-                {annotatedPrintDataUrl && (
-                  <a
-                    href={annotatedPrintDataUrl}
-                    download={`${cleanDocBaseName}_Folha_${currentPage}_Print_Campo.png`}
-                    className="px-3 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-100 text-xs font-mono flex items-center gap-1.5 cursor-pointer"
-                    title="Baixar imagem PNG em alta resolução com carimbo técnico e anotações"
+                {/* Window Controls for Print Modal: Minimizar, Maximizar/Restaurar, Fechar */}
+                <div className="flex items-center gap-1 bg-[#0B111E] border border-slate-700 rounded-lg p-1">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setPrintModalWindowState((prev) =>
+                        prev === 'minimized' ? 'normal' : 'minimized'
+                      )
+                    }
+                    className="px-2 py-1 rounded text-xs font-mono text-slate-300 hover:text-white hover:bg-slate-800 flex items-center gap-1 cursor-pointer"
+                    title={
+                      printModalWindowState === 'minimized'
+                        ? 'Restaurar janela de Print'
+                        : 'Minimizar janela de Print'
+                    }
                   >
-                    <Download className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Baixar Imagem Print (.png)</span>
-                  </a>
-                )}
+                    <Minus className="w-3.5 h-3.5 text-amber-400" />
+                    <span className="hidden sm:inline">
+                      {printModalWindowState === 'minimized'
+                        ? 'Restaurar'
+                        : 'Minimizar'}
+                    </span>
+                  </button>
 
-                <button
-                  type="button"
-                  onClick={() => setIsFieldPrintModalOpen(false)}
-                  className="p-1.5 rounded-md bg-slate-800 hover:bg-rose-600/30 border border-slate-700 text-slate-300 hover:text-white cursor-pointer"
-                  title="Fechar visualização (ESC)"
-                >
-                  <X className="w-4 h-4" />
-                </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setPrintModalWindowState((prev) =>
+                        prev === 'maximized' ? 'normal' : 'maximized'
+                      )
+                    }
+                    className="px-2 py-1 rounded text-xs font-mono text-slate-300 hover:text-white hover:bg-sky-500/20 flex items-center gap-1 cursor-pointer"
+                    title={
+                      printModalWindowState === 'maximized'
+                        ? 'Restaurar tamanho normal'
+                        : 'Maximizar visualização em Tela Cheia'
+                    }
+                  >
+                    {printModalWindowState === 'maximized' ? (
+                      <>
+                        <Minimize2 className="w-3.5 h-3.5 text-sky-400" />
+                        <span className="hidden sm:inline">Restaurar</span>
+                      </>
+                    ) : (
+                      <>
+                        <Maximize2 className="w-3.5 h-3.5 text-sky-400" />
+                        <span className="hidden sm:inline">Maximizar</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsFieldPrintModalOpen(false);
+                      setPrintModalWindowState('normal');
+                    }}
+                    className="px-2 py-1 rounded text-xs font-mono text-slate-300 hover:text-white hover:bg-rose-600/35 flex items-center gap-1 cursor-pointer"
+                    title="Fechar visualização (ESC)"
+                  >
+                    <X className="w-3.5 h-3.5 text-rose-400" />
+                    <span className="hidden sm:inline">Fechar</span>
+                  </button>
+                </div>
               </div>
             </div>
 
             {/* Preview Body */}
-            <div className="flex-1 overflow-y-auto p-4 bg-[#060A12] flex flex-col items-center justify-center">
-              {isGeneratingFieldPrint ? (
-                <div className="py-16 flex flex-col items-center gap-3 text-slate-300">
-                  <Loader2 className="w-7 h-7 text-emerald-400 animate-spin" />
-                  <p className="text-xs font-mono">
-                    Gerando folha de alta resolução com as anotações gravadas...
+            {printModalWindowState !== 'minimized' && (
+              <div className="flex-1 overflow-y-auto p-4 bg-[#060A12] flex flex-col items-center justify-center">
+                {isGeneratingFieldPrint ? (
+                  <div className="py-16 flex flex-col items-center gap-3 text-slate-300">
+                    <Loader2 className="w-7 h-7 text-emerald-400 animate-spin" />
+                    <p className="text-xs font-mono">
+                      Gerando folha de alta resolução com as anotações
+                      gravadas...
+                    </p>
+                  </div>
+                ) : annotatedPrintDataUrl ? (
+                  <div className="w-full flex flex-col items-center gap-3">
+                    <img
+                      src={annotatedPrintDataUrl}
+                      alt={`Print de Campo - Página ${currentPage}`}
+                      className={`max-w-full ${
+                        printModalWindowState === 'maximized'
+                          ? 'max-h-[82vh]'
+                          : 'max-h-[70vh]'
+                      } object-contain rounded-lg border border-slate-700 shadow-2xl bg-white`}
+                    />
+                    <p className="text-[11px] font-mono text-slate-400 text-center">
+                      Acima está o print exato com cabeçalho técnico de campo e
+                      todas as marcações (círculos, setas e caixas de texto)
+                      incorporadas na imagem e no PDF.
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-xs font-mono text-slate-400 py-12">
+                    Nenhuma visualização disponível para esta folha.
                   </p>
-                </div>
-              ) : annotatedPrintDataUrl ? (
-                <div className="w-full flex flex-col items-center gap-3">
-                  <img
-                    src={annotatedPrintDataUrl}
-                    alt={`Print de Campo - Página ${currentPage}`}
-                    className="max-w-full max-h-[70vh] object-contain rounded-lg border border-slate-700 shadow-2xl bg-white"
-                  />
-                  <p className="text-[11px] font-mono text-slate-400 text-center">
-                    Acima está o print exato com cabeçalho técnico de campo e
-                    todas as marcações (círculos, setas e caixas de texto)
-                    incorporadas na imagem e no PDF.
-                  </p>
-                </div>
-              ) : (
-                <p className="text-xs font-mono text-slate-400 py-12">
-                  Nenhuma visualização disponível para esta folha.
-                </p>
-              )}
-            </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
