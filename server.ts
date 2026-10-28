@@ -2358,6 +2358,18 @@ Sistema especialista multimodal desenvolvido para engenharia de manutenção, pr
     }
   });
 
+  app.get('/sw.js', (_req, res) => {
+    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+    const swPath = path.join(__dirname, 'public', 'sw.js');
+    if (fs.existsSync(swPath)) {
+      return res.sendFile(swPath);
+    }
+    return res.send(
+      "self.addEventListener('install', () => self.skipWaiting()); self.addEventListener('activate', (e) => e.waitUntil(caches.keys().then((ks) => Promise.all(ks.map((k) => caches.delete(k)))).then(() => self.clients.claim())));"
+    );
+  });
+
   // ============================================================================
   // 7. COMPLETE SOURCE CODE BACKUP & ZIP DOWNLOAD (/api/backup/*)
   // ============================================================================
@@ -2373,6 +2385,7 @@ Sistema especialista multimodal desenvolvido para engenharia de manutenção, pr
     '.gitignore',
     'supabase_hydrodiag_schema.sql',
     'public/icon.svg',
+    'public/sw.js',
     'server.ts',
     'src/main.tsx',
     'src/index.css',

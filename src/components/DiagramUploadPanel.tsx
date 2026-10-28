@@ -10,6 +10,9 @@ import {
   X,
   ArrowRightCircle,
   Camera,
+  Minus,
+  Maximize2,
+  Minimize2,
 } from 'lucide-react';
 import { DiagramAttachment, DiagramCategoryTag } from '../types';
 
@@ -69,6 +72,9 @@ export const DiagramUploadPanel: React.FC<DiagramUploadPanelProps> = ({
   const [seqNote, setSeqNote] = useState('');
   const [previewAttachment, setPreviewAttachment] =
     useState<DiagramAttachment | null>(null);
+  const [previewWindowState, setPreviewWindowState] = useState<
+    'normal' | 'maximized' | 'minimized'
+  >('normal');
 
   useEffect(() => {
     if (!sequenceModalOpen && !previewAttachment) return;
@@ -488,42 +494,113 @@ export const DiagramUploadPanel: React.FC<DiagramUploadPanelProps> = ({
 
       {/* Preview Modal for Inspecting Uploaded Diagram/Photo */}
       {previewAttachment && (
-        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
-          <div className="bg-[#111827] border border-slate-700 rounded-lg max-w-4xl w-full max-h-[90vh] flex flex-col overflow-hidden">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800">
-              <div className="flex items-center gap-2 text-xs text-slate-200 font-mono">
+        <div
+          className={
+            previewWindowState === 'minimized'
+              ? 'fixed bottom-4 left-4 z-50'
+              : previewWindowState === 'maximized'
+                ? 'fixed inset-0 w-screen h-screen z-50 bg-[#0B111E] flex items-stretch justify-stretch'
+                : 'fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4'
+          }
+        >
+          <div
+            className={
+              previewWindowState === 'minimized'
+                ? 'bg-[#111827] border-2 border-sky-500/70 rounded-xl shadow-2xl px-4 py-2.5 flex items-center gap-3'
+                : previewWindowState === 'maximized'
+                  ? 'bg-[#111827] w-screen h-screen flex flex-col overflow-hidden'
+                  : 'bg-[#111827] border border-slate-700 rounded-lg max-w-5xl w-full h-[88vh] flex flex-col overflow-hidden shadow-2xl'
+            }
+          >
+            <div
+              onDoubleClick={() =>
+                setPreviewWindowState((prev) =>
+                  prev === 'maximized' ? 'normal' : 'maximized'
+                )
+              }
+              className="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-slate-800 select-none"
+            >
+              <div className="flex items-center gap-2 text-xs text-slate-200 font-mono truncate">
                 <span>Sequência #{previewAttachment.sequenceIndex}</span>
                 <span>·</span>
                 <span>{previewAttachment.categoryTag}</span>
                 <span>·</span>
-                <span className="font-sans font-semibold">
+                <span className="font-sans font-semibold truncate">
                   {previewAttachment.name}
                 </span>
               </div>
-              <button
-                type="button"
-                onClick={() => setPreviewAttachment(null)}
-                className="p-1 text-slate-400 hover:text-slate-100 cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-1 bg-[#0B111E] border border-slate-700 rounded-lg p-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setPreviewWindowState((prev) =>
+                      prev === 'minimized' ? 'normal' : 'minimized'
+                    )
+                  }
+                  className="px-2 py-1 text-xs font-mono text-slate-200 hover:text-white hover:bg-slate-800 rounded flex items-center gap-1 cursor-pointer"
+                  title="Minimizar janela"
+                >
+                  <Minus className="w-3.5 h-3.5 text-amber-400" />
+                  <span>
+                    {previewWindowState === 'minimized'
+                      ? 'Restaurar'
+                      : 'Minimizar'}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setPreviewWindowState((prev) =>
+                      prev === 'maximized' ? 'normal' : 'maximized'
+                    )
+                  }
+                  className="px-2 py-1 text-xs font-mono font-semibold text-sky-200 bg-sky-600/20 hover:bg-sky-500/30 border border-sky-500/40 rounded flex items-center gap-1 cursor-pointer"
+                  title="Maximizar ou Restaurar janela"
+                >
+                  {previewWindowState === 'maximized' ? (
+                    <>
+                      <Minimize2 className="w-3.5 h-3.5 text-sky-300" />
+                      <span>Restaurar</span>
+                    </>
+                  ) : (
+                    <>
+                      <Maximize2 className="w-3.5 h-3.5 text-sky-300" />
+                      <span>Maximizar</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPreviewAttachment(null);
+                    setPreviewWindowState('normal');
+                  }}
+                  className="px-2 py-1 text-xs font-mono text-slate-200 hover:text-white hover:bg-rose-600/35 rounded flex items-center gap-1 cursor-pointer"
+                  title="Fechar janela"
+                >
+                  <X className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Fechar</span>
+                </button>
+              </div>
             </div>
-            <div className="flex-1 bg-[#0B111E] p-4 overflow-auto flex items-center justify-center min-h-[420px]">
-              {previewAttachment.mimeType === 'application/pdf' ? (
-                <iframe
-                  title={previewAttachment.name}
-                  src={`data:application/pdf;base64,${previewAttachment.base64Data}`}
-                  className="w-full h-[70vh] rounded border border-slate-800"
-                />
-              ) : (
-                <img
-                  src={`data:${previewAttachment.mimeType};base64,${previewAttachment.base64Data}`}
-                  alt={previewAttachment.name}
-                  referrerPolicy="no-referrer"
-                  className="max-h-[70vh] max-w-full object-contain rounded border border-slate-800"
-                />
-              )}
-            </div>
+            {previewWindowState !== 'minimized' && (
+              <div className="flex-1 min-h-0 bg-[#0B111E] p-2 sm:p-3 overflow-auto flex items-center justify-center">
+                {previewAttachment.mimeType === 'application/pdf' ? (
+                  <iframe
+                    title={previewAttachment.name}
+                    src={`data:application/pdf;base64,${previewAttachment.base64Data}`}
+                    className="w-full h-full flex-1 rounded border border-slate-800"
+                  />
+                ) : (
+                  <img
+                    src={`data:${previewAttachment.mimeType};base64,${previewAttachment.base64Data}`}
+                    alt={previewAttachment.name}
+                    referrerPolicy="no-referrer"
+                    className="max-h-full max-w-full object-contain rounded border border-slate-800"
+                  />
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}

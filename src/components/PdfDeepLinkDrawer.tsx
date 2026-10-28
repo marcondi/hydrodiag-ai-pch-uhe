@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { PDFDocument } from 'pdf-lib';
 import {
   FileText,
@@ -54,6 +55,17 @@ interface ShapeHitResult {
   mode: ShapeDragMode;
 }
 
+let sharedMeasureCanvas: HTMLCanvasElement | null = null;
+function getSharedMeasureCtx(): CanvasRenderingContext2D | null {
+  if (typeof document === 'undefined') return null;
+  if (!sharedMeasureCanvas) {
+    sharedMeasureCanvas = document.createElement('canvas');
+    sharedMeasureCanvas.width = 1200;
+    sharedMeasureCanvas.height = 900;
+  }
+  return sharedMeasureCanvas.getContext('2d');
+}
+
 function distToSegment(
   px: number,
   py: number,
@@ -72,19 +84,18 @@ function distToSegment(
 }
 
 function getTextAnnotationBoxMetrics(
-  ctx: CanvasRenderingContext2D,
+  ctx: CanvasRenderingContext2D | null,
   shape: PhotoAnnotationShape,
   width: number,
   height: number
 ) {
+  const activeCtx = ctx || getSharedMeasureCtx();
   const first = shape.points[0] || { x: 0.5, y: 0.5 };
   const x1 = first.x * width;
   const y1 = first.y * height;
   const rawText = (shape.text || '').trim() || 'Nota';
   const fontSize = Math.max(13, Math.round(Math.min(width, height) * 0.0175));
 
-  ctx.save();
-  ctx.font = `bold ${fontSize}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace`;
   const words = rawText.split(/\s+/);
   const lines: string[] = [];
   let currentLine = '';
@@ -104,11 +115,20 @@ function getTextAnnotationBoxMetrics(
   const lineHeight = Math.round(fontSize * 1.28);
 
   let maxTextWidth = 0;
-  for (const line of lines) {
-    const m = ctx.measureText(line);
-    if (m.width > maxTextWidth) maxTextWidth = m.width;
+  if (activeCtx) {
+    activeCtx.save();
+    activeCtx.font = `bold ${fontSize}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace`;
+    for (const line of lines) {
+      const m = activeCtx.measureText(line);
+      if (m.width > maxTextWidth) maxTextWidth = m.width;
+    }
+    activeCtx.restore();
+  } else {
+    for (const line of lines) {
+      const approx = line.length * fontSize * 0.62;
+      if (approx > maxTextWidth) maxTextWidth = approx;
+    }
   }
-  ctx.restore();
 
   const boxW = maxTextWidth + padX * 2;
   const boxH = lines.length * lineHeight + padY * 2;
@@ -122,7 +142,7 @@ function getTextAnnotationBoxMetrics(
 }
 
 function hitTestAnnotationShapes(
-  ctx: CanvasRenderingContext2D,
+  ctx: CanvasRenderingContext2D | null,
   shapes: PhotoAnnotationShape[],
   normX: number,
   normY: number,
@@ -142,17 +162,17 @@ function hitTestAnnotationShapes(
       const x2 = sel.points[sel.points.length - 1].x * width;
       const y2 = sel.points[sel.points.length - 1].y * height;
 
-      if (sel.tool === 'arrow' && Math.hypot(x2 - x1, y2 - y1) > 42) {
-        if (Math.hypot(px - x1, py - y1) <= 12) {
+      if (sel.tool === 'arrow' && Math.hypot(x2 - x1, y2 - y1) > 36) {
+        if (Math.hypot(px - x1, py - y1) <= 20) {
           return { shape: sel, mode: 'p0' };
         }
-        if (Math.hypot(px - x2, py - y2) <= 12) {
+        if (Math.hypot(px - x2, py - y2) <= 20) {
           return { shape: sel, mode: 'p1' };
         }
       } else if (sel.tool === 'circle') {
         const brX = Math.max(x1, x2);
         const brY = Math.max(y1, y2);
-        if (Math.hypot(px - brX, py - brY) <= 14) {
+        if (Math.hypot(px - brX, py - brY) <= 22) {
           return { shape: sel, mode: 'resize-br' };
         }
       }
@@ -172,13 +192,13 @@ function hitTestAnnotationShapes(
         height
       );
       const inBox =
-        px >= boxX - 8 &&
-        px <= boxX + boxW + 8 &&
-        py >= boxY - 8 &&
-        py <= boxY + boxH + 8;
-      const nearPin = Math.hypot(px - x1, py - y1) <= 16;
+        px >= boxX - 14 &&
+        px <= boxX + boxW + 14 &&
+        py >= boxY - 14 &&
+        py <= boxY + boxH + 14;
+      const nearPin = Math.hypot(px - x1, py - y1) <= 22;
       const nearConnector =
-        distToSegment(px, py, x1, y1, boxX, boxY + boxH / 2) <= 10;
+        distToSegment(px, py, x1, y1, boxX, boxY + boxH / 2) <= 16;
       if (inBox || nearPin || nearConnector) {
         return { shape: s, mode: 'move' };
       }
@@ -189,7 +209,8 @@ function hitTestAnnotationShapes(
       const y2 = s.points[s.points.length - 1].y * height;
       const segDist = distToSegment(px, py, x1, y1, x2, y2);
       const headDist = Math.hypot(px - x2, py - y2);
-      if (segDist <= 18 || headDist <= 22) {
+      const tailDist = Math.hypot(px - x1, py - y1);
+      if (segDist <= 26 || headDist <= 28 || tailDist <= 24) {
         return { shape: s, mode: 'move' };
       }
     } else if (s.tool === 'circle' && s.points.length >= 2) {
@@ -201,19 +222,23 @@ function hitTestAnnotationShapes(
       const cy = (y1 + y2) / 2;
       const rx = Math.max(8, Math.abs(x2 - x1) / 2);
       const ry = Math.max(8, Math.abs(y2 - y1) / 2);
-      const normDist = Math.hypot(
-        (px - cx) / Math.max(1, rx),
-        (py - cy) / Math.max(1, ry)
+      const outerNorm = Math.hypot(
+        (px - cx) / Math.max(1, rx + 24),
+        (py - cy) / Math.max(1, ry + 24)
       );
-      const avgR = (rx + ry) / 2;
-      const approxPxDistFromRing = Math.abs(normDist - 1) * avgR;
-      if (approxPxDistFromRing <= 18) {
+      const innerRx = Math.max(0, rx - 24);
+      const innerRy = Math.max(0, ry - 24);
+      const innerNorm =
+        innerRx > 4 && innerRy > 4
+          ? Math.hypot((px - cx) / innerRx, (py - cy) / innerRy)
+          : 999;
+      if (outerNorm <= 1.08 && innerNorm >= 0.85) {
         return { shape: s, mode: 'move' };
       }
     }
   }
 
-  // 2. Pass 2: Check inside circle interior so user can grab anywhere inside a circle to move it
+  // 2. Pass 2: Check inside circle interior or bounding box so user can grab anywhere on/inside a circle to move it
   for (let i = shapes.length - 1; i >= 0; i--) {
     const s = shapes[i];
     if (s.tool === 'circle' && s.points.length >= 2) {
@@ -221,15 +246,11 @@ function hitTestAnnotationShapes(
       const y1 = s.points[0].y * height;
       const x2 = s.points[s.points.length - 1].x * width;
       const y2 = s.points[s.points.length - 1].y * height;
-      const cx = (x1 + x2) / 2;
-      const cy = (y1 + y2) / 2;
-      const rx = Math.max(8, Math.abs(x2 - x1) / 2);
-      const ry = Math.max(8, Math.abs(y2 - y1) / 2);
-      const normDist = Math.hypot(
-        (px - cx) / Math.max(1, rx),
-        (py - cy) / Math.max(1, ry)
-      );
-      if (normDist <= 1.05) {
+      const minX = Math.min(x1, x2) - 18;
+      const maxX = Math.max(x1, x2) + 18;
+      const minY = Math.min(y1, y2) - 18;
+      const maxY = Math.max(y1, y2) + 18;
+      if (px >= minX && px <= maxX && py >= minY && py <= maxY) {
         return { shape: s, mode: 'move' };
       }
     }
@@ -247,7 +268,7 @@ function drawShapeSelectionHighlightOnCtx(
 ) {
   if (shape.points.length < 1) return;
   ctx.save();
-  ctx.strokeStyle = isSelected ? '#38BDF8' : 'rgba(56, 189, 248, 0.75)';
+  ctx.strokeStyle = isSelected ? '#38BDF8' : 'rgba(56, 189, 248, 0.85)';
   ctx.lineWidth = isSelected ? 2.5 : 2;
   ctx.setLineDash([6, 5]);
 
@@ -289,7 +310,7 @@ function drawShapeSelectionHighlightOnCtx(
       ctx.strokeStyle = '#FFFFFF';
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(Math.max(x1, x2), Math.max(y1, y2), 6.5, 0, Math.PI * 2);
+      ctx.arc(Math.max(x1, x2), Math.max(y1, y2), 7, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
     }
@@ -314,7 +335,7 @@ function drawShapeSelectionHighlightOnCtx(
         { x: x2, y: y2 },
       ]) {
         ctx.beginPath();
-        ctx.arc(pt.x, pt.y, 6, 0, Math.PI * 2);
+        ctx.arc(pt.x, pt.y, 6.5, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
       }
@@ -334,8 +355,8 @@ function sanitizeShapesList(
       if (s.points.length < 2) return false;
       const p0 = s.points[0];
       const p1 = s.points[s.points.length - 1];
-      // Filter out accidental 0-size single-click dots
-      if (Math.hypot(p1.x - p0.x, p1.y - p0.y) < 0.008) return false;
+      // Filter out accidental tiny single-click / micro-drag dots
+      if (Math.hypot(p1.x - p0.x, p1.y - p0.y) < 0.022) return false;
     }
     return true;
   });
@@ -496,7 +517,27 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     useState<boolean>(false);
   const [windowState, setWindowState] = useState<
     'normal' | 'maximized' | 'minimized'
-  >('normal');
+  >(() => {
+    try {
+      const saved = localStorage.getItem('hydrodiag_pdf_window_mode_v1');
+      if (saved === 'normal' || saved === 'maximized') return saved;
+    } catch {
+      // ignore
+    }
+    return 'maximized';
+  });
+  const [sheetFitMode, setSheetFitMode] = useState<'contain' | 'width'>(
+    'contain'
+  );
+  const [showIndexFooter, setShowIndexFooter] = useState<boolean>(false);
+  const [viewportSize, setViewportSize] = useState<{
+    width: number;
+    height: number;
+  }>({ width: 0, height: 0 });
+  const [imgNaturalSize, setImgNaturalSize] = useState<{
+    width: number;
+    height: number;
+  }>({ width: 1600, height: 1131 });
   const [textBoxWindowState, setTextBoxWindowState] = useState<
     'normal' | 'maximized' | 'minimized'
   >('normal');
@@ -588,6 +629,15 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
   // Canonical key by normalized filename + page so annotations persist even when opening deep-links across sessions
   const canonicalPageKey = `${activeAttachmentNameKey || activeAttachmentId}__p_${currentPage}`;
   const legacyPageKey = `${activeAttachmentId}_p_${currentPage}`;
+  const pageKeysRef = useRef<{ canonical: string; legacy: string }>({
+    canonical: canonicalPageKey,
+    legacy: legacyPageKey,
+  });
+  pageKeysRef.current = {
+    canonical: canonicalPageKey,
+    legacy: legacyPageKey,
+  };
+
   const currentPageShapes =
     sheetAnnotations[canonicalPageKey] ||
     sheetAnnotations[legacyPageKey] ||
@@ -599,14 +649,14 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
   const updateCurrentPageShapes = (
     updater: (prevList: PhotoAnnotationShape[]) => PhotoAnnotationShape[]
   ) => {
+    const { canonical, legacy } = pageKeysRef.current;
     setSheetAnnotations((prev) => {
-      const existing =
-        prev[canonicalPageKey] || prev[legacyPageKey] || [];
+      const existing = prev[canonical] || prev[legacy] || [];
       const updated = updater(existing);
       return {
         ...prev,
-        [canonicalPageKey]: updated,
-        [legacyPageKey]: updated,
+        [canonical]: updated,
+        [legacy]: updated,
       };
     });
   };
@@ -1059,6 +1109,62 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     }
   }, [isOpen, initialPage, initialAttachmentId]);
 
+  // Measure viewportRef dynamically so the PDF sheet scales to 100% of the Maximized or Normal window, and detect OS Window Maximize clicks
+  useEffect(() => {
+    if (!isOpen) return;
+
+    let lastWinW = window.innerWidth;
+    let lastWinH = window.innerHeight;
+
+    const updateViewportMetrics = () => {
+      const el = viewportRef.current;
+      if (el && el.clientWidth > 0 && el.clientHeight > 0) {
+        setViewportSize({
+          width: el.clientWidth,
+          height: el.clientHeight,
+        });
+      }
+    };
+
+    updateViewportMetrics();
+    const rafId = requestAnimationFrame(updateViewportMetrics);
+    const timerId = setTimeout(updateViewportMetrics, 60);
+
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined' && viewportRef.current) {
+      ro = new ResizeObserver(() => {
+        updateViewportMetrics();
+      });
+      ro.observe(viewportRef.current);
+    }
+
+    const handleOsWindowResize = () => {
+      const curW = window.innerWidth;
+      const curH = window.innerHeight;
+      const grewSignificantly =
+        curW - lastWinW > 80 || curH - lastWinH > 80;
+      const isNearFullMonitor =
+        typeof window.screen !== 'undefined' &&
+        curW >= window.screen.availWidth - 24 &&
+        curH >= window.screen.availHeight - 80;
+
+      if (grewSignificantly || (isNearFullMonitor && curW > lastWinW)) {
+        setWindowState((prev) => (prev === 'minimized' ? prev : 'maximized'));
+      }
+      lastWinW = curW;
+      lastWinH = curH;
+      updateViewportMetrics();
+    };
+
+    window.addEventListener('resize', handleOsWindowResize);
+    return () => {
+      cancelAnimationFrame(rafId);
+      clearTimeout(timerId);
+      if (ro) ro.disconnect();
+      window.removeEventListener('resize', handleOsWindowResize);
+    };
+  }, [isOpen, windowState, useNativeIframe, isLoadingPage, showIndexFooter]);
+
   // Check if any sibling attachment with the same filename already has base64Data
   const siblingWithBase64 = attachments.find(
     (a) =>
@@ -1237,6 +1343,196 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     }, 120);
   };
 
+  const applyActiveShapeDrag = (clientX: number, clientY: number) => {
+    const drag = draggingShapeRef.current;
+    const canvas = sheetCanvasRef.current;
+    if (!drag || !canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+
+    const normX = Math.min(
+      1,
+      Math.max(0, (clientX - rect.left) / rect.width)
+    );
+    const normY = Math.min(
+      1,
+      Math.max(0, (clientY - rect.top) / rect.height)
+    );
+    const rawDx = normX - drag.startNormX;
+    const rawDy = normY - drag.startNormY;
+
+    updateCurrentPageShapes((prevList) =>
+      prevList.map((s) => {
+        if (s.id !== drag.shapeId) return s;
+
+        if (drag.mode === 'move') {
+          const xs = drag.initialPoints.map((p) => p.x);
+          const ys = drag.initialPoints.map((p) => p.y);
+          const minX = Math.min(...xs);
+          const maxX = Math.max(...xs);
+          const minY = Math.min(...ys);
+          const maxY = Math.max(...ys);
+
+          const clampedDx = Math.min(1 - maxX, Math.max(-minX, rawDx));
+          const clampedDy = Math.min(1 - maxY, Math.max(-minY, rawDy));
+
+          return {
+            ...s,
+            points: drag.initialPoints.map((p) => ({
+              x: Number((p.x + clampedDx).toFixed(4)),
+              y: Number((p.y + clampedDy).toFixed(4)),
+            })),
+          };
+        }
+
+        if (drag.mode === 'p0' && drag.initialPoints.length >= 2) {
+          const p0 = drag.initialPoints[0];
+          const p1 = drag.initialPoints[drag.initialPoints.length - 1];
+          return {
+            ...s,
+            points: [
+              {
+                x: Number(Math.min(1, Math.max(0, p0.x + rawDx)).toFixed(4)),
+                y: Number(Math.min(1, Math.max(0, p0.y + rawDy)).toFixed(4)),
+              },
+              p1,
+            ],
+          };
+        }
+
+        if (drag.mode === 'p1' && drag.initialPoints.length >= 2) {
+          const p0 = drag.initialPoints[0];
+          const p1 = drag.initialPoints[drag.initialPoints.length - 1];
+          return {
+            ...s,
+            points: [
+              p0,
+              {
+                x: Number(Math.min(1, Math.max(0, p1.x + rawDx)).toFixed(4)),
+                y: Number(Math.min(1, Math.max(0, p1.y + rawDy)).toFixed(4)),
+              },
+            ],
+          };
+        }
+
+        if (drag.mode === 'resize-br' && drag.initialPoints.length >= 2) {
+          const x1 = Math.min(
+            drag.initialPoints[0].x,
+            drag.initialPoints[drag.initialPoints.length - 1].x
+          );
+          const y1 = Math.min(
+            drag.initialPoints[0].y,
+            drag.initialPoints[drag.initialPoints.length - 1].y
+          );
+          const x2 = Math.max(
+            drag.initialPoints[0].x,
+            drag.initialPoints[drag.initialPoints.length - 1].x
+          );
+          const y2 = Math.max(
+            drag.initialPoints[0].y,
+            drag.initialPoints[drag.initialPoints.length - 1].y
+          );
+          return {
+            ...s,
+            points: [
+              { x: x1, y: y1 },
+              {
+                x: Number(
+                  Math.min(1, Math.max(x1 + 0.015, x2 + rawDx)).toFixed(4)
+                ),
+                y: Number(
+                  Math.min(1, Math.max(y1 + 0.015, y2 + rawDy)).toFixed(4)
+                ),
+              },
+            ],
+          };
+        }
+
+        return s;
+      })
+    );
+  };
+
+  const startDraggingShapeAtClient = (
+    shape: PhotoAnnotationShape,
+    mode: ShapeDragMode,
+    clientX: number,
+    clientY: number
+  ) => {
+    const canvas = sheetCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+
+    const normX = Math.min(
+      1,
+      Math.max(0, (clientX - rect.left) / rect.width)
+    );
+    const normY = Math.min(
+      1,
+      Math.max(0, (clientY - rect.top) / rect.height)
+    );
+
+    setSelectedShapeId(shape.id);
+    setHoveredShapeId(shape.id);
+    setIsDraggingShape(true);
+    draggingShapeRef.current = {
+      shapeId: shape.id,
+      mode,
+      startNormX: normX,
+      startNormY: normY,
+      initialPoints: shape.points.map((p) => ({ ...p })),
+    };
+  };
+
+  // Global window listeners so dragging an annotation never drops even if cursor moves fast outside a handle
+  useEffect(() => {
+    if (!isDraggingShape) return;
+
+    const onWinMouseMove = (e: MouseEvent) => {
+      if (!draggingShapeRef.current) return;
+      if ((e.buttons & 1) === 0) {
+        draggingShapeRef.current = null;
+        setIsDraggingShape(false);
+        return;
+      }
+      e.preventDefault();
+      applyActiveShapeDrag(e.clientX, e.clientY);
+    };
+
+    const onWinMouseUp = () => {
+      if (draggingShapeRef.current) {
+        draggingShapeRef.current = null;
+        setIsDraggingShape(false);
+      }
+    };
+
+    const onWinTouchMove = (e: TouchEvent) => {
+      if (!draggingShapeRef.current || e.touches.length === 0) return;
+      e.preventDefault();
+      applyActiveShapeDrag(e.touches[0].clientX, e.touches[0].clientY);
+    };
+
+    const onWinTouchEnd = () => {
+      if (draggingShapeRef.current) {
+        draggingShapeRef.current = null;
+        setIsDraggingShape(false);
+      }
+    };
+
+    window.addEventListener('mousemove', onWinMouseMove, { passive: false });
+    window.addEventListener('mouseup', onWinMouseUp);
+    window.addEventListener('touchmove', onWinTouchMove, { passive: false });
+    window.addEventListener('touchend', onWinTouchEnd);
+
+    return () => {
+      window.removeEventListener('mousemove', onWinMouseMove);
+      window.removeEventListener('mouseup', onWinMouseUp);
+      window.removeEventListener('touchmove', onWinTouchMove);
+      window.removeEventListener('touchend', onWinTouchEnd);
+    };
+  }, [isDraggingShape]);
+
   const handleViewportMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0 || useNativeIframe) return;
     const targetEl = e.target as HTMLElement;
@@ -1263,7 +1559,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
         const ctx = canvas.getContext('2d');
 
         // 1. First check if the user clicked on ANY existing annotation (Circle, Arrow, or Text Box) to move/reposition it!
-        if (ctx && currentPageShapes.length > 0) {
+        if (currentPageShapes.length > 0) {
           const hit = hitTestAnnotationShapes(
             ctx,
             currentPageShapes,
@@ -1275,16 +1571,12 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
           );
           if (hit) {
             e.preventDefault();
-            setSelectedShapeId(hit.shape.id);
-            setHoveredShapeId(hit.shape.id);
-            setIsDraggingShape(true);
-            draggingShapeRef.current = {
-              shapeId: hit.shape.id,
-              mode: hit.mode,
-              startNormX: normX,
-              startNormY: normY,
-              initialPoints: hit.shape.points.map((p) => ({ ...p })),
-            };
+            startDraggingShapeAtClient(
+              hit.shape,
+              hit.mode,
+              e.clientX,
+              e.clientY
+            );
             return;
           }
         }
@@ -1339,113 +1631,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
         return;
       }
       e.preventDefault();
-      const rect = canvas.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) {
-        const normX = Math.min(
-          1,
-          Math.max(0, (e.clientX - rect.left) / rect.width)
-        );
-        const normY = Math.min(
-          1,
-          Math.max(0, (e.clientY - rect.top) / rect.height)
-        );
-        const drag = draggingShapeRef.current;
-        const rawDx = normX - drag.startNormX;
-        const rawDy = normY - drag.startNormY;
-
-        updateCurrentPageShapes((prevList) =>
-          prevList.map((s) => {
-            if (s.id !== drag.shapeId) return s;
-
-            if (drag.mode === 'move') {
-              const xs = drag.initialPoints.map((p) => p.x);
-              const ys = drag.initialPoints.map((p) => p.y);
-              const minX = Math.min(...xs);
-              const maxX = Math.max(...xs);
-              const minY = Math.min(...ys);
-              const maxY = Math.max(...ys);
-
-              const clampedDx = Math.min(
-                1 - maxX,
-                Math.max(-minX, rawDx)
-              );
-              const clampedDy = Math.min(
-                1 - maxY,
-                Math.max(-minY, rawDy)
-              );
-
-              return {
-                ...s,
-                points: drag.initialPoints.map((p) => ({
-                  x: Number((p.x + clampedDx).toFixed(4)),
-                  y: Number((p.y + clampedDy).toFixed(4)),
-                })),
-              };
-            }
-
-            if (drag.mode === 'p0' && drag.initialPoints.length >= 2) {
-              const p0 = drag.initialPoints[0];
-              const p1 = drag.initialPoints[drag.initialPoints.length - 1];
-              return {
-                ...s,
-                points: [
-                  {
-                    x: Math.min(1, Math.max(0, p0.x + rawDx)),
-                    y: Math.min(1, Math.max(0, p0.y + rawDy)),
-                  },
-                  p1,
-                ],
-              };
-            }
-
-            if (drag.mode === 'p1' && drag.initialPoints.length >= 2) {
-              const p0 = drag.initialPoints[0];
-              const p1 = drag.initialPoints[drag.initialPoints.length - 1];
-              return {
-                ...s,
-                points: [
-                  p0,
-                  {
-                    x: Math.min(1, Math.max(0, p1.x + rawDx)),
-                    y: Math.min(1, Math.max(0, p1.y + rawDy)),
-                  },
-                ],
-              };
-            }
-
-            if (drag.mode === 'resize-br' && drag.initialPoints.length >= 2) {
-              const x1 = Math.min(
-                drag.initialPoints[0].x,
-                drag.initialPoints[drag.initialPoints.length - 1].x
-              );
-              const y1 = Math.min(
-                drag.initialPoints[0].y,
-                drag.initialPoints[drag.initialPoints.length - 1].y
-              );
-              const x2 = Math.max(
-                drag.initialPoints[0].x,
-                drag.initialPoints[drag.initialPoints.length - 1].x
-              );
-              const y2 = Math.max(
-                drag.initialPoints[0].y,
-                drag.initialPoints[drag.initialPoints.length - 1].y
-              );
-              return {
-                ...s,
-                points: [
-                  { x: x1, y: y1 },
-                  {
-                    x: Math.min(1, Math.max(x1 + 0.015, x2 + rawDx)),
-                    y: Math.min(1, Math.max(y1 + 0.015, y2 + rawDy)),
-                  },
-                ],
-              };
-            }
-
-            return s;
-          })
-        );
-      }
+      applyActiveShapeDrag(e.clientX, e.clientY);
       return;
     }
 
@@ -1471,20 +1657,18 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
         const normY = (e.clientY - rect.top) / rect.height;
         if (normX >= 0 && normX <= 1 && normY >= 0 && normY <= 1) {
           const ctx = canvas.getContext('2d');
-          if (ctx) {
-            const hit = hitTestAnnotationShapes(
-              ctx,
-              currentPageShapes,
-              normX,
-              normY,
-              canvas.width,
-              canvas.height,
-              selectedShapeId
-            );
-            const nextHoverId = hit ? hit.shape.id : null;
-            if (nextHoverId !== hoveredShapeId) {
-              setHoveredShapeId(nextHoverId);
-            }
+          const hit = hitTestAnnotationShapes(
+            ctx,
+            currentPageShapes,
+            normX,
+            normY,
+            canvas.width,
+            canvas.height,
+            selectedShapeId
+          );
+          const nextHoverId = hit ? hit.shape.id : null;
+          if (nextHoverId !== hoveredShapeId) {
+            setHoveredShapeId(nextHoverId);
           }
         } else if (hoveredShapeId !== null) {
           setHoveredShapeId(null);
@@ -1516,8 +1700,8 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       const p0 = finishedShape.points[0];
       const p1 = finishedShape.points[finishedShape.points.length - 1];
       const dragDist = Math.hypot(p1.x - p0.x, p1.y - p0.y);
-      // Only commit circle/arrow if user actually dragged a visible distance (prevents accidental single-click dots)
-      if (dragDist >= 0.01) {
+      // Only commit circle/arrow if user actually dragged a meaningful distance (prevents accidental single-click micro-dots)
+      if (dragDist >= 0.022) {
         updateCurrentPageShapes((prev) => [...prev, finishedShape]);
         setSelectedShapeId(finishedShape.id);
       }
@@ -1590,14 +1774,426 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     ''
   );
 
-  return (
+  // Calculate exact pixel box for the PDF sheet so it fills 100% of the available viewport in both Normal and Maximized modes
+  const sheetDisplaySize = (() => {
+    const winW = typeof window !== 'undefined' ? window.innerWidth : 1440;
+    const winH = typeof window !== 'undefined' ? window.innerHeight : 900;
+    const fallbackW =
+      windowState === 'maximized'
+        ? winW - 24
+        : Math.min(winW * 0.92, 1152) - 32;
+    const fallbackH =
+      windowState === 'maximized'
+        ? winH - 115
+        : winH * 0.88 - 135;
+
+    const rawW = viewportSize.width > 100 ? viewportSize.width : fallbackW;
+    const rawH = viewportSize.height > 100 ? viewportSize.height : fallbackH;
+    const pad = windowState === 'maximized' ? 12 : 20;
+    const availW = Math.max(320, rawW - pad);
+    const availH = Math.max(240, rawH - pad);
+
+    const natW = Math.max(1, imgNaturalSize.width || 1600);
+    const natH = Math.max(1, imgNaturalSize.height || 1131);
+    const aspect = natW / natH;
+
+    if (sheetFitMode === 'width') {
+      return {
+        width: Math.round(availW),
+        height: Math.round(availW / aspect),
+      };
+    }
+
+    const scale = Math.min(availW / natW, availH / natH);
+    return {
+      width: Math.max(300, Math.round(natW * scale)),
+      height: Math.max(220, Math.round(natH * scale)),
+    };
+  })();
+
+  const renderInteractiveShapesOverlay = () => {
+    if (currentPageShapes.length === 0 || activeSheetShape !== null) {
+      return null;
+    }
+
+    return (
+      <div className="absolute inset-0 pointer-events-none z-30">
+        {currentPageShapes.map((s) => {
+          const isSelected = selectedShapeId === s.id;
+          const isHovered = hoveredShapeId === s.id;
+
+          if (s.tool === 'circle' && s.points.length >= 2) {
+            const p0 = s.points[0];
+            const p1 = s.points[s.points.length - 1];
+            const minX = Math.min(p0.x, p1.x);
+            const maxX = Math.max(p0.x, p1.x);
+            const minY = Math.min(p0.y, p1.y);
+            const maxY = Math.max(p0.y, p1.y);
+            const padNorm = 0.008;
+            const leftPct = Math.max(0, minX - padNorm) * 100;
+            const topPct = Math.max(0, minY - padNorm) * 100;
+            const widthPct =
+              (Math.min(1, maxX + padNorm) - Math.max(0, minX - padNorm)) * 100;
+            const heightPct =
+              (Math.min(1, maxY + padNorm) - Math.max(0, minY - padNorm)) * 100;
+
+            return (
+              <div
+                key={s.id}
+                data-shape-id={s.id}
+                data-shape-tool="circle"
+                data-drag-mode="move"
+                data-no-pan="true"
+                title="Clique e arraste para mover este círculo"
+                onMouseEnter={() => setHoveredShapeId(s.id)}
+                onMouseLeave={() => {
+                  if (!isDraggingShape) setHoveredShapeId(null);
+                }}
+                onMouseDown={(e) => {
+                  if (e.button !== 0) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  startDraggingShapeAtClient(s, 'move', e.clientX, e.clientY);
+                }}
+                onTouchStart={(e) => {
+                  if (e.touches.length === 0) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  startDraggingShapeAtClient(
+                    s,
+                    'move',
+                    e.touches[0].clientX,
+                    e.touches[0].clientY
+                  );
+                }}
+                style={{
+                  left: `${leftPct}%`,
+                  top: `${topPct}%`,
+                  width: `${Math.max(2, widthPct)}%`,
+                  height: `${Math.max(2, heightPct)}%`,
+                }}
+                className={`absolute pointer-events-auto cursor-move rounded transition-colors ${
+                  isSelected || isHovered
+                    ? 'ring-2 ring-sky-400/90 bg-sky-400/5'
+                    : 'hover:ring-2 hover:ring-sky-400/80'
+                }`}
+              >
+                {(isSelected || isHovered) && (
+                  <div className="absolute -top-6 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded bg-slate-900/95 border border-sky-400/80 text-[9px] font-mono font-bold text-sky-200 whitespace-nowrap flex items-center gap-1 shadow-lg pointer-events-auto cursor-move">
+                    <Move className="w-2.5 h-2.5 text-sky-400 shrink-0" />
+                    <span>Arrastar</span>
+                  </div>
+                )}
+                <div
+                  data-shape-id={s.id}
+                  data-drag-mode="resize-br"
+                  data-no-pan="true"
+                  title="Arraste para redimensionar o círculo"
+                  onMouseDown={(e) => {
+                    if (e.button !== 0) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    startDraggingShapeAtClient(
+                      s,
+                      'resize-br',
+                      e.clientX,
+                      e.clientY
+                    );
+                  }}
+                  onTouchStart={(e) => {
+                    if (e.touches.length === 0) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    startDraggingShapeAtClient(
+                      s,
+                      'resize-br',
+                      e.touches[0].clientX,
+                      e.touches[0].clientY
+                    );
+                  }}
+                  className={`absolute -bottom-2 -right-2 w-4 h-4 rounded-full bg-sky-500 border-2 border-white shadow cursor-nwse-resize pointer-events-auto ${
+                    isSelected || isHovered
+                      ? 'opacity-100 scale-100'
+                      : 'opacity-0 hover:opacity-100'
+                  }`}
+                />
+              </div>
+            );
+          }
+
+          if (s.tool === 'arrow' && s.points.length >= 2) {
+            const p0 = s.points[0];
+            const p1 = s.points[s.points.length - 1];
+            const midX = (p0.x + p1.x) / 2;
+            const midY = (p0.y + p1.y) / 2;
+
+            return (
+              <React.Fragment key={s.id}>
+                <svg
+                  className="absolute inset-0 w-full h-full pointer-events-none overflow-visible"
+                  viewBox="0 0 1000 1000"
+                  preserveAspectRatio="none"
+                >
+                  <line
+                    x1={p0.x * 1000}
+                    y1={p0.y * 1000}
+                    x2={p1.x * 1000}
+                    y2={p1.y * 1000}
+                    stroke="transparent"
+                    strokeWidth="36"
+                    strokeLinecap="round"
+                    data-shape-id={s.id}
+                    data-shape-tool="arrow"
+                    data-drag-mode="move"
+                    data-no-pan="true"
+                    style={{ pointerEvents: 'stroke', cursor: 'move' }}
+                    onMouseEnter={() => setHoveredShapeId(s.id)}
+                    onMouseLeave={() => {
+                      if (!isDraggingShape) setHoveredShapeId(null);
+                    }}
+                    onMouseDown={(e) => {
+                      if (e.button !== 0) return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      startDraggingShapeAtClient(
+                        s,
+                        'move',
+                        e.clientX,
+                        e.clientY
+                      );
+                    }}
+                    onTouchStart={(e) => {
+                      if (e.touches.length === 0) return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      startDraggingShapeAtClient(
+                        s,
+                        'move',
+                        e.touches[0].clientX,
+                        e.touches[0].clientY
+                      );
+                    }}
+                  />
+                </svg>
+
+                {/* Center drag handle on the arrow shaft */}
+                <div
+                  data-shape-id={s.id}
+                  data-shape-tool="arrow-grip"
+                  data-drag-mode="move"
+                  data-no-pan="true"
+                  title="Clique e arraste para mover esta seta"
+                  onMouseEnter={() => setHoveredShapeId(s.id)}
+                  onMouseLeave={() => {
+                    if (!isDraggingShape) setHoveredShapeId(null);
+                  }}
+                  onMouseDown={(e) => {
+                    if (e.button !== 0) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    startDraggingShapeAtClient(s, 'move', e.clientX, e.clientY);
+                  }}
+                  onTouchStart={(e) => {
+                    if (e.touches.length === 0) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    startDraggingShapeAtClient(
+                      s,
+                      'move',
+                      e.touches[0].clientX,
+                      e.touches[0].clientY
+                    );
+                  }}
+                  style={{
+                    left: `${midX * 100}%`,
+                    top: `${midY * 100}%`,
+                  }}
+                  className={`absolute -translate-x-1/2 -translate-y-1/2 pointer-events-auto cursor-move ${
+                    isSelected || isHovered
+                      ? 'px-1.5 py-0.5 rounded bg-slate-900/95 border border-sky-400/80 text-[9px] font-mono font-bold text-sky-200 flex items-center gap-1 shadow-lg'
+                      : 'w-6 h-6 rounded-full bg-transparent'
+                  }`}
+                >
+                  {(isSelected || isHovered) && (
+                    <>
+                      <Move className="w-2.5 h-2.5 text-sky-400 shrink-0" />
+                      <span>Arrastar</span>
+                    </>
+                  )}
+                </div>
+
+                {/* Arrow Tail (p0) and Tip (p1) handles */}
+                {(isSelected || isHovered) && (
+                  <>
+                    <div
+                      data-shape-id={s.id}
+                      data-drag-mode="p0"
+                      data-no-pan="true"
+                      title="Arraste para ajustar o início da seta"
+                      onMouseDown={(e) => {
+                        if (e.button !== 0) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        startDraggingShapeAtClient(
+                          s,
+                          'p0',
+                          e.clientX,
+                          e.clientY
+                        );
+                      }}
+                      style={{
+                        left: `${p0.x * 100}%`,
+                        top: `${p0.y * 100}%`,
+                      }}
+                      className="absolute -translate-x-1/2 -translate-y-1/2 w-4 h-4 rounded-full bg-sky-500 border-2 border-white shadow cursor-move pointer-events-auto"
+                    />
+                    <div
+                      data-shape-id={s.id}
+                      data-drag-mode="p1"
+                      data-no-pan="true"
+                      title="Arraste para ajustar a ponta da seta"
+                      onMouseDown={(e) => {
+                        if (e.button !== 0) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        startDraggingShapeAtClient(
+                          s,
+                          'p1',
+                          e.clientX,
+                          e.clientY
+                        );
+                      }}
+                      style={{
+                        left: `${p1.x * 100}%`,
+                        top: `${p1.y * 100}%`,
+                      }}
+                      className="absolute -translate-x-1/2 -translate-y-1/2 w-4 h-4 rounded-full bg-sky-500 border-2 border-white shadow cursor-move pointer-events-auto"
+                    />
+                  </>
+                )}
+              </React.Fragment>
+            );
+          }
+
+          if (s.tool === 'text' && s.points.length >= 1) {
+            const { x1, y1, boxX, boxY, boxW, boxH } =
+              getTextAnnotationBoxMetrics(null, s, 1200, 900);
+            const leftPct = (boxX / 1200) * 100;
+            const topPct = (boxY / 900) * 100;
+            const widthPct = (boxW / 1200) * 100;
+            const heightPct = (boxH / 900) * 100;
+
+            return (
+              <React.Fragment key={s.id}>
+                {/* Pin handle */}
+                <div
+                  data-shape-id={s.id}
+                  data-shape-tool="text-pin"
+                  data-drag-mode="move"
+                  data-no-pan="true"
+                  title="Clique e arraste para mover esta anotação de texto"
+                  onMouseEnter={() => setHoveredShapeId(s.id)}
+                  onMouseLeave={() => {
+                    if (!isDraggingShape) setHoveredShapeId(null);
+                  }}
+                  onMouseDown={(e) => {
+                    if (e.button !== 0) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    startDraggingShapeAtClient(s, 'move', e.clientX, e.clientY);
+                  }}
+                  onTouchStart={(e) => {
+                    if (e.touches.length === 0) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    startDraggingShapeAtClient(
+                      s,
+                      'move',
+                      e.touches[0].clientX,
+                      e.touches[0].clientY
+                    );
+                  }}
+                  style={{
+                    left: `${(x1 / 1200) * 100}%`,
+                    top: `${(y1 / 900) * 100}%`,
+                  }}
+                  className="absolute -translate-x-1/2 -translate-y-1/2 w-5 h-5 rounded-full pointer-events-auto cursor-move"
+                />
+
+                {/* Text Box interactive area */}
+                <div
+                  data-shape-id={s.id}
+                  data-shape-tool="text"
+                  data-drag-mode="move"
+                  data-no-pan="true"
+                  title="Clique e arraste para mover esta caixa de texto (Duplo-clique para editar)"
+                  onMouseEnter={() => setHoveredShapeId(s.id)}
+                  onMouseLeave={() => {
+                    if (!isDraggingShape) setHoveredShapeId(null);
+                  }}
+                  onMouseDown={(e) => {
+                    if (e.button !== 0) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    startDraggingShapeAtClient(s, 'move', e.clientX, e.clientY);
+                  }}
+                  onTouchStart={(e) => {
+                    if (e.touches.length === 0) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    startDraggingShapeAtClient(
+                      s,
+                      'move',
+                      e.touches[0].clientX,
+                      e.touches[0].clientY
+                    );
+                  }}
+                  onDoubleClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setSelectedShapeId(s.id);
+                    setEditingTextShapeId(s.id);
+                    setAnnotationColor(s.color);
+                    setPendingTextPoint(s.points[0]);
+                    setPendingTextValue(s.text || '');
+                  }}
+                  style={{
+                    left: `${leftPct}%`,
+                    top: `${topPct}%`,
+                    width: `${Math.max(4, widthPct)}%`,
+                    height: `${Math.max(3, heightPct)}%`,
+                  }}
+                  className={`absolute pointer-events-auto cursor-move rounded transition-colors ${
+                    isSelected || isHovered
+                      ? 'ring-2 ring-sky-400/90 bg-sky-400/5'
+                      : 'hover:ring-2 hover:ring-sky-400/80'
+                  }`}
+                >
+                  {(isSelected || isHovered) && (
+                    <div className="absolute -top-6 left-0 px-1.5 py-0.5 rounded bg-slate-900/95 border border-sky-400/80 text-[9px] font-mono font-bold text-sky-200 whitespace-nowrap flex items-center gap-1 shadow-lg pointer-events-auto cursor-move">
+                      <Move className="w-2.5 h-2.5 text-sky-400 shrink-0" />
+                      <span>Arrastar Nota</span>
+                    </div>
+                  )}
+                </div>
+              </React.Fragment>
+            );
+          }
+
+          return null;
+        })}
+      </div>
+    );
+  };
+
+  const drawerContent = (
     <div
       className={
         windowState === 'minimized'
-          ? 'fixed bottom-4 right-4 z-50 no-print'
+          ? 'fixed bottom-4 right-4 z-[100] no-print'
           : windowState === 'maximized'
-            ? 'fixed inset-0 z-50 bg-black/85 flex items-center justify-center no-print'
-            : 'fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-2 sm:p-4 no-print'
+            ? 'fixed inset-0 w-screen h-screen z-[100] bg-[#0B111E] flex items-stretch justify-stretch no-print'
+            : 'fixed inset-0 z-[100] bg-black/75 flex items-center justify-center p-2 sm:p-4 no-print'
       }
     >
       {/* Dedicated Full-Sheet Print Surface when user clicks "Imprimir Folha c/ Anotações Agora" */}
@@ -1753,8 +2349,8 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
           windowState === 'minimized'
             ? 'hidden'
             : windowState === 'maximized'
-              ? 'w-screen h-screen max-w-none max-h-none rounded-none bg-[#0B111E] flex flex-col shadow-2xl focus:outline-none no-print-when-sheet'
-              : 'w-full max-w-6xl h-[90vh] rounded-xl bg-[#0B111E] border border-slate-700 flex flex-col shadow-2xl overflow-hidden focus:outline-none no-print-when-sheet'
+              ? 'w-screen h-screen max-w-none max-h-none rounded-none border-0 bg-[#0B111E] flex flex-col shadow-2xl overflow-hidden focus:outline-none no-print-when-sheet'
+              : 'w-[92vw] max-w-6xl h-[88vh] rounded-xl bg-[#0B111E] border border-slate-700 flex flex-col shadow-2xl overflow-hidden focus:outline-none no-print-when-sheet'
         }
       >
         {/* Top Control Bar (Double-click toggles Maximize/Restore) */}
@@ -1891,21 +2487,31 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
               <button
                 type="button"
                 onClick={() => setWindowState('minimized')}
-                className="px-2 py-1 text-xs font-mono text-slate-300 hover:text-white hover:bg-slate-800 rounded transition-colors cursor-pointer flex items-center gap-1"
+                className="px-2.5 py-1 text-xs font-mono text-slate-200 hover:text-white hover:bg-slate-800 rounded transition-colors cursor-pointer flex items-center gap-1"
                 title="Minimizar janela para o rodapé (permite ler o Laudo e usar o Chat sem perder a folha aberta)"
               >
                 <Minus className="w-3.5 h-3.5 text-amber-400" />
-                <span className="hidden md:inline">Minimizar</span>
+                <span>Minimizar</span>
               </button>
 
               <button
                 type="button"
-                onClick={() =>
-                  setWindowState((prev) =>
-                    prev === 'maximized' ? 'normal' : 'maximized'
-                  )
-                }
-                className="px-2 py-1 text-xs font-mono text-slate-300 hover:text-white hover:bg-sky-500/20 rounded transition-colors cursor-pointer flex items-center gap-1"
+                onClick={() => {
+                  setWindowState((prev) => {
+                    const next = prev === 'maximized' ? 'normal' : 'maximized';
+                    try {
+                      localStorage.setItem('hydrodiag_pdf_window_mode_v1', next);
+                    } catch {
+                      // ignore
+                    }
+                    return next;
+                  });
+                }}
+                className={`px-2.5 py-1 text-xs font-mono font-semibold rounded transition-colors cursor-pointer flex items-center gap-1 ${
+                  windowState === 'maximized'
+                    ? 'bg-sky-500/25 border border-sky-500/50 text-sky-200 hover:bg-sky-500/35'
+                    : 'bg-sky-600/20 border border-sky-500/40 text-sky-200 hover:bg-sky-500/30 hover:text-white'
+                }`}
                 title={
                   windowState === 'maximized'
                     ? 'Restaurar tamanho normal da janela'
@@ -1914,13 +2520,13 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
               >
                 {windowState === 'maximized' ? (
                   <>
-                    <Minimize2 className="w-3.5 h-3.5 text-sky-400" />
-                    <span className="hidden md:inline">Restaurar</span>
+                    <Minimize2 className="w-3.5 h-3.5 text-sky-300" />
+                    <span>Restaurar</span>
                   </>
                 ) : (
                   <>
-                    <Maximize2 className="w-3.5 h-3.5 text-sky-400" />
-                    <span className="hidden md:inline">Maximizar</span>
+                    <Maximize2 className="w-3.5 h-3.5 text-sky-300" />
+                    <span>Maximizar</span>
                   </>
                 )}
               </button>
@@ -1928,11 +2534,11 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
               <button
                 type="button"
                 onClick={onClose}
-                className="px-2 py-1 text-xs font-mono text-slate-300 hover:text-white hover:bg-rose-600/35 rounded transition-colors cursor-pointer flex items-center gap-1"
+                className="px-2.5 py-1 text-xs font-mono text-slate-200 hover:text-white hover:bg-rose-600/35 rounded transition-colors cursor-pointer flex items-center gap-1"
                 title="Fechar janela (Tecla Esc)"
               >
                 <X className="w-3.5 h-3.5 text-rose-400" />
-                <span className="hidden md:inline">Fechar</span>
+                <span>Fechar</span>
               </button>
             </div>
           </div>
@@ -2320,6 +2926,27 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
 
             <button
               type="button"
+              onClick={() => {
+                setSheetFitMode((prev) =>
+                  prev === 'contain' ? 'width' : 'contain'
+                );
+                setPan({ x: 0, y: 0 });
+              }}
+              className={`px-2 py-1 text-xs font-mono border rounded flex items-center gap-1 cursor-pointer transition-colors ${
+                sheetFitMode === 'width'
+                  ? 'bg-sky-500/25 border-sky-500/60 text-sky-200 font-semibold'
+                  : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-300 hover:text-white'
+              }`}
+              title="Alternar entre Ajustar Folha Inteira na Tela e Preencher 100% da Largura da Tela"
+            >
+              <Maximize2 className="w-3 h-3 text-sky-400" />
+              <span>
+                {sheetFitMode === 'width' ? 'Ajustar Folha' : 'Largura 100%'}
+              </span>
+            </button>
+
+            <button
+              type="button"
               onClick={handleResetView}
               className="px-2 py-1 text-xs font-mono text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded flex items-center gap-1 cursor-pointer"
               title="Centralizar e Resetar Zoom (100%)"
@@ -2365,7 +2992,11 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
         )}
 
         {/* Main Interactive Pan & Zoom Viewport */}
-        <div className="flex-1 bg-[#070B14] p-2 sm:p-3 overflow-hidden flex flex-col relative">
+        <div
+          className={`flex-1 min-h-0 min-w-0 bg-[#070B14] ${
+            windowState === 'maximized' ? 'p-1' : 'p-2 sm:p-3'
+          } overflow-hidden flex flex-col relative`}
+        >
           {/* Floating Text Box Input Window when user clicks a point on the sheet in 'text' mode or edits an existing text box */}
           {pendingTextPoint && (
             <div
@@ -2576,15 +3207,32 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                       ? 'none'
                       : 'transform 60ms cubic-bezier(0.2, 0, 0, 1)',
                   }}
-                  className="w-full h-full flex-1 flex items-center justify-center p-2 sm:p-4"
+                  className={`w-full h-full flex-1 min-h-0 min-w-0 flex ${
+                    sheetFitMode === 'width' ? 'items-start' : 'items-center'
+                  } justify-center p-1 sm:p-2`}
                 >
                   {pageImageUrl ? (
-                    <div className="relative inline-block max-h-full max-w-full">
+                    <div
+                      style={{
+                        width: `${sheetDisplaySize.width}px`,
+                        height: `${sheetDisplaySize.height}px`,
+                      }}
+                      className="relative shrink-0 rounded shadow-2xl bg-white select-none"
+                    >
                       <img
                         src={pageImageUrl}
                         alt={`Página ${currentPage} - ${activeAttachment?.name || 'Diagrama'}`}
                         draggable={false}
-                        className="max-h-full max-w-full object-contain rounded shadow-2xl bg-white pointer-events-none select-none block"
+                        onLoad={(e) => {
+                          const el = e.currentTarget;
+                          if (el.naturalWidth > 0 && el.naturalHeight > 0) {
+                            setImgNaturalSize({
+                              width: el.naturalWidth,
+                              height: el.naturalHeight,
+                            });
+                          }
+                        }}
+                        className="w-full h-full object-fill rounded pointer-events-none select-none block"
                       />
                       <canvas
                         ref={sheetCanvasRef}
@@ -2592,16 +3240,24 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                         height={900}
                         className="absolute inset-0 w-full h-full pointer-events-none"
                       />
+                      {renderInteractiveShapesOverlay()}
                     </div>
                   ) : (
                     /* Interactive Reconstructed CAD Sheet inside the Pan/Zoom surface (also supports annotations!) */
-                    <div className="relative w-full max-w-4xl rounded-lg border border-sky-900/70 bg-[#080D1A] shadow-2xl overflow-hidden flex flex-col">
+                    <div
+                      className={`relative w-full ${
+                        windowState === 'maximized'
+                          ? 'max-w-none h-full'
+                          : 'max-w-5xl'
+                      } rounded-lg border border-sky-900/70 bg-[#080D1A] shadow-2xl overflow-hidden flex flex-col`}
+                    >
                       <canvas
                         ref={sheetCanvasRef}
                         width={1200}
                         height={900}
                         className="absolute inset-0 w-full h-full pointer-events-none z-20"
                       />
+                      {renderInteractiveShapesOverlay()}
                       {/* Top CAD Frame Coordinate Ruler (Colunas 1 - 8) */}
                       <div className="grid grid-cols-8 border-b border-slate-800 bg-[#0D1526] text-[10px] font-mono text-slate-400 text-center shrink-0">
                         {[1, 2, 3, 4, 5, 6, 7, 8].map((col) => {
@@ -2832,18 +3488,29 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
             )}
         </div>
 
-        {/* Footer with Cached Index Summary for the Inspected Batch */}
+        {/* Footer with Cached Index Summary for the Inspected Batch (Compact/Collapsible so PDF has maximum vertical height) */}
         {matchingBatch && (
-          <div className="px-4 py-2.5 bg-[#111827] border-t border-slate-800 text-xs text-slate-300 flex items-start justify-between gap-3 shrink-0">
-            <div className="min-w-0 flex-1">
-              <span className="font-mono text-[11px] text-sky-400 font-semibold">
+          <div className="px-4 py-1.5 bg-[#111827] border-t border-slate-800 text-xs text-slate-300 flex items-center justify-between gap-3 shrink-0">
+            <div className="min-w-0 flex-1 flex items-center gap-2">
+              <span className="font-mono text-[11px] text-sky-400 font-semibold shrink-0">
                 Índice Técnico (Págs. {matchingBatch.startPage}–
-                {matchingBatch.endPage}):{' '}
+                {matchingBatch.endPage}):
               </span>
-              <span className="text-slate-400 text-[11px] line-clamp-2">
+              <span
+                className={`text-slate-400 text-[11px] ${
+                  showIndexFooter ? '' : 'truncate'
+                }`}
+              >
                 {matchingBatch.summary}
               </span>
             </div>
+            <button
+              type="button"
+              onClick={() => setShowIndexFooter((prev) => !prev)}
+              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] font-mono text-slate-300 hover:text-white shrink-0 cursor-pointer"
+            >
+              {showIndexFooter ? 'Recolher Índice' : 'Expandir Índice'}
+            </button>
           </div>
         )}
       </aside>
@@ -3042,4 +3709,8 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       )}
     </div>
   );
+
+  return typeof document !== 'undefined'
+    ? createPortal(drawerContent, document.body)
+    : drawerContent;
 };

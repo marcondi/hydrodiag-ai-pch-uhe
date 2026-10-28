@@ -185,8 +185,11 @@ export const GitHubDeployPanel: React.FC = () => {
   };
 
   const fetchSourceBundleWithFallback = async (): Promise<SourceBundleResponse | null> => {
+    const bust = Date.now();
     try {
-      const apiRes = await safeFetchJson<SourceBundleResponse>('/api/backup/source-bundle');
+      const apiRes = await safeFetchJson<SourceBundleResponse>(
+        `/api/backup/source-bundle?t=${bust}`
+      );
       if (apiRes.ok && apiRes.data && Array.isArray(apiRes.data.files) && apiRes.data.files.length >= 10) {
         return apiRes.data;
       }
@@ -195,7 +198,9 @@ export const GitHubDeployPanel: React.FC = () => {
     }
 
     try {
-      const staticRes = await safeFetchJson<SourceBundleResponse>('/hydrodiag-source-bundle.json');
+      const staticRes = await safeFetchJson<SourceBundleResponse>(
+        `/hydrodiag-source-bundle.json?t=${bust}`
+      );
       if (staticRes.ok && staticRes.data && Array.isArray(staticRes.data.files) && staticRes.data.files.length > 0) {
         return staticRes.data;
       }
@@ -481,12 +486,10 @@ export const GitHubDeployPanel: React.FC = () => {
     setPublishResult(null);
 
     try {
-      let currentBundle = backupBundle;
-      if (!currentBundle || !Array.isArray(currentBundle.files) || currentBundle.files.length === 0) {
-        currentBundle = await fetchSourceBundleWithFallback();
-        if (currentBundle) {
-          setBackupBundle(currentBundle);
-        }
+      const freshBundle = await fetchSourceBundleWithFallback();
+      const currentBundle = freshBundle || backupBundle;
+      if (freshBundle) {
+        setBackupBundle(freshBundle);
       }
 
       const apiRes = await safeFetchJson<{

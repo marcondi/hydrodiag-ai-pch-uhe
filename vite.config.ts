@@ -45,15 +45,25 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          skipWaiting: true,
+          clientsClaim: true,
+          cleanupOutdatedCaches: true,
           maximumFileSizeToCacheInBytes: 15 * 1024 * 1024,
-          navigateFallbackDenylist: [/^\/api\//],
-          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2,mjs}'],
-          globIgnores: [
-            '**/*.zip',
-            '**/hydrodiag-source-bundle.json',
-            '**/assets/aistudio/**',
-          ],
+          navigateFallback: null,
+          globPatterns: [],
           runtimeCaching: [
+            {
+              urlPattern: ({request}) =>
+                request.mode === 'navigate' ||
+                request.destination === 'document' ||
+                request.destination === 'script' ||
+                request.destination === 'style',
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'hydrodiag-app-network-first-v3',
+                networkTimeoutSeconds: 4,
+              },
+            },
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
               handler: 'CacheFirst',
@@ -85,7 +95,7 @@ export default defineConfig(() => {
           ],
         },
         devOptions: {
-          enabled: true,
+          enabled: false,
           type: 'module',
         },
       }),
