@@ -1714,12 +1714,15 @@ const BACKUP_FILE_LIST = [
   '.env.example',
   '.gitignore',
   'supabase_hydrodiag_schema.sql',
+  'public/icon.svg',
   'server.ts',
   'src/main.tsx',
   'src/index.css',
   'src/types.ts',
   'src/App.tsx',
+  'src/hooks/usePWAInstall.ts',
   'src/utils/pdfClientEngine.ts',
+  'src/utils/speechSynthesisEngine.ts',
   'src/utils/voiceDictationEngine.ts',
   'src/components/DiagramUploadPanel.tsx',
   'src/components/FaultQueryPanel.tsx',
@@ -1843,6 +1846,195 @@ function collectBackupFiles(): Array<{
   return collected;
 }
 
+app.post('/api/github/publish', async (req, res) => {
+  try {
+    const {
+      githubUsername = 'marcondi',
+      repoName = 'hydrodiag-ai-pch-uhe',
+      githubToken,
+      isPrivate = false,
+      clientFiles,
+    } = req.body || {};
+
+    if (!githubToken || !String(githubToken).trim()) {
+      return res.status(400).json({
+        error:
+          'Informe seu Personal Access Token (PAT) do GitHub com permissão "repo" para publicar diretamente.',
+      });
+    }
+
+    const token = String(githubToken).trim();
+    const owner = String(githubUsername).trim() || 'marcondi';
+    const cleanRepo =
+      String(repoName)
+        .trim()
+        .replace(/[^a-zA-Z0-9._-]/g, '-') || 'hydrodiag-ai-pch-uhe';
+
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'HydroDiag-AI-Publisher',
+    };
+
+    const checkRes = await fetch(
+      `https://api.github.com/repos/${owner}/${cleanRepo}`,
+      { headers }
+    );
+
+    if (checkRes.status === 404) {
+      const createRes = await fetch('https://api.github.com/user/repos', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: cleanRepo,
+          description:
+            'HydroDiag AI — Sistema de Diagnóstico Eletromecânico, Supervisório e Resolução de Falhas para Usinas Hidrelétricas (PCH/UHE)',
+          private: Boolean(isPrivate),
+          auto_init: true,
+        }),
+      });
+      if (!createRes.ok) {
+        const errBody = await createRes.text();
+        return res.status(createRes.status).json({
+          error: `Não foi possível criar o repositório no GitHub: ${errBody.slice(0, 200)}`,
+        });
+      }
+    } else if (!checkRes.ok) {
+      const errBody = await checkRes.text();
+      return res.status(checkRes.status).json({
+        error: `Falha ao autenticar no GitHub (${checkRes.status}): verifique se o Token possui escopo 'repo'. Detalhe: ${errBody.slice(0, 160)}`,
+      });
+    }
+
+    const diskFiles = collectBackupFiles();
+    const filesSource: Array<{ path: string; content: string }> =
+      diskFiles.length >= 10
+        ? diskFiles.map((f) => ({ path: f.path, content: f.content }))
+        : Array.isArray(clientFiles)
+          ? clientFiles
+          : [];
+
+    if (filesSource.length === 0) {
+      return res.status(400).json({
+        error:
+          'Pacote de arquivos não disponível no container serverless; usando sincronização direta pelo navegador.',
+      });
+    }
+
+    const treeItems = filesSource.map((f) => ({
+      path: String(f.path),
+      mode: '100644' as const,
+      type: 'blob' as const,
+      content: String(f.content),
+    }));
+
+    const repoInfoRes = await fetch(
+      `https://api.github.com/repos/${owner}/${cleanRepo}`,
+      { headers }
+    );
+    const repoInfo = repoInfoRes.ok
+      ? ((await repoInfoRes.json()) as { default_branch?: string })
+      : {};
+    const branch = repoInfo.default_branch || 'main';
+
+    const refRes = await fetch(
+      `https://api.github.com/repos/${owner}/${cleanRepo}/git/ref/heads/${branch}`,
+      { headers }
+    );
+    if (!refRes.ok) {
+      return res.status(500).json({
+        error: `Não foi possível ler a branch ${branch} no GitHub.`,
+      });
+    }
+    const refData = (await refRes.json()) as { object?: { sha?: string } };
+    const latestCommitSha = refData.object?.sha;
+    if (!latestCommitSha) {
+      return res.status(500).json({
+        error: 'Commit base não encontrado no repositório.',
+      });
+    }
+
+    const commitRes = await fetch(
+      `https://api.github.com/repos/${owner}/${cleanRepo}/git/commits/${latestCommitSha}`,
+      { headers }
+    );
+    const commitData = commitRes.ok
+      ? ((await commitRes.json()) as { tree?: { sha?: string } })
+      : {};
+    const baseTreeSha = commitData.tree?.sha;
+
+    const createTreeRes = await fetch(
+      `https://api.github.com/repos/${owner}/${cleanRepo}/git/trees`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          ...(baseTreeSha ? { base_tree: baseTreeSha } : {}),
+          tree: treeItems,
+        }),
+      }
+    );
+    if (!createTreeRes.ok) {
+      const errText = await createTreeRes.text();
+      return res.status(500).json({
+        error: `Erro ao criar árvore Git: ${errText.slice(0, 180)}`,
+      });
+    }
+    const treeData = (await createTreeRes.json()) as { sha?: string };
+    const newTreeSha = treeData.sha;
+
+    if (newTreeSha && newTreeSha !== baseTreeSha) {
+      const stamp = new Date().toLocaleString('pt-BR', {
+        day: '2-digit',
+        month: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      const newCommitRes = await fetch(
+        `https://api.github.com/repos/${owner}/${cleanRepo}/git/commits`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            message: `feat(release): HydroDiag AI — PWA + Voz + Tabela de Campo + PDF Deep-Link (${stamp})`,
+            tree: newTreeSha,
+            parents: [latestCommitSha],
+          }),
+        }
+      );
+      if (newCommitRes.ok) {
+        const newCommitData = (await newCommitRes.json()) as { sha?: string };
+        if (newCommitData.sha) {
+          await fetch(
+            `https://api.github.com/repos/${owner}/${cleanRepo}/git/refs/heads/${branch}`,
+            {
+              method: 'PATCH',
+              headers,
+              body: JSON.stringify({ sha: newCommitData.sha, force: true }),
+            }
+          );
+        }
+      }
+    }
+
+    return res.json({
+      status: 'published',
+      repoUrl: `https://github.com/${owner}/${cleanRepo}`,
+      uploadedCount: treeItems.length,
+      uploadedFiles: treeItems.map((t) => t.path),
+    });
+  } catch (err) {
+    return res.status(500).json({
+      error:
+        err instanceof Error
+          ? err.message
+          : 'Erro ao publicar arquivos no GitHub.',
+    });
+  }
+});
+
 app.get('/api/backup/source-bundle', (_req, res) => {
   try {
     const files = collectBackupFiles();
@@ -1886,6 +2078,12 @@ app.get('/api/backup/download-zip', (_req, res) => {
         err instanceof Error ? err.message : 'Erro ao baixar arquivo ZIP.',
     });
   }
+});
+
+app.all('/api/*', (_req, res) => {
+  res.status(404).json({
+    error: 'Rota de API não encontrada no servidor.',
+  });
 });
 
 export default app;

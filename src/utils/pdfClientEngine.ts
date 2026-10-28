@@ -1377,6 +1377,246 @@ export function extractSignalChainFromContext(
   return nodes;
 }
 
+export interface InteractiveMeasurementPoint {
+  id: string;
+  stepLabel: string;
+  terminalOrBorne: string;
+  referenceCommon: string;
+  expectedSpec: string;
+  unitHint: string;
+  pageNumber: number | null;
+}
+
+export type FieldMeasurementValidation =
+  | 'pending'
+  | 'ok'
+  | 'out_of_range';
+
+/**
+ * Extrai automaticamente os pontos de medição de bornes a partir do Laudo Técnico
+ * para alimentar a Tabela Interativa de Medições de Campo (Checklist de Bornes).
+ */
+export function extractInteractiveMeasurementsFromMarkdown(
+  rawMarkdown: string,
+  probeSummary: ProbeSummaryData | null
+): InteractiveMeasurementPoint[] {
+  if (!rawMarkdown || rawMarkdown.trim().length < 30) return [];
+
+  const points: InteractiveMeasurementPoint[] = [];
+  const clean = formatTechnicalSymbols(rawMarkdown)
+    .replace(/\*\*/g, '')
+    .replace(/`/g, '');
+
+  // 1. Ponto principal vindo do probeSummary
+  if (probeSummary) {
+    const firstVoltage =
+      probeSummary.expectedValue.split('/')[0]?.trim() || '125 Vcc';
+    points.push({
+      id: 'pt_main_1',
+      stepLabel: 'Ponto #1 (Principal)',
+      terminalOrBorne: `${probeSummary.terminalStrip} — ${probeSummary.redProbe.slice(0, 48)}`,
+      referenceCommon: probeSummary.blackProbe.slice(0, 42),
+      expectedSpec: firstVoltage,
+      unitHint: firstVoltage.includes('Ω')
+        ? 'Ω'
+        : firstVoltage.toLowerCase().includes('ma')
+          ? 'mA'
+          : firstVoltage.toLowerCase().includes('vca')
+            ? 'Vca'
+            : 'Vcc',
+      pageNumber: probeSummary.locationPage,
+    });
+  }
+
+  // 2. Procurar passos numerados ou linhas de teste com bornes/terminais no texto
+  const lines = clean.split('\n');
+  let counter = points.length + 1;
+
+  for (const line of lines) {
+    if (points.length >= 4) break;
+    const trimmed = line.trim();
+    if (trimmed.length < 18 || trimmed.length > 260) continue;
+
+    const hasBorneOrContact =
+      /\b(?:borne|terminal|régua|[1-9]X[0-9A-Z]{1,3}|XED\d*|XSD\d*|13-14|21-22|A1-A2|95-96|52G[12]?|86[A-Z0-9]*)\b/i.test(
+        trimmed
+      );
+    const voltMatch = trimmed.match(
+      /\b(\d{1,3}(?:[.,]\d+)?\s*(?:Vcc|Vca|Vac|Vdc|mA|Ω|kΩ)|menor que \d+\s*Ω|0\s*Vcc)\b/i
+    );
+
+    if (hasBorneOrContact && voltMatch) {
+      const borneTokenMatch = trimmed.match(
+        /\b([1-9]X[0-9A-Z]{1,3}(?:[:\-/]\d+)?|XED\d*(?:[:\-/]\d+)?|XSD\d*(?:[:\-/]\d+)?|Borne\s+[A-Z0-9:.\-/]+|13-14|21-22|A1-A2|95-96)\b/i
+      );
+      const terminalCandidate = borneTokenMatch
+        ? borneTokenMatch[1]
+        : trimmed.slice(0, 42);
+
+      const alreadyAdded = points.some((p) =>
+        p.terminalOrBorne
+          .toLowerCase()
+          .includes(terminalCandidate.toLowerCase())
+      );
+      if (alreadyAdded) continue;
+
+      const pgMatch = trimmed.match(
+        /\b(?:P[áa]gina|P[áa]g\.?|Folha|Fl\.?)\s*#?\s*(\d{1,3})\b/i
+      );
+      const spec = voltMatch[1].trim();
+
+      points.push({
+        id: `pt_auto_${counter}`,
+        stepLabel: `Ponto #${counter}`,
+        terminalOrBorne: `${terminalCandidate} (${trimmed
+          .replace(/^[-*0-9.)\s]+/, '')
+          .slice(0, 44)}...)`,
+        referenceCommon: probeSummary?.blackProbe.slice(0, 36) || '0Vcc / Comum',
+        expectedSpec: spec,
+        unitHint: spec.includes('Ω')
+          ? 'Ω'
+          : spec.toLowerCase().includes('ma')
+            ? 'mA'
+            : spec.toLowerCase().includes('vca')
+              ? 'Vca'
+              : 'Vcc',
+        pageNumber: pgMatch ? parseInt(pgMatch[1], 10) : probeSummary?.locationPage || null,
+      });
+      counter++;
+    }
+  }
+
+  // 3. Se só extraiu 1 ponto, adicionar pontos complementares típicos da cadeia (Entrada/Saída do Contato e Bobina/CLP)
+  if (points.length === 1 && probeSummary) {
+    points.push({
+      id: 'pt_contact_out',
+      stepLabel: 'Ponto #2 (Jusante)',
+      terminalOrBorne: `Saída do Contato (${probeSummary.contactsOrComponent.split('·')[0]?.trim() || '14 / 22'})`,
+      referenceCommon: probeSummary.blackProbe.slice(0, 36),
+      expectedSpec: probeSummary.expectedValue.split('/')[0]?.trim() || '125 Vcc',
+      unitHint: 'Vcc',
+      pageNumber: probeSummary.locationPage,
+    });
+    points.push({
+      id: 'pt_coil_clp',
+      stepLabel: 'Ponto #3 (Bobina / CLP)',
+      terminalOrBorne: `Entrada CLP / Bobina A1-A2 (${probeSummary.terminalStrip.split('·')[0]?.trim() || 'XED'})`,
+      referenceCommon: 'A2 / 0Vcc Comum',
+      expectedSpec: probeSummary.expectedValue.includes('24')
+        ? '24 Vcc'
+        : probeSummary.expectedValue.split('/')[0]?.trim() || '125 Vcc',
+      unitHint: 'Vcc',
+      pageNumber: probeSummary.locationPage,
+    });
+  }
+
+  return points;
+}
+
+/**
+ * Avalia automaticamente se o valor medido no multímetro está dentro da faixa esperada (±15% para tensão,
+ * 4-20 mA para corrente ou limiar de continuidade em Ohms).
+ */
+export function evaluateFieldMeasurementStatus(
+  expectedSpec: string,
+  measuredRaw: string
+): {
+  status: FieldMeasurementValidation;
+  reason: string;
+} {
+  const cleanMeasured = (measuredRaw || '').trim().replace(',', '.');
+  if (!cleanMeasured) {
+    return { status: 'pending', reason: 'Aguardando leitura' };
+  }
+
+  const numMatch = cleanMeasured.match(/-?\d+(?:\.\d+)?/);
+  if (!numMatch) {
+    if (/^(ok|normal|fechado|atuado)$/i.test(cleanMeasured)) {
+      return { status: 'ok', reason: 'Confirmado manualmente' };
+    }
+    if (/^(falha|aberto|zero|curto|desarmado)$/i.test(cleanMeasured)) {
+      return { status: 'out_of_range', reason: 'Anomalia informada' };
+    }
+    return { status: 'pending', reason: 'Digite o valor numérico' };
+  }
+
+  const measuredVal = parseFloat(numMatch[0]);
+  const cleanExpected = (expectedSpec || '').replace(',', '.');
+
+  // Caso 1: Continuidade / Resistência (ex: "menor que 2 Ω", "< 2 Ω", "0 Ω")
+  if (cleanExpected.includes('Ω') || /ohm/i.test(cleanExpected)) {
+    const maxOhmMatch = cleanExpected.match(/(\d+(?:\.\d+)?)/);
+    const maxAllowed = maxOhmMatch ? parseFloat(maxOhmMatch[1]) : 5;
+    if (measuredVal <= Math.max(maxAllowed * 1.5, 2.5)) {
+      return {
+        status: 'ok',
+        reason: `Continuidade OK (${measuredVal} Ω)`,
+      };
+    }
+    return {
+      status: 'out_of_range',
+      reason: `Circuito aberto / Alta resistência (${measuredVal} Ω > ${maxAllowed} Ω)`,
+    };
+  }
+
+  // Caso 2: Corrente 4-20 mA
+  if (/4\s*[-aà]\s*20\s*ma/i.test(cleanExpected) || /ma\b/i.test(cleanExpected)) {
+    if (measuredVal >= 3.8 && measuredVal <= 20.5) {
+      return {
+        status: 'ok',
+        reason: `Loop 4–20 mA íntegro (${measuredVal} mA)`,
+      };
+    }
+    return {
+      status: 'out_of_range',
+      reason:
+        measuredVal < 3.8
+          ? `Loop aberto / Fio rompido (${measuredVal} mA < 4 mA)`
+          : `Saturação de corrente (${measuredVal} mA > 20 mA)`,
+    };
+  }
+
+  // Caso 3: Tensão (125 Vcc, 24 Vcc, 220 Vca, 0 Vcc, etc.)
+  const expVoltMatch = cleanExpected.match(/(\d+(?:\.\d+)?)/);
+  if (expVoltMatch) {
+    const targetVolt = parseFloat(expVoltMatch[1]);
+    if (targetVolt === 0) {
+      if (Math.abs(measuredVal) <= 2.0) {
+        return { status: 'ok', reason: `0 V confirmado (${measuredVal} V)` };
+      }
+      return {
+        status: 'out_of_range',
+        reason: `Tensão residual indevida (${measuredVal} V != 0 V)`,
+      };
+    }
+
+    const minAllowed = targetVolt * 0.85; // -15%
+    const maxAllowed = targetVolt * 1.15; // +15%
+    if (measuredVal >= minAllowed && measuredVal <= maxAllowed) {
+      return {
+        status: 'ok',
+        reason: `Dentro da faixa nominal (${measuredVal} V ≈ ${targetVolt} V ±15%)`,
+      };
+    }
+    if (measuredVal < 3.0) {
+      return {
+        status: 'out_of_range',
+        reason: `Ausência de tensão / Circuito aberto (${measuredVal} V vs ${targetVolt} V)`,
+      };
+    }
+    return {
+      status: 'out_of_range',
+      reason: `Fora da tolerância (${measuredVal} V vs esperado ${targetVolt} V)`,
+    };
+  }
+
+  return {
+    status: measuredVal > 0 ? 'ok' : 'out_of_range',
+    reason: measuredVal > 0 ? `Leitura registrada (${measuredVal})` : 'Valor zerado (0)',
+  };
+}
+
+
 
 
 

@@ -22,6 +22,9 @@ import {
   ChevronUp,
   Mic,
   MicOff,
+  Volume2,
+  VolumeX,
+  Square,
 } from 'lucide-react';
 import {
   ChatAttachmentPayload,
@@ -33,6 +36,7 @@ import {
   linkifyPdfPageReferences,
 } from '../utils/pdfClientEngine';
 import { UniversalVoiceDictation } from '../utils/voiceDictationEngine';
+import { technicalSpeechEngine } from '../utils/speechSynthesisEngine';
 
 interface FaultChatPanelProps {
   alarmTitle: string;
@@ -186,6 +190,16 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
   const [voiceAudioLevel, setVoiceAudioLevel] = useState(0);
   const [voiceElapsedSec, setVoiceElapsedSec] = useState(0);
   const [voiceStatusText, setVoiceStatusText] = useState<string | null>(null);
+  const [autoSpeakEnabled, setAutoSpeakEnabled] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('hydrodiag_auto_speak_v1') === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [activeSpeakingId, setActiveSpeakingId] = useState<string | null>(null);
+  const usedMicInLastTurnRef = useRef<boolean>(false);
+  const lastSpokenMessageIdRef = useRef<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
@@ -196,6 +210,53 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
   inputTextRef.current = inputText;
 
   const voiceEngineRef = useRef<UniversalVoiceDictation | null>(null);
+
+  useEffect(() => {
+    const unsubSpeech = technicalSpeechEngine.subscribe((st) => {
+      setActiveSpeakingId(st.isSpeaking ? st.activeId : null);
+    });
+    return () => {
+      unsubSpeech();
+    };
+  }, []);
+
+  // Initialize lastSpokenMessageIdRef with existing messages on mount so we only auto-speak NEW replies
+  useEffect(() => {
+    if (messages.length > 0 && !lastSpokenMessageIdRef.current) {
+      lastSpokenMessageIdRef.current = messages[messages.length - 1].id;
+    }
+  }, []);
+
+  // Auto-speak newest assistant response when autoSpeakEnabled is on OR user used microphone
+  useEffect(() => {
+    if (isSending || messages.length === 0) return;
+    const lastMsg = messages[messages.length - 1];
+    if (
+      lastMsg.role === 'assistant' &&
+      lastMsg.id !== lastSpokenMessageIdRef.current
+    ) {
+      lastSpokenMessageIdRef.current = lastMsg.id;
+      if (autoSpeakEnabled || usedMicInLastTurnRef.current) {
+        usedMicInLastTurnRef.current = false;
+        technicalSpeechEngine.speak(lastMsg.id, lastMsg.content);
+      }
+    }
+  }, [messages, isSending, autoSpeakEnabled]);
+
+  const handleToggleAutoSpeak = () => {
+    setAutoSpeakEnabled((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('hydrodiag_auto_speak_v1', String(next));
+      } catch {
+        // Ignore storage error
+      }
+      if (!next && activeSpeakingId) {
+        technicalSpeechEngine.stop();
+      }
+      return next;
+    });
+  };
 
   useEffect(() => {
     const engine = new UniversalVoiceDictation({
@@ -222,9 +283,13 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
     const engine = voiceEngineRef.current;
     if (!engine) return;
     if (engine.getIsRecording()) {
+      usedMicInLastTurnRef.current = true;
       await engine.stop();
       setTimeout(() => textareaRef.current?.focus(), 40);
     } else if (!engine.getIsTranscribing()) {
+      // Stop any ongoing speech synthesis before listening to user's microphone
+      technicalSpeechEngine.stop();
+      usedMicInLastTurnRef.current = true;
       await engine.start();
     }
   };
@@ -423,6 +488,26 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
         <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
+            onClick={handleToggleAutoSpeak}
+            className={`px-2.5 py-1 rounded text-[11px] font-medium border flex items-center gap-1.5 cursor-pointer transition-colors ${
+              autoSpeakEnabled
+                ? 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 border-emerald-500/40'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
+            }`}
+            title="Ativar leitura automática em voz alta das respostas do especialista (Modo Mãos-Livres para uso com multímetro no painel)"
+          >
+            {autoSpeakEnabled ? (
+              <Volume2 className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+            ) : (
+              <VolumeX className="w-3.5 h-3.5 text-slate-400" />
+            )}
+            <span>
+              {autoSpeakEnabled ? 'Voz Auto: ON' : 'Voz Mãos-Livres'}
+            </span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setShowSuggestions((prev) => !prev)}
             className="px-2.5 py-1 rounded text-[11px] font-medium bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 flex items-center gap-1 cursor-pointer transition-colors"
           >
@@ -533,18 +618,52 @@ export const FaultChatPanel: React.FC<FaultChatPanelProps> = ({
                         })}
                       </span>
                       {!isUser && (
-                        <button
-                          type="button"
-                          onClick={() => handleCopy(msg)}
-                          className="text-slate-400 hover:text-slate-200 flex items-center gap-1 cursor-pointer"
-                          title="Copiar resposta"
-                        >
-                          {copiedId === msg.id ? (
-                            <Check className="w-3.5 h-3.5 text-emerald-400" />
-                          ) : (
-                            <Copy className="w-3.5 h-3.5" />
-                          )}
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              technicalSpeechEngine.toggleSpeak(
+                                msg.id,
+                                msg.content
+                              )
+                            }
+                            className={`px-2 py-0.5 rounded border flex items-center gap-1 cursor-pointer transition-colors ${
+                              activeSpeakingId === msg.id
+                                ? 'bg-rose-500/20 border-rose-500/50 text-rose-200 animate-pulse'
+                                : 'bg-slate-800/90 hover:bg-slate-700 border-slate-700 text-sky-300'
+                            }`}
+                            title={
+                              activeSpeakingId === msg.id
+                                ? 'Parar leitura em voz alta'
+                                : 'Ouvir resposta em voz alta (Modo Mãos-Livres no Painel)'
+                            }
+                          >
+                            {activeSpeakingId === msg.id ? (
+                              <>
+                                <Square className="w-3 h-3 fill-rose-400 text-rose-400" />
+                                <span>Parar Voz</span>
+                              </>
+                            ) : (
+                              <>
+                                <Volume2 className="w-3.5 h-3.5 text-sky-400" />
+                                <span>Ouvir</span>
+                              </>
+                            )}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleCopy(msg)}
+                            className="text-slate-400 hover:text-slate-200 flex items-center gap-1 cursor-pointer"
+                            title="Copiar resposta"
+                          >
+                            {copiedId === msg.id ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-400" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        </>
                       )}
                     </div>
                   </div>

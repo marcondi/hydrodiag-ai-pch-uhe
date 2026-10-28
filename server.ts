@@ -2104,12 +2104,15 @@ Responda em Markdown técnico claro, objetivo e direto para auxiliar o operador 
         '.env.example',
         '.gitignore',
         'supabase_hydrodiag_schema.sql',
+        'public/icon.svg',
         'server.ts',
         'src/main.tsx',
         'src/index.css',
         'src/types.ts',
         'src/App.tsx',
+        'src/hooks/usePWAInstall.ts',
         'src/utils/pdfClientEngine.ts',
+        'src/utils/speechSynthesisEngine.ts',
         'src/utils/voiceDictationEngine.ts',
         'src/components/DiagramUploadPanel.tsx',
         'src/components/FaultQueryPanel.tsx',
@@ -2369,12 +2372,15 @@ Sistema especialista multimodal desenvolvido para engenharia de manutenção, pr
     '.env.example',
     '.gitignore',
     'supabase_hydrodiag_schema.sql',
+    'public/icon.svg',
     'server.ts',
     'src/main.tsx',
     'src/index.css',
     'src/types.ts',
     'src/App.tsx',
+    'src/hooks/usePWAInstall.ts',
     'src/utils/pdfClientEngine.ts',
+    'src/utils/speechSynthesisEngine.ts',
     'src/utils/voiceDictationEngine.ts',
     'src/components/DiagramUploadPanel.tsx',
     'src/components/FaultQueryPanel.tsx',
@@ -2519,7 +2525,26 @@ Sistema especialista multimodal para Engenharia Elétrica de Manutenção, Prote
       buffer: readmeBuf,
     });
 
-    for (const relPath of BACKUP_FILE_LIST) {
+    const scanDirRecursive = (dirRel: string): string[] => {
+      const found: string[] = [];
+      const absDir = path.join(__dirname, dirRel);
+      if (!fs.existsSync(absDir)) return found;
+      for (const entry of fs.readdirSync(absDir, { withFileTypes: true })) {
+        const rel = path.posix.join(dirRel.replace(/\\/g, '/'), entry.name);
+        if (entry.isDirectory()) {
+          found.push(...scanDirRecursive(rel));
+        } else if (/\.(ts|tsx|css|json)$/i.test(entry.name)) {
+          found.push(rel);
+        }
+      }
+      return found;
+    };
+
+    const allPaths = Array.from(
+      new Set([...BACKUP_FILE_LIST, ...scanDirRecursive('src')])
+    );
+
+    for (const relPath of allPaths) {
       const absPath = path.join(__dirname, relPath);
       if (fs.existsSync(absPath)) {
         const rawBuf = fs.readFileSync(absPath);
@@ -2549,7 +2574,7 @@ Sistema especialista multimodal para Engenharia Elétrica de Manutenção, Prote
     return collected;
   }
 
-  // Save a ready-to-download ZIP snapshot in public/ on server startup
+  // Save a ready-to-download ZIP snapshot AND static source bundle JSON in public/ on server startup
   try {
     const publicDir = path.join(__dirname, 'public');
     if (!fs.existsSync(publicDir)) {
@@ -2563,6 +2588,23 @@ Sistema especialista multimodal para Engenharia Elétrica de Manutenção, Prote
       path.join(publicDir, 'hydrodiag-ai-backup-completo.zip'),
       zipBuf
     );
+    const totalBytes = initialFiles.reduce((acc, f) => acc + f.sizeBytes, 0);
+    const staticBundlePayload = {
+      generatedAt: new Date().toISOString(),
+      projectName: 'hydrodiag-ai-pch-uhe',
+      totalFiles: initialFiles.length,
+      totalBytes,
+      files: initialFiles.map((f) => ({
+        path: f.path,
+        sizeBytes: f.sizeBytes,
+        content: f.content,
+      })),
+    };
+    fs.writeFileSync(
+      path.join(publicDir, 'hydrodiag-source-bundle.json'),
+      JSON.stringify(staticBundlePayload),
+      'utf-8'
+    );
   } catch {
     // Ignore on read-only environments
   }
@@ -2571,7 +2613,7 @@ Sistema especialista multimodal para Engenharia Elétrica de Manutenção, Prote
     try {
       const files = collectProjectBackupFiles();
       const totalBytes = files.reduce((acc, f) => acc + f.sizeBytes, 0);
-      return res.json({
+      const bundlePayload = {
         generatedAt: new Date().toISOString(),
         projectName: 'hydrodiag-ai-pch-uhe',
         totalFiles: files.length,
@@ -2581,7 +2623,17 @@ Sistema especialista multimodal para Engenharia Elétrica de Manutenção, Prote
           sizeBytes: f.sizeBytes,
           content: f.content,
         })),
-      });
+      };
+      try {
+        fs.writeFileSync(
+          path.join(__dirname, 'public', 'hydrodiag-source-bundle.json'),
+          JSON.stringify(bundlePayload),
+          'utf-8'
+        );
+      } catch {
+        // Ignore on read-only fs
+      }
+      return res.json(bundlePayload);
     } catch (err) {
       return res.status(500).json({
         error:

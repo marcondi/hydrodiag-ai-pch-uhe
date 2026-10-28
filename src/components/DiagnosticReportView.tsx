@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -16,14 +16,15 @@ import {
   FileText,
   MessageSquare,
   Rows2,
-  PanelLeftClose,
-  PanelLeftOpen,
   BookOpen,
   Activity,
   Zap,
   GitCommitHorizontal,
   ArrowRight,
   Camera,
+  Volume2,
+  Square,
+  Send,
 } from 'lucide-react';
 import {
   ChatAttachmentPayload,
@@ -34,11 +35,15 @@ import {
 import { FaultChatPanel } from './FaultChatPanel';
 import { PdfDeepLinkDrawer } from './PdfDeepLinkDrawer';
 import {
+  evaluateFieldMeasurementStatus,
+  extractInteractiveMeasurementsFromMarkdown,
   extractProbeSummaryFromMarkdown,
   extractSignalChainFromContext,
   formatTechnicalSymbols,
+  InteractiveMeasurementPoint,
   linkifyPdfPageReferences,
 } from '../utils/pdfClientEngine';
+import { technicalSpeechEngine } from '../utils/speechSynthesisEngine';
 
 export type WorkspaceLayoutMode = 'split' | 'report' | 'chat' | 'stacked';
 
@@ -70,6 +75,11 @@ interface DiagnosticReportViewProps {
     sizeBytes?: number
   ) => void;
   onOpenFieldCamera?: () => void;
+  externalPdfInspectRequest?: {
+    attachmentId?: string;
+    page?: number;
+    timestamp: number;
+  } | null;
 }
 
 export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
@@ -91,6 +101,7 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
   onToggleLeftSidebar,
   onRelinkAttachmentBinary,
   onOpenFieldCamera,
+  externalPdfInspectRequest,
 }) => {
   const [copiedTurnId, setCopiedTurnId] = useState<string | null>(null);
   const [selectedTurnIndex, setSelectedTurnIndex] = useState<number | null>(
@@ -104,6 +115,33 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
   const [deepLinkAttachmentId, setDeepLinkAttachmentId] = useState<
     string | undefined
   >(undefined);
+  const [activeSpeakingId, setActiveSpeakingId] = useState<string | null>(null);
+
+  // Interactive Field Measurements Table State (keyed by `${turn.id}_${point.id}`)
+  const [measuredValues, setMeasuredValues] = useState<Record<string, string>>(
+    {}
+  );
+  const [customPointsByTurn, setCustomPointsByTurn] = useState<
+    Record<string, InteractiveMeasurementPoint[]>
+  >({});
+  const [newBorneLabel, setNewBorneLabel] = useState('');
+  const [newExpectedSpec, setNewExpectedSpec] = useState('125 Vcc');
+  const [showAddBorneRow, setShowAddBorneRow] = useState(false);
+
+  useEffect(() => {
+    const unsub = technicalSpeechEngine.subscribe((st) => {
+      setActiveSpeakingId(st.isSpeaking ? st.activeId : null);
+    });
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    if (externalPdfInspectRequest && externalPdfInspectRequest.timestamp > 0) {
+      setDeepLinkAttachmentId(externalPdfInspectRequest.attachmentId);
+      setDeepLinkPage(Math.max(1, externalPdfInspectRequest.page || 1));
+      setDeepLinkOpen(true);
+    }
+  }, [externalPdfInspectRequest]);
 
   const handleOpenPdfDeepLink = (pageNumber: number, attachmentId?: string) => {
     setDeepLinkAttachmentId(attachmentId);
@@ -140,6 +178,44 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
       attachments,
       turn.markdownResponse
     );
+    const autoPoints = extractInteractiveMeasurementsFromMarkdown(
+      turn.markdownResponse,
+      probeSummary
+    );
+    const customPoints = customPointsByTurn[turn.id] || [];
+    const allMeasurementPoints = [...autoPoints, ...customPoints];
+
+    const handleSendMeasurementsToChat = async () => {
+      const filledRows = allMeasurementPoints
+        .map((pt) => {
+          const valKey = `${turn.id}_${pt.id}`;
+          const rawVal = (measuredValues[valKey] || '').trim();
+          if (!rawVal) return null;
+          const evalRes = evaluateFieldMeasurementStatus(
+            pt.expectedSpec,
+            rawVal
+          );
+          const statusTag =
+            evalRes.status === 'ok'
+              ? 'DENTRO DA FAIXA (OK)'
+              : evalRes.status === 'out_of_range'
+                ? 'FORA DE FAIXA / ANOMALIA'
+                : 'MEDIDO';
+          return `- **${pt.stepLabel} (${pt.terminalOrBorne})**: Medido = \`${rawVal}\` (Esperado: \`${pt.expectedSpec}\`) ➔ **[${statusTag}: ${evalRes.reason}]**`;
+        })
+        .filter(Boolean);
+
+      if (filledRows.length === 0) return;
+
+      const summaryPrompt = `Realizei as seguintes medições reais com o multímetro em campo na régua de bornes:\n\n${filledRows.join(
+        '\n'
+      )}\n\nCom base nessas leituras (especialmente os pontos FORA DE FAIXA), recalcule imediatamente a causa raiz exata e indique qual borne ou componente a montante/jusante devo testar ou substituir agora.`;
+
+      if (workspaceMode === 'report') {
+        setWorkspaceMode('split');
+      }
+      await onSendChatMessage(turn.id, summaryPrompt);
+    };
 
     return (
       <div className="flex flex-col gap-4">
@@ -473,6 +549,190 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
                 </p>
               </div>
             </div>
+
+            {/* TABELA INTERATIVA DE MEDIÇÕES DE CAMPO (CHECKLIST DE BORNES COM VALIDAÇÃO AUTOMÁTICA) */}
+            {allMeasurementPoints.length > 0 && (
+              <div className="mt-1 pt-3 border-t border-slate-800/90 flex flex-col gap-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span className="text-xs font-semibold text-slate-100">
+                      Tabela Interativa de Medições de Campo (Validação Automática de Bornes)
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 no-print">
+                    <button
+                      type="button"
+                      onClick={() => setShowAddBorneRow((prev) => !prev)}
+                      className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-sky-300 text-[11px] font-medium flex items-center gap-1 cursor-pointer transition-colors"
+                    >
+                      <PlusCircle className="w-3 h-3" />
+                      <span>+ Adicionar Borne</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={
+                        isChatSending ||
+                        !allMeasurementPoints.some(
+                          (pt) =>
+                            (measuredValues[`${turn.id}_${pt.id}`] || '').trim()
+                              .length > 0
+                        )
+                      }
+                      onClick={handleSendMeasurementsToChat}
+                      className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 font-semibold text-[11px] flex items-center gap-1.5 cursor-pointer transition-colors shadow-sm"
+                      title="Envia todas as medições preenchidas para o Engenheiro Eletricista no Chat recalcular a causa raiz"
+                    >
+                      <Send className="w-3 h-3" />
+                      <span>Recalcular Causa Raiz com Leituras</span>
+                    </button>
+                  </div>
+                </div>
+
+                {showAddBorneRow && (
+                  <div className="p-2.5 rounded-md bg-[#111827] border border-sky-500/40 flex flex-wrap items-center gap-2 no-print">
+                    <input
+                      type="text"
+                      value={newBorneLabel}
+                      onChange={(e) => setNewBorneLabel(e.target.value)}
+                      placeholder="Borne / Ponto (ex: 1X2:14 ou A1-A2 K1)"
+                      className="flex-1 min-w-[180px] bg-[#0B111E] border border-slate-700 rounded px-2.5 py-1 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-sky-500"
+                    />
+                    <input
+                      type="text"
+                      value={newExpectedSpec}
+                      onChange={(e) => setNewExpectedSpec(e.target.value)}
+                      placeholder="Esperado (ex: 125 Vcc, 24 Vcc, < 2 Ω)"
+                      className="w-40 bg-[#0B111E] border border-slate-700 rounded px-2.5 py-1 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-sky-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!newBorneLabel.trim()) return;
+                        const nextPt: InteractiveMeasurementPoint = {
+                          id: `custom_${Date.now()}`,
+                          stepLabel: `Extra #${customPoints.length + 1}`,
+                          terminalOrBorne: newBorneLabel.trim(),
+                          referenceCommon: '0Vcc / Comum',
+                          expectedSpec: newExpectedSpec.trim() || '125 Vcc',
+                          unitHint: newExpectedSpec.includes('Ω') ? 'Ω' : 'Vcc',
+                          pageNumber: probeSummary.locationPage,
+                        };
+                        setCustomPointsByTurn((prev) => ({
+                          ...prev,
+                          [turn.id]: [...(prev[turn.id] || []), nextPt],
+                        }));
+                        setNewBorneLabel('');
+                        setShowAddBorneRow(false);
+                      }}
+                      className="px-2.5 py-1 rounded bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-xs cursor-pointer"
+                    >
+                      Incluir na Tabela
+                    </button>
+                  </div>
+                )}
+
+                <div className="overflow-x-auto border border-slate-800 rounded-md">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead className="bg-slate-900/90 text-slate-300 border-b border-slate-800 font-semibold">
+                      <tr>
+                        <th className="px-2.5 py-2 border-r border-slate-800">
+                          Borne / Terminal (+ / -)
+                        </th>
+                        <th className="px-2.5 py-2 border-r border-slate-800 whitespace-nowrap">
+                          Esperado
+                        </th>
+                        <th className="px-2.5 py-2 border-r border-slate-800 w-36">
+                          Valor Medido
+                        </th>
+                        <th className="px-2.5 py-2">
+                          Diagnóstico Automático
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/80 font-mono tabular-nums">
+                      {allMeasurementPoints.map((pt) => {
+                        const valKey = `${turn.id}_${pt.id}`;
+                        const currentVal = measuredValues[valKey] || '';
+                        const evaluation = evaluateFieldMeasurementStatus(
+                          pt.expectedSpec,
+                          currentVal
+                        );
+                        return (
+                          <tr
+                            key={pt.id}
+                            className="bg-[#111827]/70 hover:bg-slate-900/70 transition-colors"
+                          >
+                            <td className="px-2.5 py-2 border-r border-slate-800 text-slate-200">
+                              <div className="flex items-center justify-between gap-1.5">
+                                <span className="font-semibold text-sky-300">
+                                  {pt.stepLabel}:
+                                </span>
+                                {pt.pageNumber && attachments.length > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleOpenPdfDeepLink(pt.pageNumber!)
+                                    }
+                                    className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30 hover:bg-sky-500/25 cursor-pointer no-print"
+                                    title={`Ver Página ${pt.pageNumber} no PDF`}
+                                  >
+                                    Pág. {pt.pageNumber}
+                                  </button>
+                                )}
+                              </div>
+                              <div className="text-[11px] text-slate-200 mt-0.5">
+                                {pt.terminalOrBorne}
+                              </div>
+                            </td>
+                            <td className="px-2.5 py-2 border-r border-slate-800 text-emerald-300 font-semibold whitespace-nowrap">
+                              {pt.expectedSpec}
+                            </td>
+                            <td className="px-2.5 py-2 border-r border-slate-800">
+                              <input
+                                type="text"
+                                aria-label={`Valor medido em ${pt.stepLabel}`}
+                                value={currentVal}
+                                onChange={(e) =>
+                                  setMeasuredValues((prev) => ({
+                                    ...prev,
+                                    [valKey]: e.target.value,
+                                  }))
+                                }
+                                placeholder={`Ex: 0 ou ${pt.expectedSpec}`}
+                                className="w-full bg-[#0B111E] border border-slate-700 focus:border-sky-500 rounded px-2 py-1 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none"
+                              />
+                            </td>
+                            <td className="px-2.5 py-2">
+                              {evaluation.status === 'ok' ? (
+                                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-[11px] font-semibold">
+                                  <span>🟢 OK</span>
+                                  <span className="text-[10px] font-normal text-emerald-200/90 hidden sm:inline">
+                                    · {evaluation.reason}
+                                  </span>
+                                </span>
+                              ) : evaluation.status === 'out_of_range' ? (
+                                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-rose-500/20 border border-rose-500/50 text-rose-300 text-[11px] font-semibold">
+                                  <span>🔴 FORA DE FAIXA</span>
+                                  <span className="text-[10px] font-normal text-rose-200/90 hidden sm:inline">
+                                    · {evaluation.reason}
+                                  </span>
+                                </span>
+                              ) : (
+                                <span className="text-[11px] text-slate-500">
+                                  ⚪ Digite a leitura ({pt.unitHint})
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -769,6 +1029,38 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
               <option value="resolvida">Resolvida em Campo</option>
               <option value="aguardando_peca">Aguardando Peça</option>
             </select>
+
+            <button
+              type="button"
+              onClick={() =>
+                technicalSpeechEngine.toggleSpeak(
+                  `report_${activeTurn.id}`,
+                  activeTurn.markdownResponse
+                )
+              }
+              className={`px-2.5 py-1 text-xs font-medium border rounded-md transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 ${
+                activeSpeakingId === `report_${activeTurn.id}`
+                  ? 'bg-rose-500/20 border-rose-500/50 text-rose-200 animate-pulse'
+                  : 'text-sky-200 bg-slate-800 hover:bg-slate-700 border-slate-700'
+              }`}
+              title={
+                activeSpeakingId === `report_${activeTurn.id}`
+                  ? 'Parar leitura em voz alta do laudo'
+                  : 'Ouvir Laudo Técnico em voz alta (Modo Mãos-Livres)'
+              }
+            >
+              {activeSpeakingId === `report_${activeTurn.id}` ? (
+                <>
+                  <Square className="w-3 h-3 fill-rose-400 text-rose-400" />
+                  <span>Parar Voz</span>
+                </>
+              ) : (
+                <>
+                  <Volume2 className="w-3.5 h-3.5 text-sky-400" />
+                  <span>Ouvir</span>
+                </>
+              )}
+            </button>
 
             <button
               type="button"

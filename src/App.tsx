@@ -34,6 +34,8 @@ import {
   QrCode,
   Menu,
   X,
+  BookOpen,
+  WifiOff,
 } from 'lucide-react';
 import {
   ChatAttachmentPayload,
@@ -64,6 +66,7 @@ import {
   prepareClientSmartAttachmentParts,
   saveAttachmentBinaryToVault,
 } from './utils/pdfClientEngine';
+import { useOnlineStatus, usePWAInstall } from './hooks/usePWAInstall';
 
 const STORAGE_KEY = 'hydrodiag_saved_investigations_v2';
 const ACTIVE_SESSION_STORAGE_KEY = 'hydrodiag_active_session_id_v1';
@@ -206,6 +209,15 @@ export default function App() {
   const [sequenceModalOpen, setSequenceModalOpen] = useState<boolean>(false);
   const [fieldCameraOpen, setFieldCameraOpen] = useState<boolean>(false);
   const [qrHandoffOpen, setQrHandoffOpen] = useState<boolean>(false);
+  const [pwaGuideOpen, setPwaGuideOpen] = useState<boolean>(false);
+  const [externalPdfInspectRequest, setExternalPdfInspectRequest] = useState<{
+    attachmentId?: string;
+    page?: number;
+    timestamp: number;
+  } | null>(null);
+  const { isInstallable, isInstalled, isIOS, install: triggerPwaInstall } =
+    usePWAInstall();
+  const isOnline = useOnlineStatus();
   const [isHeaderMenuOpen, setIsHeaderMenuOpen] = useState<boolean>(false);
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
   const [fieldSyncBanner, setFieldSyncBanner] = useState<string | null>(null);
@@ -1929,6 +1941,31 @@ export default function App() {
                       </span>
                     </button>
 
+                    {!isInstalled && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          setIsHeaderMenuOpen(false);
+                          if (isInstallable) {
+                            await triggerPwaInstall();
+                          } else {
+                            setPwaGuideOpen(true);
+                          }
+                        }}
+                        className="w-full px-3 py-2 rounded-lg text-left text-xs font-semibold bg-sky-500/20 hover:bg-sky-500/30 text-sky-200 border border-sky-500/40 flex items-center justify-between transition-colors cursor-pointer"
+                      >
+                        <span className="flex items-center gap-2">
+                          <Smartphone className="w-3.5 h-3.5 text-sky-400" />
+                          <span>
+                            Instalar Aplicativo HydroDiag AI (Notebook / Celular)
+                          </span>
+                        </span>
+                        <span className="text-[10px] font-mono text-sky-300">
+                          PWA App
+                        </span>
+                      </button>
+                    )}
+
                     <a
                       href="/api/backup/download-zip"
                       download
@@ -1958,7 +1995,7 @@ export default function App() {
           <div className="flex flex-col gap-3 flex-1">
             {/* Unified Single-Row Workbench Command Bar: Zero two-line staggered wrapping */}
             <div className="bg-[#111827] border border-slate-800 rounded-lg px-3.5 py-2 flex flex-wrap lg:flex-nowrap items-center justify-between gap-2.5 no-print">
-              {/* Left Group: Input Drawer Toggle + Active Attachments + Quick Add */}
+              {/* Left Group: Input Drawer Toggle + Clickable Active Attachments for Quick PDF Inspector + Quick Add */}
               <div className="flex items-center gap-2 min-w-0 flex-1">
                 <button
                   type="button"
@@ -1994,25 +2031,37 @@ export default function App() {
                   |
                 </span>
 
-                {/* Active Attachments Inline Summary */}
+                {/* Active Attachments Interactive Quick-Inspect Bar */}
                 <div className="flex items-center gap-1.5 text-xs text-slate-300 min-w-0 flex-1">
-                  <FileText className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                  <span
-                    className="truncate text-slate-300 min-w-0 max-w-[180px] sm:max-w-[260px] xl:max-w-[360px]"
-                    title={
-                      attachments.length > 0
-                        ? attachments
-                            .map((a) => `#${a.sequenceIndex} ${a.name}`)
-                            .join(' · ')
-                        : 'Nenhum PDF anexado'
-                    }
-                  >
-                    {attachments.length > 0
-                      ? attachments
-                          .map((a) => `#${a.sequenceIndex} ${a.name}`)
-                          .join(' · ')
-                      : 'Nenhum PDF anexado'}
-                  </span>
+                  {attachments.length > 0 ? (
+                    <div className="flex items-center gap-1 min-w-0 max-w-[200px] sm:max-w-[290px] xl:max-w-[390px] overflow-x-auto no-scrollbar">
+                      {attachments.map((att) => (
+                        <button
+                          key={att.id}
+                          type="button"
+                          onClick={() =>
+                            setExternalPdfInspectRequest({
+                              attachmentId: att.id,
+                              page: 1,
+                              timestamp: Date.now(),
+                            })
+                          }
+                          className="px-2 py-1 rounded bg-[#0B111E] hover:bg-sky-500/15 border border-slate-800 hover:border-sky-500/40 text-slate-200 hover:text-sky-200 text-[11px] font-mono flex items-center gap-1 cursor-pointer transition-colors shrink-0 max-w-[190px]"
+                          title={`Clique para abrir "${att.name}" no Visualizador Rápido de PDF com Zoom (600%) e Marcação`}
+                        >
+                          <BookOpen className="w-3 h-3 text-sky-400 shrink-0" />
+                          <span className="truncate">
+                            #{att.sequenceIndex} {att.name}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="truncate text-slate-400 flex items-center gap-1.5">
+                      <FileText className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                      <span>Nenhum PDF anexado</span>
+                    </span>
+                  )}
 
                   <button
                     type="button"
@@ -2186,6 +2235,7 @@ export default function App() {
                     setIsLeftSidebarCollapsed((prev) => !prev)
                   }
                   onRelinkAttachmentBinary={handleRelinkAttachmentBinary}
+                  externalPdfInspectRequest={externalPdfInspectRequest}
                 />
               </div>
             </div>
@@ -2604,6 +2654,118 @@ export default function App() {
         sessionId={sessionId}
         investigationTitle={turns[0]?.userQuery}
       />
+
+      {/* Modal Guia de Instalação do Aplicativo (PWA Notebook & Celular) */}
+      {pwaGuideOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 no-print">
+          <div className="w-full max-w-md rounded-xl bg-[#0F172A] border border-slate-700 shadow-2xl p-5 flex flex-col gap-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-sky-500/15 border border-sky-500/30 flex items-center justify-center text-sky-400">
+                  <Smartphone className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-100">
+                    Instalar Aplicativo HydroDiag AI (PWA)
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Acesso direto na Área de Trabalho e Tela Inicial com suporte Offline
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPwaGuideOpen(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {isInstallable ? (
+              <div className="space-y-3 text-xs text-slate-300">
+                <p>
+                  Seu navegador está pronto para instalar o{' '}
+                  <strong>HydroDiag AI</strong> como aplicativo nativo:
+                </p>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await triggerPwaInstall();
+                    setPwaGuideOpen(false);
+                  }}
+                  className="w-full py-2.5 px-4 rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>Instalar Agora no Dispositivo</span>
+                </button>
+              </div>
+            ) : isIOS ? (
+              <div className="space-y-2.5 text-xs text-slate-300 bg-[#111827] border border-slate-800 rounded-lg p-3.5">
+                <p className="font-semibold text-sky-300">
+                  Como instalar no iPhone / iPad (Safari):
+                </p>
+                <ol className="list-decimal pl-4 space-y-1.5">
+                  <li>
+                    Toque no botão <strong>Compartilhar</strong> (ícone de seta
+                    para cima) na barra do Safari.
+                  </li>
+                  <li>
+                    Role para baixo e toque em{' '}
+                    <strong>Adicionar à Tela de Início</strong>.
+                  </li>
+                  <li>
+                    Confirme em <strong>Adicionar</strong> para criar o ícone do
+                    HydroDiag AI.
+                  </li>
+                </ol>
+              </div>
+            ) : (
+              <div className="space-y-3 text-xs text-slate-300">
+                <div className="bg-[#111827] border border-slate-800 rounded-lg p-3 space-y-1.5">
+                  <p className="font-semibold text-sky-300">
+                    💻 No Notebook (Chrome / Edge):
+                  </p>
+                  <p className="text-slate-300 leading-relaxed">
+                    Clique no ícone de <strong>Instalar Aplicativo</strong> (monitor com seta para baixo) no canto direito da barra de endereço de{' '}
+                    <code>hydrodiag-ai-pch-uhe.vercel.app</code> ou no menu{' '}
+                    <strong>⋮ ➔ Salvar e compartilhar ➔ Instalar HydroDiag AI</strong>.
+                  </p>
+                </div>
+                <div className="bg-[#111827] border border-slate-800 rounded-lg p-3 space-y-1.5">
+                  <p className="font-semibold text-emerald-300">
+                    📱 No Celular Android (Chrome):
+                  </p>
+                  <p className="text-slate-300 leading-relaxed">
+                    Toque no menu <strong>⋮</strong> (três pontos no topo direito) e selecione{' '}
+                    <strong>Instalar aplicativo</strong> ou{' '}
+                    <strong>Adicionar à tela inicial</strong>.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setPwaGuideOpen(false)}
+              className="w-full py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold cursor-pointer"
+            >
+              Entendi
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Indicador de Modo Offline (Casa de Força / Subterrâneo sem Wi-Fi ou 4G) */}
+      {!isOnline && (
+        <div className="fixed bottom-4 left-4 z-50 flex items-center gap-2 rounded-lg bg-amber-500 px-3.5 py-2 text-xs font-semibold text-slate-950 shadow-xl no-print">
+          <WifiOff className="w-4 h-4 shrink-0" />
+          <span>
+            Modo Offline (Casa de Força) — PDFs e Laudos salvos no Cofre Local
+            estão disponíveis.
+          </span>
+        </div>
+      )}
 
       <footer className="mt-auto border-t border-slate-800/80 px-6 py-4 text-xs text-slate-500 flex flex-wrap items-center justify-between gap-4 no-print">
         <span>
