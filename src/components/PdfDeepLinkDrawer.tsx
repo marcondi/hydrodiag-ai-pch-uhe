@@ -517,15 +517,7 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     useState<boolean>(false);
   const [windowState, setWindowState] = useState<
     'normal' | 'maximized' | 'minimized'
-  >(() => {
-    try {
-      const saved = localStorage.getItem('hydrodiag_pdf_window_mode_v1');
-      if (saved === 'normal' || saved === 'maximized') return saved;
-    } catch {
-      // ignore
-    }
-    return 'maximized';
-  });
+  >('normal');
   const [sheetFitMode, setSheetFitMode] = useState<'contain' | 'width'>(
     'contain'
   );
@@ -2186,13 +2178,71 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     );
   };
 
+  const toggleMaximizeWindow = () => {
+    setWindowState((prev) => (prev === 'maximized' ? 'normal' : 'maximized'));
+  };
+
+  const renderWindowControlButtons = (extraClass = '') => (
+    <div
+      data-no-pan="true"
+      className={`flex items-center gap-1 bg-[#0B111E] border border-slate-600 rounded-lg p-1 shrink-0 shadow-md ${extraClass}`}
+    >
+      <button
+        type="button"
+        onClick={() => setWindowState('minimized')}
+        className="px-2.5 py-1 text-xs font-mono font-semibold text-slate-100 hover:text-white bg-slate-800/80 hover:bg-amber-500/25 border border-slate-700 hover:border-amber-400/50 rounded transition-colors cursor-pointer flex items-center gap-1"
+        title="Minimizar janela para o rodapé (permite ler o Laudo e usar o Chat sem perder a folha aberta)"
+      >
+        <Minus className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+        <span>Minimizar</span>
+      </button>
+
+      <button
+        type="button"
+        onClick={toggleMaximizeWindow}
+        className={`px-2.5 py-1 text-xs font-mono font-semibold rounded transition-colors cursor-pointer flex items-center gap-1 border ${
+          windowState === 'maximized'
+            ? 'bg-sky-500/30 border-sky-400 text-white hover:bg-sky-500/40'
+            : 'bg-sky-600/25 border-sky-500/50 text-sky-200 hover:bg-sky-500/35 hover:text-white'
+        }`}
+        title={
+          windowState === 'maximized'
+            ? 'Restaurar tamanho normal da janela'
+            : 'Maximizar janela em Tela Cheia (100%)'
+        }
+      >
+        {windowState === 'maximized' ? (
+          <>
+            <Minimize2 className="w-3.5 h-3.5 text-sky-300 shrink-0" />
+            <span>Maximizar / Restaurar</span>
+          </>
+        ) : (
+          <>
+            <Maximize2 className="w-3.5 h-3.5 text-sky-300 shrink-0" />
+            <span>Maximizar</span>
+          </>
+        )}
+      </button>
+
+      <button
+        type="button"
+        onClick={onClose}
+        className="px-2.5 py-1 text-xs font-mono font-semibold text-slate-100 hover:text-white bg-rose-950/50 hover:bg-rose-600/50 border border-rose-700/60 hover:border-rose-400 rounded transition-colors cursor-pointer flex items-center gap-1"
+        title="Fechar janela (Tecla Esc)"
+      >
+        <X className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+        <span>Fechar</span>
+      </button>
+    </div>
+  );
+
   const drawerContent = (
     <div
       className={
         windowState === 'minimized'
           ? 'fixed bottom-4 right-4 z-[100] no-print'
           : windowState === 'maximized'
-            ? 'fixed inset-0 w-screen h-screen z-[100] bg-[#0B111E] flex items-stretch justify-stretch no-print'
+            ? 'fixed inset-0 w-full h-full z-[100] bg-[#0B111E] flex items-stretch justify-stretch no-print'
             : 'fixed inset-0 z-[100] bg-black/75 flex items-center justify-center p-2 sm:p-4 no-print'
       }
     >
@@ -2261,18 +2311,20 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
             <button
               type="button"
               onClick={() => setWindowState('maximized')}
-              className="p-1.5 rounded-md bg-slate-800 hover:bg-sky-600/30 border border-slate-700 hover:border-sky-500/50 text-slate-200 hover:text-white cursor-pointer transition-colors"
+              className="px-2.5 py-1.5 rounded-md bg-slate-800 hover:bg-sky-600/30 border border-slate-700 hover:border-sky-500/50 text-slate-200 hover:text-white text-xs font-mono font-semibold flex items-center gap-1 cursor-pointer transition-colors"
               title="Maximizar janela em Tela Cheia"
             >
-              <Maximize2 className="w-3.5 h-3.5" />
+              <Maximize2 className="w-3.5 h-3.5 text-sky-400" />
+              <span>Maximizar</span>
             </button>
             <button
               type="button"
               onClick={onClose}
-              className="p-1.5 rounded-md bg-slate-800 hover:bg-rose-600/40 border border-slate-700 hover:border-rose-500/60 text-slate-300 hover:text-white cursor-pointer transition-colors"
+              className="px-2.5 py-1.5 rounded-md bg-slate-800 hover:bg-rose-600/40 border border-slate-700 hover:border-rose-500/60 text-slate-300 hover:text-white text-xs font-mono font-semibold flex items-center gap-1 cursor-pointer transition-colors"
               title="Fechar janela (ESC)"
             >
-              <X className="w-3.5 h-3.5" />
+              <X className="w-3.5 h-3.5 text-rose-400" />
+              <span>Fechar</span>
             </button>
           </div>
         </div>
@@ -2349,8 +2401,8 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
           windowState === 'minimized'
             ? 'hidden'
             : windowState === 'maximized'
-              ? 'w-screen h-screen max-w-none max-h-none rounded-none border-0 bg-[#0B111E] flex flex-col shadow-2xl overflow-hidden focus:outline-none no-print-when-sheet'
-              : 'w-[92vw] max-w-6xl h-[88vh] rounded-xl bg-[#0B111E] border border-slate-700 flex flex-col shadow-2xl overflow-hidden focus:outline-none no-print-when-sheet'
+              ? 'w-full h-full max-w-none max-h-none rounded-none border-0 bg-[#0B111E] flex flex-col shadow-2xl overflow-hidden focus:outline-none no-print-when-sheet'
+              : 'w-[94vw] max-w-7xl h-[90vh] rounded-xl bg-[#0B111E] border border-slate-700 flex flex-col shadow-2xl overflow-hidden focus:outline-none no-print-when-sheet'
         }
       >
         {/* Top Control Bar (Double-click toggles Maximize/Restore) */}
@@ -2358,188 +2410,135 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
           onDoubleClick={(e) => {
             const target = e.target as HTMLElement;
             if (target.closest('button, a, input, select, form')) return;
-            setWindowState((prev) =>
-              prev === 'maximized' ? 'normal' : 'maximized'
-            );
+            toggleMaximizeWindow();
           }}
-          className="px-4 py-2.5 bg-[#111827] border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 shrink-0 select-none"
+          className="px-4 py-2 bg-[#111827] border-b border-slate-800 flex flex-col gap-2 shrink-0 select-none"
         >
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-8 h-8 rounded-md bg-sky-500/15 border border-sky-500/30 flex items-center justify-center text-sky-400 shrink-0">
-              <BookOpen className="w-4 h-4" />
-            </div>
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <h3 className="text-sm font-semibold text-slate-100 truncate">
-                  Inspetor Deep-Link de Diagrama Elétrico
-                </h3>
-                <span className="text-xs font-mono tabular-nums text-sky-400 shrink-0">
-                  Página {currentPage} de {effectiveTotalPages}
-                </span>
+          {/* Row 1: Window Title on Left + Pinned Minimizar / Maximizar / Fechar on Top-Right */}
+          <div className="flex items-center justify-between gap-3 min-w-0">
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+              <div className="w-8 h-8 rounded-md bg-sky-500/15 border border-sky-500/30 flex items-center justify-center text-sky-400 shrink-0">
+                <BookOpen className="w-4 h-4" />
               </div>
-              <p className="text-[11px] text-slate-400 truncate">
-                Folha Selo #{reconstructedSheet.folhaSelo} —{' '}
-                {reconstructedSheet.tituloFolha} (
-                <code>{reconstructedSheet.tagsPrincipais}</code>)
-              </p>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-semibold text-slate-100 truncate">
+                    Inspetor Deep-Link de Diagrama Elétrico
+                  </h3>
+                  <span className="text-xs font-mono tabular-nums text-sky-400 shrink-0">
+                    Página {currentPage} de {effectiveTotalPages}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400 truncate">
+                  Folha Selo #{reconstructedSheet.folhaSelo} —{' '}
+                  {reconstructedSheet.tituloFolha} (
+                  <code>{reconstructedSheet.tagsPrincipais}</code>)
+                </p>
+              </div>
             </div>
+
+            {/* Pinned Top-Right Window Controls (Minimizar, Maximizar, Fechar) */}
+            {renderWindowControlButtons()}
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            {/* Selector if multiple PDFs are attached */}
-            {attachments.length > 1 && (
-              <select
-                aria-label="Selecionar Arquivo PDF da Sequência"
-                value={activeAttachment?.id || ''}
-                onChange={(e) => {
-                  setSelectedAttachmentId(e.target.value);
-                  setCurrentPage(1);
-                  setPageInput('1');
-                }}
-                className="bg-[#0B111E] border border-slate-700 text-slate-200 text-xs font-mono rounded-md px-2.5 py-1.5 focus:outline-none focus:border-sky-500 max-w-[220px] truncate cursor-pointer"
-              >
-                {attachments.map((att) => (
-                  <option key={att.id} value={att.id}>
-                    #{att.sequenceIndex} {att.name} ({att.categoryTag})
-                  </option>
-                ))}
-              </select>
-            )}
+          {/* Row 2: File Selector, Page Input, Download, Ask AI */}
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-800/80">
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Selector if multiple PDFs are attached */}
+              {attachments.length > 1 && (
+                <select
+                  aria-label="Selecionar Arquivo PDF da Sequência"
+                  value={activeAttachment?.id || ''}
+                  onChange={(e) => {
+                    setSelectedAttachmentId(e.target.value);
+                    setCurrentPage(1);
+                    setPageInput('1');
+                  }}
+                  className="bg-[#0B111E] border border-slate-700 text-slate-200 text-xs font-mono rounded-md px-2.5 py-1.5 focus:outline-none focus:border-sky-500 max-w-[240px] truncate cursor-pointer"
+                >
+                  {attachments.map((att) => (
+                    <option key={att.id} value={att.id}>
+                      #{att.sequenceIndex} {att.name} ({att.categoryTag})
+                    </option>
+                  ))}
+                </select>
+              )}
 
-            {/* Page Navigation Controls */}
-            <div className="flex items-center gap-1 bg-[#0B111E] border border-slate-800 rounded-md p-1">
-              <button
-                type="button"
-                disabled={currentPage <= 1 || isLoadingPage}
-                onClick={() => handleGoToPage(currentPage - 1)}
-                className="p-1 text-slate-300 hover:text-white hover:bg-slate-800 disabled:opacity-40 rounded cursor-pointer"
-                title="Página Anterior (Seta Esquerda)"
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
+              {/* Page Navigation Controls */}
+              <div className="flex items-center gap-1 bg-[#0B111E] border border-slate-800 rounded-md p-1">
+                <button
+                  type="button"
+                  disabled={currentPage <= 1 || isLoadingPage}
+                  onClick={() => handleGoToPage(currentPage - 1)}
+                  className="p-1 text-slate-300 hover:text-white hover:bg-slate-800 disabled:opacity-40 rounded cursor-pointer"
+                  title="Página Anterior (Seta Esquerda)"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
 
-              <form
-                onSubmit={handlePageInputSubmit}
-                className="flex items-center gap-1 px-1"
-              >
-                <span className="text-[11px] text-slate-400">Pág.</span>
-                <input
-                  type="text"
-                  value={pageInput}
-                  onChange={(e) => setPageInput(e.target.value)}
-                  onBlur={handlePageInputSubmit}
-                  aria-label="Número da página do PDF"
-                  className="w-11 text-center bg-[#111827] border border-slate-700 focus:border-sky-500 rounded py-0.5 text-xs font-mono tabular-nums text-slate-100 focus:outline-none"
-                />
-                <span className="text-[11px] font-mono tabular-nums text-slate-400">
-                  / {effectiveTotalPages}
-                </span>
-              </form>
+                <form
+                  onSubmit={handlePageInputSubmit}
+                  className="flex items-center gap-1 px-1"
+                >
+                  <span className="text-[11px] text-slate-400">Pág.</span>
+                  <input
+                    type="text"
+                    value={pageInput}
+                    onChange={(e) => setPageInput(e.target.value)}
+                    onBlur={handlePageInputSubmit}
+                    aria-label="Número da página do PDF"
+                    className="w-11 text-center bg-[#111827] border border-slate-700 focus:border-sky-500 rounded py-0.5 text-xs font-mono tabular-nums text-slate-100 focus:outline-none"
+                  />
+                  <span className="text-[11px] font-mono tabular-nums text-slate-400">
+                    / {effectiveTotalPages}
+                  </span>
+                </form>
 
-              <button
-                type="button"
-                disabled={currentPage >= effectiveTotalPages || isLoadingPage}
-                onClick={() => handleGoToPage(currentPage + 1)}
-                className="p-1 text-slate-300 hover:text-white hover:bg-slate-800 disabled:opacity-40 rounded cursor-pointer"
-                title="Próxima Página (Seta Direita)"
-              >
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            </div>
+                <button
+                  type="button"
+                  disabled={currentPage >= effectiveTotalPages || isLoadingPage}
+                  onClick={() => handleGoToPage(currentPage + 1)}
+                  className="p-1 text-slate-300 hover:text-white hover:bg-slate-800 disabled:opacity-40 rounded cursor-pointer"
+                  title="Próxima Página (Seta Direita)"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
 
-            {effectivePdfUrlForDownloadOrIframe && (
-              <a
-                href={effectivePdfUrlForDownloadOrIframe}
-                download={`${cleanDocBaseName}_Pagina_${currentPage}${currentPageShapes.length > 0 ? '_Anotada_Campo' : ''}.pdf`}
-                className="px-2.5 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-md flex items-center gap-1.5 transition-colors cursor-pointer"
-                title={
-                  currentPageShapes.length > 0
-                    ? 'Baixar esta folha em PDF já com todas as suas anotações gravadas'
-                    : 'Baixar apenas esta folha recortada em PDF'
-                }
-              >
-                <Download className="w-3.5 h-3.5 text-sky-400" />
-                <span className="hidden sm:inline">
-                  {currentPageShapes.length > 0
-                    ? `Baixar PDF Anotado (${currentPageShapes.length})`
-                    : 'Baixar Folha'}
-                </span>
-              </a>
-            )}
+              {effectivePdfUrlForDownloadOrIframe && (
+                <a
+                  href={effectivePdfUrlForDownloadOrIframe}
+                  download={`${cleanDocBaseName}_Pagina_${currentPage}${currentPageShapes.length > 0 ? '_Anotada_Campo' : ''}.pdf`}
+                  className="px-2.5 py-1.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-md flex items-center gap-1.5 transition-colors cursor-pointer"
+                  title={
+                    currentPageShapes.length > 0
+                      ? 'Baixar esta folha em PDF já com todas as suas anotações gravadas'
+                      : 'Baixar apenas esta folha recortada em PDF'
+                  }
+                >
+                  <Download className="w-3.5 h-3.5 text-sky-400" />
+                  <span className="hidden sm:inline">
+                    {currentPageShapes.length > 0
+                      ? `Baixar PDF Anotado (${currentPageShapes.length})`
+                      : 'Baixar Folha'}
+                  </span>
+                </a>
+              )}
 
-            {onAskAboutCurrentPage && activeAttachment && (
-              <button
-                type="button"
-                onClick={() => {
-                  onAskAboutCurrentPage(currentPage, activeAttachment.name);
-                  onClose();
-                }}
-                className="px-3 py-1.5 text-xs font-medium text-white bg-sky-600 hover:bg-sky-500 rounded-md flex items-center gap-1.5 transition-colors cursor-pointer"
-                title="Perguntar ao Engenheiro Eletricista no Chat sobre os bornes desta página"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                <span>Perguntar sobre Pág. {currentPage}</span>
-              </button>
-            )}
-
-            {/* Window Controls Group: Minimizar, Maximizar/Restaurar, Fechar */}
-            <div className="flex items-center gap-1 bg-[#0B111E] border border-slate-700 rounded-lg p-1 ml-1">
-              <button
-                type="button"
-                onClick={() => setWindowState('minimized')}
-                className="px-2.5 py-1 text-xs font-mono text-slate-200 hover:text-white hover:bg-slate-800 rounded transition-colors cursor-pointer flex items-center gap-1"
-                title="Minimizar janela para o rodapé (permite ler o Laudo e usar o Chat sem perder a folha aberta)"
-              >
-                <Minus className="w-3.5 h-3.5 text-amber-400" />
-                <span>Minimizar</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setWindowState((prev) => {
-                    const next = prev === 'maximized' ? 'normal' : 'maximized';
-                    try {
-                      localStorage.setItem('hydrodiag_pdf_window_mode_v1', next);
-                    } catch {
-                      // ignore
-                    }
-                    return next;
-                  });
-                }}
-                className={`px-2.5 py-1 text-xs font-mono font-semibold rounded transition-colors cursor-pointer flex items-center gap-1 ${
-                  windowState === 'maximized'
-                    ? 'bg-sky-500/25 border border-sky-500/50 text-sky-200 hover:bg-sky-500/35'
-                    : 'bg-sky-600/20 border border-sky-500/40 text-sky-200 hover:bg-sky-500/30 hover:text-white'
-                }`}
-                title={
-                  windowState === 'maximized'
-                    ? 'Restaurar tamanho normal da janela'
-                    : 'Maximizar janela em Tela Cheia (100%)'
-                }
-              >
-                {windowState === 'maximized' ? (
-                  <>
-                    <Minimize2 className="w-3.5 h-3.5 text-sky-300" />
-                    <span>Restaurar</span>
-                  </>
-                ) : (
-                  <>
-                    <Maximize2 className="w-3.5 h-3.5 text-sky-300" />
-                    <span>Maximizar</span>
-                  </>
-                )}
-              </button>
-
-              <button
-                type="button"
-                onClick={onClose}
-                className="px-2.5 py-1 text-xs font-mono text-slate-200 hover:text-white hover:bg-rose-600/35 rounded transition-colors cursor-pointer flex items-center gap-1"
-                title="Fechar janela (Tecla Esc)"
-              >
-                <X className="w-3.5 h-3.5 text-rose-400" />
-                <span>Fechar</span>
-              </button>
+              {onAskAboutCurrentPage && activeAttachment && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onAskAboutCurrentPage(currentPage, activeAttachment.name);
+                    onClose();
+                  }}
+                  className="px-3 py-1.5 text-xs font-medium text-white bg-sky-600 hover:bg-sky-500 rounded-md flex items-center gap-1.5 transition-colors cursor-pointer"
+                  title="Perguntar ao Engenheiro Eletricista no Chat sobre os bornes desta página"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Perguntar sobre Pág. {currentPage}</span>
+                </button>
+              )}
             </div>
           </div>
         </div>

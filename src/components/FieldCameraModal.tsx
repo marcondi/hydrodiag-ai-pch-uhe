@@ -19,6 +19,9 @@ import {
   Pencil,
   Undo2,
   Trash2,
+  Minus,
+  Maximize2,
+  Minimize2,
 } from 'lucide-react';
 import { UniversalVoiceDictation } from '../utils/voiceDictationEngine';
 
@@ -398,6 +401,7 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
   const voiceEngineRef = useRef<UniversalVoiceDictation | null>(null);
 
   const [isLiveVideoOpen, setIsLiveVideoOpen] = useState(false);
+  const [windowState, setWindowState] = useState<'normal' | 'maximized' | 'minimized'>('normal');
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [capturedPhoto, setCapturedPhoto] = useState<{
     base64: string;
@@ -699,7 +703,15 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-3 sm:p-4 no-print">
+    <div
+      className={
+        windowState === 'minimized'
+          ? 'fixed bottom-4 left-4 z-50 no-print'
+          : windowState === 'maximized'
+            ? 'fixed inset-0 w-full h-full z-50 bg-[#0B111E] flex items-stretch justify-stretch no-print'
+            : 'fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-3 sm:p-4 no-print'
+      }
+    >
       {/* Hidden Native Camera & Gallery Inputs */}
       <input
         ref={nativeCameraInputRef}
@@ -717,39 +729,136 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
         className="hidden"
       />
 
-      <div className="bg-[#111827] border border-slate-700 rounded-xl max-w-2xl w-full max-h-[92vh] overflow-y-auto shadow-2xl flex flex-col">
+      {windowState === 'minimized' ? (
+        <div className="bg-[#111827] border-2 border-emerald-500/70 rounded-xl shadow-2xl px-3.5 py-2.5 flex items-center gap-3 max-w-[95vw] sm:max-w-lg backdrop-blur-md">
+          <div
+            onClick={() => setWindowState('normal')}
+            className="flex items-center gap-2.5 min-w-0 cursor-pointer"
+            title="Restaurar janela de Captura de Campo"
+          >
+            <div className="w-8 h-8 rounded-lg bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shrink-0">
+              <Camera className="w-4 h-4" />
+            </div>
+            <div className="min-w-0">
+              <span className="text-xs font-mono font-bold text-white block truncate">
+                Captura de Campo (Minimizada)
+              </span>
+              <span className="text-[10px] font-mono text-slate-400 block truncate">
+                Clique para restaurar ou maximizar
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0 border-l border-slate-700 pl-2.5">
+            <button
+              type="button"
+              onClick={() => setWindowState('normal')}
+              className="px-2.5 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-mono font-semibold flex items-center gap-1 cursor-pointer"
+            >
+              <Minimize2 className="w-3.5 h-3.5" />
+              <span>Restaurar</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setWindowState('maximized')}
+              className="px-2.5 py-1.5 rounded-md bg-slate-800 hover:bg-sky-600/30 border border-slate-700 text-slate-200 text-xs font-mono font-semibold flex items-center gap-1 cursor-pointer"
+            >
+              <Maximize2 className="w-3.5 h-3.5 text-sky-400" />
+              <span>Maximizar</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                stopLiveCamera();
+                stopVoiceDictation();
+                setWindowState('normal');
+                onClose();
+              }}
+              className="px-2.5 py-1.5 rounded-md bg-slate-800 hover:bg-rose-600/40 border border-slate-700 text-slate-300 text-xs font-mono font-semibold flex items-center gap-1 cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5 text-rose-400" />
+              <span>Fechar</span>
+            </button>
+          </div>
+        </div>
+      ) : (
+      <div
+        className={
+          windowState === 'maximized'
+            ? 'bg-[#111827] w-full h-full max-w-none max-h-none rounded-none border-0 overflow-y-auto shadow-2xl flex flex-col'
+            : 'bg-[#111827] border border-slate-700 rounded-xl max-w-2xl w-full max-h-[92vh] overflow-y-auto shadow-2xl flex flex-col'
+        }
+      >
         {/* Header */}
-        <div className="px-4 py-3.5 bg-[#0B111E] border-b border-slate-800 flex items-center justify-between gap-3 sticky top-0 z-10">
-          <div className="flex items-center gap-2.5">
+        <div className="px-4 py-3 bg-[#0B111E] border-b border-slate-800 flex items-center justify-between gap-3 sticky top-0 z-10">
+          <div className="flex items-center gap-2.5 min-w-0">
             <div className="w-9 h-9 rounded-lg bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
               <Camera className="w-5 h-5" />
             </div>
-            <div>
-              <h3 className="text-sm font-semibold text-slate-100 flex items-center gap-2">
+            <div className="min-w-0">
+              <h3 className="text-sm font-semibold text-slate-100 flex items-center gap-2 truncate">
                 <span>Captura de Campo (Celular ⇄ Sala de Comando)</span>
               </h3>
-              <p className="text-[11px] text-slate-400 flex items-center gap-1.5 mt-0.5">
-                <Smartphone className="w-3 h-3 text-emerald-400" />
+              <p className="text-[11px] text-slate-400 flex items-center gap-1.5 mt-0.5 truncate">
+                <Smartphone className="w-3 h-3 text-emerald-400 shrink-0" />
                 <span>Tire a foto e circule o borne</span>
-                <ArrowRight className="w-3 h-3 text-slate-500" />
-                <Laptop className="w-3 h-3 text-sky-400" />
-                <span>Continue no Notebook da Sala de Comando</span>
+                <ArrowRight className="w-3 h-3 text-slate-500 shrink-0" />
+                <Laptop className="w-3 h-3 text-sky-400 shrink-0" />
+                <span>Continue no Notebook</span>
               </p>
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={() => {
-              stopLiveCamera();
-              stopVoiceDictation();
-              onClose();
-            }}
-            className="px-2.5 py-1.5 text-slate-400 hover:text-white bg-slate-800/80 hover:bg-rose-600/30 border border-slate-700 rounded-md flex items-center gap-1 cursor-pointer"
-          >
-            <span className="text-[10px] font-mono">ESC</span>
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-1 bg-[#111827] border border-slate-700 rounded-lg p-1 shrink-0">
+            <button
+              type="button"
+              onClick={() => setWindowState('minimized')}
+              className="px-2 py-1 text-xs font-mono font-semibold text-slate-200 hover:text-white bg-slate-800/80 hover:bg-amber-500/20 border border-slate-700 rounded flex items-center gap-1 cursor-pointer"
+              title="Minimizar janela"
+            >
+              <Minus className="w-3.5 h-3.5 text-amber-400" />
+              <span className="hidden sm:inline">Minimizar</span>
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                setWindowState((prev) =>
+                  prev === 'maximized' ? 'normal' : 'maximized'
+                )
+              }
+              className="px-2 py-1 text-xs font-mono font-semibold text-sky-200 hover:text-white bg-sky-600/20 hover:bg-sky-500/30 border border-sky-500/40 rounded flex items-center gap-1 cursor-pointer"
+              title={
+                windowState === 'maximized'
+                  ? 'Restaurar tamanho normal'
+                  : 'Maximizar janela'
+              }
+            >
+              {windowState === 'maximized' ? (
+                <>
+                  <Minimize2 className="w-3.5 h-3.5 text-sky-300" />
+                  <span className="hidden sm:inline">Restaurar</span>
+                </>
+              ) : (
+                <>
+                  <Maximize2 className="w-3.5 h-3.5 text-sky-300" />
+                  <span className="hidden sm:inline">Maximizar</span>
+                </>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                stopLiveCamera();
+                stopVoiceDictation();
+                setWindowState('normal');
+                onClose();
+              }}
+              className="px-2 py-1 text-xs font-mono font-semibold text-slate-200 hover:text-white bg-rose-950/50 hover:bg-rose-600/40 border border-rose-700/50 rounded flex items-center gap-1 cursor-pointer"
+              title="Fechar janela (ESC)"
+            >
+              <X className="w-3.5 h-3.5 text-rose-400" />
+              <span className="hidden sm:inline">Fechar</span>
+            </button>
+          </div>
         </div>
 
         {/* Body */}
@@ -1145,6 +1254,7 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
           </div>
         </div>
       </div>
+      )}
     </div>
   );
 };
