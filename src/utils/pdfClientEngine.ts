@@ -512,6 +512,204 @@ export interface ReconstructedSheetInfo {
   extractedBornesAndTags: string[];
 }
 
+/**
+ * Analisa os lotes indexados em cache (tanto no formato compacto `21|FL. 19|TITULO`
+ * gerado pelo backend quanto no formato verboso `PAGINA_PDF: 21 | FOLHA_SELO: ...`)
+ */
+export function parseCachedIndexEntries(
+  cachedBatches: PageBatchIndex[] | null | undefined
+): ReconstructedSheetPageEntry[] {
+  if (!cachedBatches || cachedBatches.length === 0) return [];
+  const entries: ReconstructedSheetPageEntry[] = [];
+  const seenPages = new Set<number>();
+
+  for (const batch of cachedBatches) {
+    if (!batch?.summary) continue;
+
+    // 1. Formato verboso: PAGINA_PDF: X | FOLHA_SELO: Y | TITULO: Z | TAGS PRINCIPAIS: W
+    const verboseRegex =
+      /PAGINA_PDF:\s*(\d+)\s*\|\s*FOLHA_SELO:\s*([^|\n]+?)\s*\|\s*T[ÍI]TULO:\s*([^|\n]+?)\s*\|\s*TAGs?\s*PRINCIPAIS?:\s*([^\n|]+?)(?=\s+PAGINA_PDF:|\s*$)/gi;
+    let m: RegExpExecArray | null;
+    while ((m = verboseRegex.exec(batch.summary)) !== null) {
+      const pg = parseInt(m[1], 10);
+      if (!isNaN(pg) && !seenPages.has(pg)) {
+        seenPages.add(pg);
+        entries.push({
+          pdfPage: pg,
+          folhaSelo: m[2].trim(),
+          titulo: m[3].trim(),
+          tags: m[4].trim(),
+        });
+      }
+    }
+
+    // 2. Formato compacto retornado pelo index_batch do servidor: 31|FL. 29|DIAGRAMA FUNCIONAL...
+    const lines = batch.summary.split(/\r?\n/);
+    for (const rawLine of lines) {
+      const line = rawLine.replace(/^[\s*•\-–]+/, '').trim();
+      if (!line || /^PAGINA_PDF/i.test(line)) continue;
+      const pipeMatch = line.match(
+        /^(\d{1,4})\s*\|\s*([^|]+?)\s*\|\s*(.+)$/
+      );
+      if (pipeMatch) {
+        const pg = parseInt(pipeMatch[1], 10);
+        if (!isNaN(pg) && !seenPages.has(pg)) {
+          seenPages.add(pg);
+          const rawFolha = pipeMatch[2].trim();
+          const restParts = pipeMatch[3].split('|').map((s) => s.trim());
+          const titulo = restParts[0] || `DIAGRAMA — PÁGINA ${pg}`;
+          const tags = restParts.slice(1).join(' · ') || titulo;
+          entries.push({
+            pdfPage: pg,
+            folhaSelo: rawFolha,
+            titulo,
+            tags,
+          });
+        }
+      }
+    }
+  }
+
+  return entries.sort((a, b) => a.pdfPage - b.pdfPage);
+}
+
+export interface FolhaToPdfPageLookup {
+  folhaToPdfPage: Map<number, number>;
+  pdfPageToFolha: Map<number, number>;
+  modalOffset: number | null;
+}
+
+/**
+ * Constrói o mapa bidirecional entre o número da Folha no Selo WEG (`FL. 29` / `Folha 29`)
+ * e o número real da Página no arquivo PDF (`Página 31`), combinando o índice de páginas
+ * do PDF e os pares explícitos citados no texto do diagnóstico.
+ */
+export function buildFolhaToPdfPageLookup(
+  rawMarkdown?: string,
+  cachedBatches?: PageBatchIndex[] | null
+): FolhaToPdfPageLookup {
+  const folhaToPdfPage = new Map<number, number>();
+  const pdfPageToFolha = new Map<number, number>();
+  const offsetCounts = new Map<number, number>();
+
+  const recordPair = (folhaNum: number, pdfPageNum: number) => {
+    if (
+      isNaN(folhaNum) ||
+      isNaN(pdfPageNum) ||
+      folhaNum < 1 ||
+      pdfPageNum < 1 ||
+      folhaNum > 2000 ||
+      pdfPageNum > 2000
+    ) {
+      return;
+    }
+    if (!folhaToPdfPage.has(folhaNum)) {
+      folhaToPdfPage.set(folhaNum, pdfPageNum);
+    }
+    if (!pdfPageToFolha.has(pdfPageNum)) {
+      pdfPageToFolha.set(pdfPageNum, folhaNum);
+    }
+    const diff = pdfPageNum - folhaNum;
+    if (diff >= 0 && diff <= 25) {
+      offsetCounts.set(diff, (offsetCounts.get(diff) || 0) + 1);
+    }
+  };
+
+  // 1. Pares vindos do índice em cache do PDF (ex: 31|FL. 29|...)
+  const entries = parseCachedIndexEntries(cachedBatches);
+  for (const entry of entries) {
+    const flMatch = entry.folhaSelo.match(/(\d{1,4})/);
+    if (flMatch) {
+      const flNum = parseInt(flMatch[1], 10);
+      recordPair(flNum, entry.pdfPage);
+    }
+  }
+
+  // 2. Pares explícitos citados no texto do Laudo/Chat (ex: "Folha Selo FL. 29 / Página 31" ou "Página 31 (FL. 29)")
+  if (rawMarkdown) {
+    const clean = rawMarkdown.replace(/\*\*/g, '').replace(/`/g, '');
+
+    // Padrão A: Folha [Selo] [FL.] X ... Página Y
+    const rgxFolhaFirst =
+      /\b(?:Folha(?:\s+do\s+Selo|\s+Selo)?(?:\s+FL\.?)?|Fl\.?)\s*#?\s*(\d{1,3})\s*(?:\/|\(|—|–|-|,|\s+na\s+|\s+da\s+|\s+correspondente\s+[àa]\s+|\s+que\s+[ée]\s+a\s+)\s*P[áa]g(?:ina)?\.?\s*(?:do\s+PDF\s*)?#?\s*(\d{1,3})\b/gi;
+    let m: RegExpExecArray | null;
+    while ((m = rgxFolhaFirst.exec(clean)) !== null) {
+      recordPair(parseInt(m[1], 10), parseInt(m[2], 10));
+    }
+
+    // Padrão B: Página Y ... Folha [Selo] [FL.] X
+    const rgxPageFirst =
+      /\bP[áa]g(?:ina)?\.?\s*(?:do\s+PDF\s*)?#?\s*(\d{1,3})\s*(?:do\s+PDF\s*)?(?:\s+Original\s*)?(?:\/|\(|—|–|-|,|\s+selo\s+|\s+correspondente\s+[àa]\s+)\s*(?:Folha(?:\s+do\s+Selo|\s+Selo)?\s*)?(?:FL\.?\s*)?#?\s*(\d{1,3})\b/gi;
+    while ((m = rgxPageFirst.exec(clean)) !== null) {
+      recordPair(parseInt(m[2], 10), parseInt(m[1], 10));
+    }
+  }
+
+  // Determinar o offset modal (ex: +2 em cadernos WEG com capa + índice)
+  let modalOffset: number | null = null;
+  let bestCount = 0;
+  for (const [offset, count] of offsetCounts.entries()) {
+    if (count > bestCount || (count === bestCount && offset > 0 && (modalOffset === 0 || modalOffset === null))) {
+      bestCount = count;
+      modalOffset = offset;
+    }
+  }
+
+  return {
+    folhaToPdfPage,
+    pdfPageToFolha,
+    modalOffset,
+  };
+}
+
+/**
+ * Resolve qualquer número citado (seja `Página Y` ou `Folha / FL. X`) para o
+ * número EXATO da página física do arquivo PDF.
+ */
+export function resolveCitationToPdfPage(
+  citedNumber: number,
+  isFolhaCitation: boolean,
+  rawMarkdown?: string,
+  cachedBatches?: PageBatchIndex[] | null
+): { pdfPage: number; folhaSelo?: number } {
+  const lookup = buildFolhaToPdfPageLookup(rawMarkdown, cachedBatches);
+
+  if (!isFolhaCitation) {
+    const knownFolha =
+      lookup.pdfPageToFolha.get(citedNumber) ??
+      (lookup.modalOffset !== null &&
+      lookup.modalOffset > 0 &&
+      citedNumber > lookup.modalOffset
+        ? citedNumber - lookup.modalOffset
+        : undefined);
+    return {
+      pdfPage: citedNumber,
+      folhaSelo: knownFolha,
+    };
+  }
+
+  // É uma citação de Folha / FL. (ex: FL. 29 ou Folha 29)
+  const exactPdfPage = lookup.folhaToPdfPage.get(citedNumber);
+  if (exactPdfPage !== undefined) {
+    return {
+      pdfPage: exactPdfPage,
+      folhaSelo: citedNumber,
+    };
+  }
+
+  if (lookup.modalOffset !== null && lookup.modalOffset > 0) {
+    return {
+      pdfPage: citedNumber + lookup.modalOffset,
+      folhaSelo: citedNumber,
+    };
+  }
+
+  return {
+    pdfPage: citedNumber,
+    folhaSelo: citedNumber,
+  };
+}
+
 export function extractReconstructedPageSheetData(
   pageNumber: number,
   attachmentName: string,
@@ -524,27 +722,32 @@ export function extractReconstructedPageSheetData(
       : 0;
   const totalPages = Math.max(maxBatchPage, pageNumber, 1);
 
+  const allParsedEntries = parseCachedIndexEntries(cachedBatches);
   const matchingBatch = cachedBatches?.find(
     (b) => pageNumber >= b.startPage && pageNumber <= b.endPage
   );
+  const batchPages = matchingBatch
+    ? allParsedEntries.filter(
+        (e) =>
+          e.pdfPage >= matchingBatch.startPage &&
+          e.pdfPage <= matchingBatch.endPage
+      )
+    : allParsedEntries;
 
-  const batchPages: ReconstructedSheetPageEntry[] = [];
-  if (matchingBatch?.summary) {
-    const entryRegex =
-      /PAGINA_PDF:\s*(\d+)\s*\|\s*FOLHA_SELO:\s*([^|\n]+?)\s*\|\s*T[ÍI]TULO:\s*([^|\n]+?)\s*\|\s*TAGs?\s*PRINCIPAIS?:\s*([^\n|]+?)(?=\s+PAGINA_PDF:|\s*$)/gi;
-    let m: RegExpExecArray | null;
-    while ((m = entryRegex.exec(matchingBatch.summary)) !== null) {
-      batchPages.push({
-        pdfPage: parseInt(m[1], 10),
-        folhaSelo: m[2].trim(),
-        titulo: m[3].trim(),
-        tags: m[4].trim(),
-      });
-    }
-  }
+  const exactEntry = allParsedEntries.find((e) => e.pdfPage === pageNumber);
+  const lookup = buildFolhaToPdfPageLookup(reportMarkdown, cachedBatches);
+  const mappedFolhaNum = lookup.pdfPageToFolha.get(pageNumber);
 
-  const exactEntry = batchPages.find((e) => e.pdfPage === pageNumber);
-  const folhaSelo = exactEntry?.folhaSelo || String(pageNumber);
+  const folhaSelo =
+    exactEntry?.folhaSelo ||
+    (mappedFolhaNum !== undefined
+      ? `FL. ${String(mappedFolhaNum).padStart(2, '0')}`
+      : lookup.modalOffset !== null &&
+          lookup.modalOffset > 0 &&
+          pageNumber > lookup.modalOffset
+        ? `FL. ${String(pageNumber - lookup.modalOffset).padStart(2, '0')}`
+        : String(pageNumber));
+
   const tituloFolha =
     exactEntry?.titulo ||
     `DIAGRAMA ESQUEMÁTICO / FUNCIONAL — PÁGINA ${pageNumber}`;
@@ -560,9 +763,12 @@ export function extractReconstructedPageSheetData(
     .map((l) => l.replace(/^[\s*•\-–]+/, '').trim())
     .filter((l) => l.length > 15);
 
+  const folhaNumeric = folhaSelo.match(/(\d{1,4})/)?.[1];
   const pageRgx = new RegExp(
-    `\\b(?:P[áa]gina|P[áa]g\\.?|Folha|Fl\\.?)\\s*#?\\s*(?:${pageNumber}${
-      folhaSelo !== String(pageNumber) ? `|${folhaSelo}` : ''
+    `\\b(?:P[áa]gina|P[áa]g\\.?|Folha|Fl\\.?)\\s*(?:Selo\\s*)?(?:FL\\.?\\s*)?#?\\s*(?:${pageNumber}${
+      folhaNumeric && folhaNumeric !== String(pageNumber)
+        ? `|${folhaNumeric}`
+        : ''
     })\\b`,
     'i'
   );
@@ -1087,14 +1293,20 @@ export async function extractSinglePdfPageUrl(
 
 /**
  * Transforma citações de páginas e folhas no texto do Laudo ou Chat
- * (ex: "Página 12", "Pág. 49", "Folha 31", "Fl. 4") em links clicáveis
- * no formato `[texto](#pdf-page-N)` sem quebrar blocos de código ou links já existentes.
+ * (ex: "Página 31", "Pág. 49", "Folha 29", "FL. 29") em links clicáveis
+ * no formato `[texto](#pdf-page-N)` apontando SEMPRE para a página física real do PDF
+ * (resolvendo automaticamente a diferença entre Folha do Selo WEG e Página do PDF).
  */
-export function linkifyPdfPageReferences(markdownText: string): string {
+export function linkifyPdfPageReferences(
+  markdownText: string,
+  cachedBatches?: PageBatchIndex[] | null
+): string {
   if (!markdownText) return '';
 
   // Evitar alterar dentro de blocos de código ```...``` ou `...` ou links existentes [...] (...)
-  const segments = markdownText.split(/(```[\s\S]*?```|`[^`\n]+`|\[[^\]]+\]\([^)]+\))/g);
+  const segments = markdownText.split(
+    /(```[\s\S]*?```|`[^`\n]+`|\[[^\]]+\]\([^)]+\))/g
+  );
 
   return segments
     .map((segment) => {
@@ -1107,13 +1319,20 @@ export function linkifyPdfPageReferences(markdownText: string): string {
       }
 
       return segment.replace(
-        /\b((?:P[áa]gina|P[áa]g\.?|Folha|Fl\.?)\s*(?:do\s+PDF\s*)?#?\s*(\d{1,3}))\b/gi,
+        /\b((?:P[áa]gina|P[áa]g\.?|Folha(?:\s+do\s+Selo|\s+Selo)?(?:\s+FL\.?)?|Fl\.?)\s*(?:do\s+PDF\s*)?#?\s*(\d{1,3}))\b/gi,
         (fullMatch, labelPart, numStr) => {
-          const pageNum = parseInt(numStr, 10);
-          if (isNaN(pageNum) || pageNum < 1 || pageNum > 999) {
+          const citedNum = parseInt(numStr, 10);
+          if (isNaN(citedNum) || citedNum < 1 || citedNum > 999) {
             return fullMatch;
           }
-          return `[${labelPart}](#pdf-page-${pageNum})`;
+          const isFolha = /^(?:Folha|Fl\.?)/i.test(labelPart.trim());
+          const resolved = resolveCitationToPdfPage(
+            citedNum,
+            isFolha,
+            markdownText,
+            cachedBatches
+          );
+          return `[${labelPart}](#pdf-page-${resolved.pdfPage})`;
         }
       );
     })
@@ -1243,16 +1462,50 @@ export function extractProbeSummaryFromMarkdown(
       : 'Contatos NA / NF e Bornes do Circuito';
 
   // 7. Extrair primeira Página / Folha e Coordenada citada para botão Deep-Link
-  const pageMatch =
-    clean.match(/\b(?:P[áa]gina|P[áa]g\.?)\s*(?:do\s+PDF\s*)?#?\s*(\d{1,3})\b/i) ||
-    clean.match(/\b(?:Folha|Fl\.?)\s*#?\s*(\d{1,3})\b/i);
-  const locationPage = pageMatch ? parseInt(pageMatch[1], 10) : null;
+  // Prioriza número explícito de "Página" no bloco de teste; se encontrar apenas "Folha / FL.", converte para a Página real do PDF!
+  const explicitPageInBlock = targetBlock.match(
+    /\b(?:P[áa]gina|P[áa]g\.?)\s*(?:do\s+PDF\s*)?#?\s*(\d{1,3})\b/i
+  );
+  const explicitPageInClean = clean.match(
+    /\b(?:P[áa]gina|P[áa]g\.?)\s*(?:do\s+PDF\s*)?#?\s*(\d{1,3})\b/i
+  );
+  const explicitFolhaMatch =
+    targetBlock.match(
+      /\b(?:Folha(?:\s+Selo)?(?:\s+FL\.?)?|Fl\.?)\s*#?\s*(\d{1,3})\b/i
+    ) ||
+    clean.match(
+      /\b(?:Folha(?:\s+Selo)?(?:\s+FL\.?)?|Fl\.?)\s*#?\s*(\d{1,3})\b/i
+    );
+
+  let locationPage: number | null = null;
+  let locationFolha: number | undefined = undefined;
+
+  if (explicitPageInBlock || explicitPageInClean) {
+    const rawPg = parseInt(
+      (explicitPageInBlock || explicitPageInClean)![1],
+      10
+    );
+    const resolved = resolveCitationToPdfPage(rawPg, false, rawMarkdown);
+    locationPage = resolved.pdfPage;
+    locationFolha =
+      resolved.folhaSelo ??
+      (explicitFolhaMatch ? parseInt(explicitFolhaMatch[1], 10) : undefined);
+  } else if (explicitFolhaMatch) {
+    const rawFl = parseInt(explicitFolhaMatch[1], 10);
+    const resolved = resolveCitationToPdfPage(rawFl, true, rawMarkdown);
+    locationPage = resolved.pdfPage;
+    locationFolha = resolved.folhaSelo;
+  }
 
   const coordMatch = clean.match(
     /\b(?:Coluna\s*[0-9]{1,2}|Linha\s*[A-F]|[0-9]{1,2}\/[A-F][0-9])\b/i
   );
+  const folhaSuffix =
+    locationFolha && locationFolha !== locationPage
+      ? ` / FL. ${locationFolha}`
+      : '';
   const locationLabel = locationPage
-    ? `Pág. / Folha ${locationPage}${coordMatch ? ` (${coordMatch[0]})` : ''}`
+    ? `Pág. ${locationPage}${folhaSuffix}${coordMatch ? ` (${coordMatch[0]})` : ''}`
     : coordMatch
       ? coordMatch[0]
       : 'Ver no Desenho';
@@ -1460,9 +1713,23 @@ export function extractInteractiveMeasurementsFromMarkdown(
       );
       if (alreadyAdded) continue;
 
-      const pgMatch = trimmed.match(
-        /\b(?:P[áa]gina|P[áa]g\.?|Folha|Fl\.?)\s*#?\s*(\d{1,3})\b/i
+      const explicitPgMatch = trimmed.match(
+        /\b(?:P[áa]gina|P[áa]g\.?)\s*(?:do\s+PDF\s*)?#?\s*(\d{1,3})\b/i
       );
+      const explicitFlMatch = trimmed.match(
+        /\b(?:Folha(?:\s+Selo)?(?:\s+FL\.?)?|Fl\.?)\s*#?\s*(\d{1,3})\b/i
+      );
+      let resolvedPointPage: number | null = probeSummary?.locationPage || null;
+      if (explicitPgMatch) {
+        resolvedPointPage = parseInt(explicitPgMatch[1], 10);
+      } else if (explicitFlMatch) {
+        resolvedPointPage = resolveCitationToPdfPage(
+          parseInt(explicitFlMatch[1], 10),
+          true,
+          rawMarkdown
+        ).pdfPage;
+      }
+
       const spec = voltMatch[1].trim();
 
       points.push({
@@ -1480,7 +1747,7 @@ export function extractInteractiveMeasurementsFromMarkdown(
             : spec.toLowerCase().includes('vca')
               ? 'Vca'
               : 'Vcc',
-        pageNumber: pgMatch ? parseInt(pgMatch[1], 10) : probeSummary?.locationPage || null,
+        pageNumber: resolvedPointPage,
       });
       counter++;
     }

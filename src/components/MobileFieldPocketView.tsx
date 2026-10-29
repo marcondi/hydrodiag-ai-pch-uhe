@@ -34,10 +34,15 @@ import {
   extractProbeSummaryFromMarkdown,
   getCachedPdfIndex,
   loadAttachmentBinaryFromVault,
+  PageBatchIndex,
+  resolveCitationToPdfPage,
 } from '../utils/pdfClientEngine';
 import { UniversalVoiceDictation } from '../utils/voiceDictationEngine';
 import { technicalSpeechEngine } from '../utils/speechSynthesisEngine';
-import { PdfDeepLinkDrawer } from './PdfDeepLinkDrawer';
+import {
+  PdfDeepLinkDrawer,
+  pickBestAttachmentForPage,
+} from './PdfDeepLinkDrawer';
 
 interface MobileFieldPocketViewProps {
   attachments: DiagramAttachment[];
@@ -103,18 +108,42 @@ export function isStrictlyPdfAttachment(att: DiagramAttachment): boolean {
   return !isStrictlyPhotoAttachment(att);
 }
 
-function extractCitedPagesFromMarkdown(markdown: string): number[] {
-  const pages = new Set<number>();
+export interface CitedSheetReference {
+  pdfPage: number;
+  folhaSelo?: number;
+}
+
+export function extractCitedPagesFromMarkdown(
+  markdown: string,
+  cachedBatches?: PageBatchIndex[] | null
+): CitedSheetReference[] {
+  const byPdfPage = new Map<number, CitedSheetReference>();
   const regex =
-    /\b(?:P[áa]g(?:ina)?s?\.?|Fl(?:s)?\.?|Folha)\s*#?\s*(\d{1,4})\b/gi;
+    /\b(P[áa]g(?:ina)?s?\.?|Folha(?:\s+do\s+Selo|\s+Selo)?(?:\s+FL\.?)?|Fl(?:s)?\.?)\s*(?:do\s+PDF\s*)?#?\s*(\d{1,4})\b/gi;
   let match: RegExpExecArray | null;
   while ((match = regex.exec(markdown)) !== null) {
-    const num = parseInt(match[1], 10);
+    const label = match[1].trim();
+    const num = parseInt(match[2], 10);
     if (!isNaN(num) && num >= 1 && num <= 2000) {
-      pages.add(num);
+      const isFolha = /^(?:Folha|Fl)/i.test(label);
+      const resolved = resolveCitationToPdfPage(
+        num,
+        isFolha,
+        markdown,
+        cachedBatches
+      );
+      const existing = byPdfPage.get(resolved.pdfPage);
+      if (!existing) {
+        byPdfPage.set(resolved.pdfPage, {
+          pdfPage: resolved.pdfPage,
+          folhaSelo: resolved.folhaSelo,
+        });
+      } else if (existing.folhaSelo === undefined && resolved.folhaSelo !== undefined) {
+        existing.folhaSelo = resolved.folhaSelo;
+      }
     }
   }
-  return Array.from(pages).sort((a, b) => a - b);
+  return Array.from(byPdfPage.values()).sort((a, b) => a.pdfPage - b.pdfPage);
 }
 
 export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
@@ -149,6 +178,9 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
   const [showSavedList, setShowSavedList] = useState<boolean>(false);
   const [showFullLaudo, setShowFullLaudo] = useState<boolean>(false);
   const [manualPageInput, setManualPageInput] = useState<string>('1');
+  const [manualInputMode, setManualInputMode] = useState<'page' | 'folha'>(
+    'page'
+  );
   const [chatInput, setChatInput] = useState<string>('');
   const [isDictatingQuery, setIsDictatingQuery] = useState<boolean>(false);
   const [isDictatingChat, setIsDictatingChat] = useState<boolean>(false);
@@ -382,7 +414,8 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
 
   /**
    * Resolutor determinístico de PDF para uma página solicitada:
-   * Garante que NUNCA seleciona uma imagem da galeria e escolhe o melhor PDF disponível.
+   * Garante que NUNCA seleciona uma imagem da galeria, prioriza o PDF citado
+   * no diagnóstico (ex: PSE+CLP-SASE vs PCPG2) e evita páginas reserva.
    */
   const resolveTargetPdfForPage = (
     pageNumber: number,
@@ -397,53 +430,22 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
       if (matched) return matched;
     }
 
-    // Se o usuário selecionou manualmente um PDF no seletor mobile e ele cobre a página (ou não tem índice ainda)
+    const bestFromDiagnosis = pickBestAttachmentForPage(
+      allAvailablePdfAttachments,
+      pageNumber,
+      undefined,
+      latestTurn?.markdownResponse
+    );
+    if (bestFromDiagnosis) {
+      return bestFromDiagnosis;
+    }
+
     if (selectedMobilePdfId) {
       const selectedPdf = allAvailablePdfAttachments.find(
         (p) => p.id === selectedMobilePdfId
       );
-      if (selectedPdf) {
-        const cached = getCachedPdfIndex(selectedPdf);
-        if (!cached || cached.length === 0) {
-          return selectedPdf;
-        }
-        const maxIndexed = Math.max(...cached.map((b) => b.endPage));
-        if (pageNumber <= maxIndexed || maxIndexed <= 1) {
-          return selectedPdf;
-        }
-      }
+      if (selectedPdf) return selectedPdf;
     }
-
-    // Se o laudo menciona explicitamente o nome de um dos PDFs disponíveis
-    if (latestTurn?.markdownResponse) {
-      const lowerMd = latestTurn.markdownResponse.toLowerCase();
-      for (const pdf of allAvailablePdfAttachments) {
-        const cleanBaseName = pdf.name
-          .replace(/\.pdf$/i, '')
-          .trim()
-          .toLowerCase();
-        if (cleanBaseName.length > 4 && lowerMd.includes(cleanBaseName)) {
-          return pdf;
-        }
-      }
-    }
-
-    // Preferir PDF cujo índice em cache cubra o número da página
-    for (const pdf of allAvailablePdfAttachments) {
-      const cached = getCachedPdfIndex(pdf);
-      if (cached && cached.length > 0) {
-        const maxIndexed = Math.max(...cached.map((b) => b.endPage));
-        if (pageNumber <= maxIndexed && maxIndexed > 1) {
-          return pdf;
-        }
-      }
-    }
-
-    // Preferir PDF que já tenha base64Data carregado
-    const withB64 = allAvailablePdfAttachments.find((p) =>
-      Boolean(p.base64Data)
-    );
-    if (withB64) return withB64;
 
     return allAvailablePdfAttachments[0];
   };
@@ -482,6 +484,12 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
     );
   };
 
+  const combinedMobileCachedBatches = useMemo(
+    () =>
+      allAvailablePdfAttachments.flatMap((pdf) => getCachedPdfIndex(pdf) || []),
+    [allAvailablePdfAttachments]
+  );
+
   const probeSummary = latestTurn
     ? extractProbeSummaryFromMarkdown(latestTurn.markdownResponse)
     : null;
@@ -494,7 +502,10 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
     : [];
 
   const citedPages = latestTurn
-    ? extractCitedPagesFromMarkdown(latestTurn.markdownResponse)
+    ? extractCitedPagesFromMarkdown(
+        latestTurn.markdownResponse,
+        combinedMobileCachedBatches
+      )
     : [];
 
   const handleSendMobileChat = async (e?: React.FormEvent) => {
@@ -507,30 +518,48 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
   };
 
   /**
-   * Transforma citações "Página X", "Pág. X", "Folha X" dentro de qualquer texto
-   * em botões clicáveis que abrem diretamente o PDF naquela página.
+   * Transforma citações "Página X", "Pág. X", "Folha X", "FL. X" dentro de qualquer texto
+   * em botões clicáveis que abrem diretamente a página FÍSICA correta do PDF
+   * (convertendo automaticamente Folha do Selo WEG -> Página do PDF).
    */
   const renderTextWithClickablePdfPages = (rawText: string) => {
     if (!rawText) return null;
+    const contextMd = latestTurn?.markdownResponse
+      ? `${latestTurn.markdownResponse}\n${rawText}`
+      : rawText;
     const parts = rawText.split(
-      /(\b(?:P[áa]g(?:ina)?s?\.?|Fl(?:s)?\.?|Folha)\s*#?\s*\d{1,4}\b)/gi
+      /(\b(?:P[áa]g(?:ina)?s?\.?|Folha(?:\s+do\s+Selo|\s+Selo)?(?:\s+FL\.?)?|Fl(?:s)?\.?)\s*(?:do\s+PDF\s*)?#?\s*\d{1,4}\b)/gi
     );
     return parts.map((segment, index) => {
       const m = segment.match(
-        /^(?:P[áa]g(?:ina)?s?\.?|Fl(?:s)?\.?|Folha)\s*#?\s*(\d{1,4})$/i
+        /^(P[áa]g(?:ina)?s?\.?|Folha(?:\s+do\s+Selo|\s+Selo)?(?:\s+FL\.?)?|Fl(?:s)?\.?)\s*(?:do\s+PDF\s*)?#?\s*(\d{1,4})$/i
       );
       if (m) {
-        const pg = parseInt(m[1], 10);
-        if (!isNaN(pg) && pg >= 1 && pg <= 2000) {
+        const label = m[1].trim();
+        const citedNum = parseInt(m[2], 10);
+        if (!isNaN(citedNum) && citedNum >= 1 && citedNum <= 2000) {
+          const isFolha = /^(?:Folha|Fl)/i.test(label);
+          const resolved = resolveCitationToPdfPage(
+            citedNum,
+            isFolha,
+            contextMd,
+            combinedMobileCachedBatches
+          );
+          const showConvertedHint =
+            isFolha && resolved.pdfPage !== citedNum;
           return (
             <button
-              key={`pg_link_${index}_${pg}`}
+              key={`pg_link_${index}_${resolved.pdfPage}`}
               type="button"
-              onClick={() => handleOpenMobilePdfSheet(pg)}
+              onClick={() => handleOpenMobilePdfSheet(resolved.pdfPage)}
               className="inline-flex items-center gap-1 mx-0.5 px-2 py-0.5 rounded-md bg-sky-500/25 hover:bg-sky-500/40 border border-sky-400/50 text-sky-200 font-mono font-bold text-xs cursor-pointer"
+              title={`Abrir Página ${resolved.pdfPage} do PDF${resolved.folhaSelo ? ` (Folha Selo FL. ${resolved.folhaSelo})` : ''}`}
             >
               <BookOpen className="w-3 h-3 text-sky-300 shrink-0" />
-              <span>{segment}</span>
+              <span>
+                {segment}
+                {showConvertedHint ? ` (Pág. ${resolved.pdfPage})` : ''}
+              </span>
             </button>
           );
         }
@@ -734,29 +763,83 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                const num = parseInt(manualPageInput, 10);
+                const rawVal = manualPageInput.trim();
+                const explicitFl = rawVal.match(
+                  /^(?:fl\.?|folha)\s*#?\s*(\d{1,4})$/i
+                );
+                const num = parseInt(
+                  explicitFl ? explicitFl[1] : rawVal.replace(/[^\d]/g, ''),
+                  10
+                );
+                const validNum = !isNaN(num) && num >= 1 ? num : 1;
+                const isFolha =
+                  Boolean(explicitFl) || manualInputMode === 'folha';
+                const targetPdfObj = allAvailablePdfAttachments.find(
+                  (p) => p.id === selectedMobilePdfId
+                );
+                const batchesToUse = targetPdfObj
+                  ? getCachedPdfIndex(targetPdfObj)
+                  : combinedMobileCachedBatches;
+                const resolved = resolveCitationToPdfPage(
+                  validNum,
+                  isFolha,
+                  latestTurn?.markdownResponse,
+                  batchesToUse
+                );
                 handleOpenMobilePdfSheet(
-                  !isNaN(num) && num >= 1 ? num : 1,
+                  resolved.pdfPage,
                   selectedMobilePdfId || undefined
                 );
               }}
-              className="flex items-center gap-2"
+              className="flex flex-col gap-2"
             >
-              <input
-                type="number"
-                min={1}
-                value={manualPageInput}
-                onChange={(e) => setManualPageInput(e.target.value)}
-                placeholder="Nº pág."
-                className="w-24 bg-[#0B111E] border border-slate-700 focus:border-sky-500 rounded-xl px-3 py-2 text-xs font-mono text-white text-center"
-              />
-              <button
-                type="submit"
-                className="flex-1 py-2 px-3 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow cursor-pointer"
-              >
-                <BookOpen className="w-3.5 h-3.5" />
-                <span>Abrir Pág. {manualPageInput || 1} do PDF</span>
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setManualInputMode('page')}
+                  className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-mono font-bold border cursor-pointer ${
+                    manualInputMode === 'page'
+                      ? 'bg-sky-500/25 border-sky-400 text-sky-200'
+                      : 'bg-[#0B111E] border-slate-800 text-slate-400'
+                  }`}
+                >
+                  Nº da Página PDF
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setManualInputMode('folha')}
+                  className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-mono font-bold border cursor-pointer ${
+                    manualInputMode === 'folha'
+                      ? 'bg-amber-500/25 border-amber-400 text-amber-200'
+                      : 'bg-[#0B111E] border-slate-800 text-slate-400'
+                  }`}
+                >
+                  Nº da Folha (Selo FL.)
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={manualPageInput}
+                  onChange={(e) => setManualPageInput(e.target.value)}
+                  placeholder={
+                    manualInputMode === 'folha' ? 'Ex: 29' : 'Ex: 31'
+                  }
+                  className="w-24 bg-[#0B111E] border border-slate-700 focus:border-sky-500 rounded-xl px-3 py-2 text-xs font-mono text-white text-center"
+                />
+                <button
+                  type="submit"
+                  className="flex-1 py-2 px-3 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow cursor-pointer"
+                >
+                  <BookOpen className="w-3.5 h-3.5" />
+                  <span>
+                    {manualInputMode === 'folha'
+                      ? `Abrir Folha FL. ${manualPageInput || 1} no PDF`
+                      : `Abrir Pág. ${manualPageInput || 1} do PDF`}
+                  </span>
+                </button>
+              </div>
             </form>
           </div>
         )}
@@ -1204,15 +1287,20 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
 
                 {citedPages.length > 0 ? (
                   <div className="flex flex-wrap gap-2">
-                    {citedPages.map((pg) => (
+                    {citedPages.map((item) => (
                       <button
-                        key={pg}
+                        key={item.pdfPage}
                         type="button"
-                        onClick={() => handleOpenMobilePdfSheet(pg)}
+                        onClick={() => handleOpenMobilePdfSheet(item.pdfPage)}
                         className="px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-mono font-bold text-xs flex items-center gap-1.5 shadow cursor-pointer"
                       >
                         <BookOpen className="w-3.5 h-3.5" />
-                        <span>Abrir Pág. {pg} no PDF</span>
+                        <span>
+                          Abrir Pág. {item.pdfPage}
+                          {item.folhaSelo && item.folhaSelo !== item.pdfPage
+                            ? ` (FL. ${item.folhaSelo})`
+                            : ''}
+                        </span>
                       </button>
                     ))}
                   </div>

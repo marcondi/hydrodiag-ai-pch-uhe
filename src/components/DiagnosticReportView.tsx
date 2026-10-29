@@ -40,6 +40,7 @@ import {
   extractProbeSummaryFromMarkdown,
   extractSignalChainFromContext,
   formatTechnicalSymbols,
+  getCachedPdfIndex,
   InteractiveMeasurementPoint,
   linkifyPdfPageReferences,
 } from '../utils/pdfClientEngine';
@@ -173,6 +174,9 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
   };
 
   const renderReportPaneContent = (turn: DiagnosticTurn) => {
+    const allCachedBatches = attachments.flatMap(
+      (a) => getCachedPdfIndex(a) || []
+    );
     const probeSummary = extractProbeSummaryFromMarkdown(turn.markdownResponse);
     const signalChain = extractSignalChainFromContext(
       attachments,
@@ -849,7 +853,8 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
           }}
         >
           {linkifyPdfPageReferences(
-            formatTechnicalSymbols(turn.markdownResponse)
+            formatTechnicalSymbols(turn.markdownResponse),
+            allCachedBatches
           )}
         </ReactMarkdown>
       </div>

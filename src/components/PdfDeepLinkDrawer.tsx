@@ -43,6 +43,8 @@ import {
   extractSinglePdfPageUrl,
   getCachedPdfIndex,
   loadAttachmentBinaryFromVault,
+  parseCachedIndexEntries,
+  resolveCitationToPdfPage,
   saveAttachmentBinaryToVault,
 } from '../utils/pdfClientEngine';
 
@@ -393,53 +395,119 @@ interface PdfDeepLinkDrawerProps {
   ) => void;
 }
 
-function pickBestAttachmentForPage(
+function isTruePdfAttachment(att: DiagramAttachment): boolean {
+  const lowerName = (att.name || '').trim().toLowerCase();
+  const lowerMime = (att.mimeType || '').trim().toLowerCase();
+  if (lowerName.endsWith('.pdf') || lowerMime === 'application/pdf') {
+    return true;
+  }
+  if (
+    lowerMime.startsWith('image/') ||
+    /\.(jpg|jpeg|png|webp|gif|bmp|heic|heif)$/i.test(lowerName) ||
+    att.categoryTag === 'FOTO CAMPO'
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function pickBestAttachmentForPage(
   attachments: DiagramAttachment[],
   targetPage: number,
-  initialAttachmentId?: string
+  initialAttachmentId?: string,
+  reportMarkdown?: string
 ): DiagramAttachment | undefined {
   if (attachments.length === 0) return undefined;
+
+  // Se foi passado um ID explícito (ex: clicou em uma foto específica ou PDF específico), respeitar
   if (initialAttachmentId) {
     const explicit = attachments.find((a) => a.id === initialAttachmentId);
     if (explicit) return explicit;
   }
-  if (attachments.length === 1) return attachments[0];
 
-  // 1. Prefer attachments that ALREADY have base64Data loaded in memory and cover targetPage
-  const withBinary = attachments.filter((a) => Boolean(a.base64Data));
-  for (const att of [...withBinary].reverse()) {
+  // Para abrir página de PDF sem ID explícito, considerar APENAS arquivos PDF reais (nunca fotos da galeria)
+  const pdfOnly = attachments.filter((a) => isTruePdfAttachment(a));
+  const pool = pdfOnly.length > 0 ? pdfOnly : attachments;
+  if (pool.length === 1) return pool[0];
+
+  const cleanMd = (reportMarkdown || '').toLowerCase();
+  const mdLines = cleanMd.split(/\r?\n/);
+  const pageLines = mdLines.filter((l) =>
+    new RegExp(`\\b${targetPage}\\b`).test(l)
+  );
+  const pageContextText = pageLines.join(' ');
+
+  let bestAtt: DiagramAttachment = pool[0];
+  let bestScore = -9999;
+
+  pool.forEach((att, idx) => {
+    let score = idx; // leve desempate para anexos mais recentes
+    const lowerName = att.name.replace(/\.pdf$/i, '').trim().toLowerCase();
+
+    // 1. Verificar se o nome do arquivo, código WEG (ex: 10001512209) ou painel (ex: PSE+CLP-SASE, PCPG1, PCPG2) é citado no diagnóstico
+    const docCodeMatch = lowerName.match(/\b(\d{7,12})\b/);
+    const panelTokens = Array.from(
+      new Set(
+        lowerName.match(
+          /\b(pcpg[12]?|clp-sase|sase|pse|qdcc|qdsa|qdf|qgbt|uhlm|ucr|csg[12]?|unifilar|rv)\b/gi
+        ) || []
+      )
+    ).map((t) => t.toLowerCase());
+
+    if (cleanMd) {
+      if (lowerName.length > 4 && cleanMd.includes(lowerName)) {
+        score += 120;
+      }
+      if (docCodeMatch && cleanMd.includes(docCodeMatch[1])) {
+        score += 110;
+      }
+      for (const token of panelTokens) {
+        if (pageContextText.includes(token)) {
+          score += 90;
+        } else if (cleanMd.includes(token)) {
+          score += 45;
+        }
+      }
+    }
+
+    // 2. Verificar o índice de páginas em cache deste PDF para a página alvo
     const cached = getCachedPdfIndex(att);
     if (cached && cached.length > 0) {
       const maxIndexedPage = Math.max(...cached.map((b) => b.endPage));
-      if (targetPage <= maxIndexedPage && maxIndexedPage > 1) {
-        return att;
+      if (targetPage <= maxIndexedPage && maxIndexedPage >= 1) {
+        score += 60;
+        const parsedEntries = parseCachedIndexEntries(cached);
+        const exactPageEntry = parsedEntries.find(
+          (e) => e.pdfPage === targetPage
+        );
+        if (exactPageEntry) {
+          const entryText =
+            `${exactPageEntry.titulo} ${exactPageEntry.tags}`.toUpperCase();
+          if (entryText.includes('RESERVA')) {
+            // Penalizar fortemente se a página neste PDF for "PÁGINA RESERVA" em branco!
+            score -= 180;
+          } else {
+            score += 80;
+          }
+        }
+      } else if (maxIndexedPage > 1 && targetPage > maxIndexedPage) {
+        // Página solicitada excede o total deste PDF
+        score -= 200;
       }
     }
-  }
-  if (withBinary.length > 0) {
-    return withBinary[withBinary.length - 1];
-  }
 
-  // 2. Otherwise check cached PDF index from latest attachment to oldest
-  const reversed = [...attachments].reverse();
-  for (const att of reversed) {
-    const cached = getCachedPdfIndex(att);
-    if (cached && cached.length > 0) {
-      const maxIndexedPage = Math.max(...cached.map((b) => b.endPage));
-      if (targetPage <= maxIndexedPage && maxIndexedPage > 1) {
-        return att;
-      }
+    // 3. Bônus se já tiver o binário carregado em memória
+    if (att.base64Data) {
+      score += 25;
     }
-  }
 
-  if (targetPage > 2) {
-    const largest = [...attachments].sort(
-      (a, b) => (b.sizeBytes || 0) - (a.sizeBytes || 0)
-    )[0];
-    if (largest) return largest;
-  }
+    if (score > bestScore) {
+      bestScore = score;
+      bestAtt = att;
+    }
+  });
 
-  return attachments[0];
+  return bestAtt;
 }
 
 export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
@@ -1096,13 +1164,14 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
       const bestAtt = pickBestAttachmentForPage(
         attachments,
         targetPage,
-        initialAttachmentId
+        initialAttachmentId,
+        reportMarkdown
       );
       if (bestAtt) {
         setSelectedAttachmentId(bestAtt.id);
       }
     }
-  }, [isOpen, initialPage, initialAttachmentId]);
+  }, [isOpen, initialPage, initialAttachmentId, reportMarkdown]);
 
   // Measure viewportRef dynamically so the PDF sheet scales to 100% of the Maximized or Normal window, and detect OS Window Maximize clicks
   useEffect(() => {
@@ -1283,7 +1352,23 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
 
   const handlePageInputSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const parsed = parseInt(pageInput, 10);
+    const raw = pageInput.trim();
+    // Permite digitar "FL 29", "Folha 29" ou apenas o número da página "31"
+    const flExplicit = raw.match(/^(?:fl\.?|folha)\s*#?\s*(\d{1,4})$/i);
+    if (flExplicit) {
+      const flNum = parseInt(flExplicit[1], 10);
+      if (!isNaN(flNum)) {
+        const resolved = resolveCitationToPdfPage(
+          flNum,
+          true,
+          reportMarkdown,
+          cachedBatches
+        );
+        handleGoToPage(resolved.pdfPage);
+        return;
+      }
+    }
+    const parsed = parseInt(raw.replace(/[^\d]/g, ''), 10);
     if (!isNaN(parsed)) {
       handleGoToPage(parsed);
     } else {
@@ -2452,15 +2537,18 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
                 <BookOpen className="w-4 h-4" />
               </div>
               <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <h3 className="text-sm font-semibold text-slate-100 truncate">
                     Inspetor Deep-Link de Diagrama Elétrico
                   </h3>
-                  <span className="text-xs font-mono tabular-nums text-sky-400 shrink-0">
-                    Página {currentPage} de {effectiveTotalPages}
+                  <span className="px-2 py-0.5 rounded bg-sky-500/20 border border-sky-500/40 text-xs font-mono font-bold tabular-nums text-sky-300 shrink-0">
+                    Página PDF: {currentPage} de {effectiveTotalPages}
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-xs font-mono font-bold tabular-nums text-amber-300 shrink-0">
+                    Selo WEG: {reconstructedSheet.folhaSelo.startsWith('FL') ? reconstructedSheet.folhaSelo : `FL. ${reconstructedSheet.folhaSelo}`}
                   </span>
                 </div>
-                <p className="text-[11px] text-slate-400 truncate">
+                <p className="text-[11px] text-slate-400 truncate mt-0.5">
                   Folha Selo #{reconstructedSheet.folhaSelo} —{' '}
                   {reconstructedSheet.tituloFolha} (
                   <code>{reconstructedSheet.tagsPrincipais}</code>)
