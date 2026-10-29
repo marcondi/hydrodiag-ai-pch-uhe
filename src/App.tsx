@@ -53,7 +53,10 @@ import {
 } from './components/DiagramUploadPanel';
 import { FaultQueryPanel } from './components/FaultQueryPanel';
 import { DiagnosticReportView } from './components/DiagnosticReportView';
-import { GitHubDeployPanel } from './components/GitHubDeployModal';
+import {
+  downloadVerifiedFullSourceZip,
+  GitHubDeployPanel,
+} from './components/GitHubDeployModal';
 import {
   FieldCameraModal,
   FieldPhotoCapturePayload,
@@ -2085,10 +2088,12 @@ export default function App() {
                       </button>
                     )}
 
-                    <a
-                      href="/api/backup/download-zip"
-                      download
-                      onClick={() => setIsHeaderMenuOpen(false)}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsHeaderMenuOpen(false);
+                        void downloadVerifiedFullSourceZip();
+                      }}
                       className="w-full px-3 py-2 rounded-lg text-left text-xs font-semibold bg-emerald-950/40 hover:bg-emerald-900/50 text-emerald-200 border border-emerald-500/30 flex items-center justify-between transition-colors cursor-pointer"
                     >
                       <span className="flex items-center gap-2">
@@ -2098,7 +2103,7 @@ export default function App() {
                       <span className="text-[10px] font-mono text-emerald-300">
                         Código-Fonte
                       </span>
-                    </a>
+                    </button>
                   </div>
                 </div>
               </div>
