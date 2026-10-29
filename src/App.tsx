@@ -221,6 +221,19 @@ export default function App() {
   const isOnline = useOnlineStatus();
   const [isHeaderMenuOpen, setIsHeaderMenuOpen] = useState<boolean>(false);
   const headerMenuRef = useRef<HTMLDivElement | null>(null);
+  const diagnosisAbortControllerRef = useRef<AbortController | null>(null);
+  const diagnosisRunIdRef = useRef<number>(0);
+
+  const handleCancelDiagnosis = () => {
+    diagnosisRunIdRef.current += 1;
+    if (diagnosisAbortControllerRef.current) {
+      diagnosisAbortControllerRef.current.abort();
+      diagnosisAbortControllerRef.current = null;
+    }
+    setIsAnalyzing(false);
+    setProgressStep('');
+    setError(null);
+  };
   const [fieldSyncBanner, setFieldSyncBanner] = useState<string | null>(null);
   const [isLeftSidebarCollapsed, setIsLeftSidebarCollapsed] =
     useState<boolean>(false);
@@ -380,7 +393,7 @@ export default function App() {
       }
     };
     window.addEventListener('focus', onWindowFocus);
-    document.addEventListener('visibilitychange', onWindowFocus);
+    window.addEventListener('visibilitychange', onWindowFocus);
     return () => {
       window.removeEventListener('focus', onWindowFocus);
       document.removeEventListener('visibilitychange', onWindowFocus);
@@ -530,6 +543,16 @@ export default function App() {
     queryToUse: string,
     focusToUse: string
   ) => {
+    if (diagnosisAbortControllerRef.current) {
+      diagnosisAbortControllerRef.current.abort();
+    }
+    const abortController = new AbortController();
+    diagnosisAbortControllerRef.current = abortController;
+    const currentRunId = ++diagnosisRunIdRef.current;
+    const isCancelled = () =>
+      abortController.signal.aborted ||
+      diagnosisRunIdRef.current !== currentRunId;
+
     setIsAnalyzing(true);
     setProgressStep('Iniciando leitura eletromecânica dos diagramas...');
     setError(null);
@@ -551,6 +574,7 @@ export default function App() {
         const preparedParts: unknown[] = [];
 
         for (const att of attachmentsToUse) {
+          if (isCancelled()) return;
           preparedParts.push({
             text: `[ARQUIVO ANEXADO NA SEQUÊNCIA #${att.sequenceIndex} | Categoria: ${att.categoryTag} | Painel: ${att.panelName || 'Não informado'} | Nome: "${att.name}"]`,
           });
@@ -558,11 +582,15 @@ export default function App() {
             att,
             queryToUse,
             focusToUse,
-            (msg) => setProgressStep(msg)
+            (msg) => {
+              if (!isCancelled()) setProgressStep(msg);
+            }
           );
+          if (isCancelled()) return;
           preparedParts.push(...parts);
         }
 
+        if (isCancelled()) return;
         setProgressStep(
           'Elaborando diagnóstico detalhado (Guia de Multímetro, Procedimento de Campo, /ME e /RM)...'
         );
@@ -570,6 +598,7 @@ export default function App() {
         const stepResp = await fetch('/api/serverless-step', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: abortController.signal,
           body: JSON.stringify({
             action: 'diagnose',
             preparedParts,
@@ -583,8 +612,10 @@ export default function App() {
           }),
         });
 
+        if (isCancelled()) return;
         let parsedStep = await safeParseJsonResponse(stepResp);
         if (!parsedStep.ok && preparedParts.length > 0) {
+          if (isCancelled()) return;
           setProgressStep(
             'Finalizando diagnóstico em modo de alta velocidade (índice completo das folhas)...'
           );
@@ -597,6 +628,7 @@ export default function App() {
           const retryResp = await fetch('/api/serverless-step', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            signal: abortController.signal,
             body: JSON.stringify({
               action: 'diagnose',
               preparedParts: lightParts,
@@ -609,9 +641,11 @@ export default function App() {
               })),
             }),
           });
+          if (isCancelled()) return;
           parsedStep = await safeParseJsonResponse(retryResp);
         }
 
+        if (isCancelled()) return;
         if (!parsedStep.ok) {
           throw new Error(
             String(
@@ -636,6 +670,7 @@ export default function App() {
           chatMessages: [],
         };
 
+        if (isCancelled()) return;
         setTurns((prev) => [...prev, newTurn]);
         setIsLeftSidebarCollapsed(true);
         return;
@@ -643,21 +678,26 @@ export default function App() {
 
       // Fallback when attachments were restored from history metadata without local base64Data
       for (const att of attachmentsToUse) {
+        if (isCancelled()) return;
         if (att.serverUploadStatus !== 'synced' && att.base64Data) {
           await uploadAttachmentInChunks(att, (pct) => {
-            setProgressStep(
-              `Sincronizando desenho #${att.sequenceIndex} (${att.name}): ${pct}%...`
-            );
+            if (!isCancelled()) {
+              setProgressStep(
+                `Sincronizando desenho #${att.sequenceIndex} (${att.name}): ${pct}%...`
+              );
+            }
           });
         }
       }
 
+      if (isCancelled()) return;
       const startDiagnoseJob = async () => {
         const response = await fetch('/api/diagnose', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
+          signal: abortController.signal,
           body: JSON.stringify({
             query: queryToUse,
             focusTopic: focusToUse,
@@ -680,17 +720,21 @@ export default function App() {
       };
 
       let startRes = await startDiagnoseJob();
+      if (isCancelled()) return;
 
       if (startRes.status === 409 && startRes.data.code === 'NEED_REUPLOAD') {
         setProgressStep('Ressincronizando blocos do PDF no servidor...');
         for (const att of attachmentsToUse) {
+          if (isCancelled()) return;
           if (att.base64Data) {
             await uploadAttachmentInChunks(att);
           }
         }
+        if (isCancelled()) return;
         startRes = await startDiagnoseJob();
       }
 
+      if (isCancelled()) return;
       if (!startRes.ok || !startRes.data.jobId) {
         throw new Error(
           (startRes.data.error as string) ||
@@ -703,8 +747,12 @@ export default function App() {
 
       let finalJobData: Record<string, unknown> | null = null;
       for (let pollCount = 0; pollCount < 180; pollCount++) {
+        if (isCancelled()) return;
         await sleep(1500);
-        const pollResp = await fetch(`/api/diagnose/status/${jobId}`);
+        if (isCancelled()) return;
+        const pollResp = await fetch(`/api/diagnose/status/${jobId}`, {
+          signal: abortController.signal,
+        });
         const pollParsed = await safeParseJsonResponse(pollResp);
 
         if (pollParsed.isHtml) {
@@ -718,7 +766,7 @@ export default function App() {
           );
         }
 
-        if (pollParsed.data.progressStep) {
+        if (pollParsed.data.progressStep && !isCancelled()) {
           setProgressStep(String(pollParsed.data.progressStep));
         }
 
@@ -737,6 +785,7 @@ export default function App() {
         }
       }
 
+      if (isCancelled()) return;
       if (!finalJobData) {
         throw new Error(
           'Tempo máximo de varredura excedido. Tente novamente — o índice parcial já foi salvo em cache.'
@@ -758,17 +807,26 @@ export default function App() {
         chatMessages: [],
       };
 
+      if (isCancelled()) return;
       setTurns((prev) => [...prev, newTurn]);
       setIsLeftSidebarCollapsed(true);
     } catch (err) {
+      if (
+        isCancelled() ||
+        (err instanceof Error && err.name === 'AbortError')
+      ) {
+        return;
+      }
       setError(
         err instanceof Error
           ? err.message
           : 'Erro inesperado ao executar o diagnóstico eletromecânico.'
       );
     } finally {
-      setIsAnalyzing(false);
-      setProgressStep('');
+      if (diagnosisRunIdRef.current === currentRunId) {
+        setIsAnalyzing(false);
+        setProgressStep('');
+      }
     }
   };
 
@@ -1682,6 +1740,7 @@ export default function App() {
               await handleRunDiagnosis();
             }
           }}
+          onCancelDiagnosis={handleCancelDiagnosis}
           onOpenFieldCamera={() => setFieldCameraOpen(true)}
           onOpenPdfPage={(pageNumber, attachmentId) =>
             setExternalPdfInspectRequest({

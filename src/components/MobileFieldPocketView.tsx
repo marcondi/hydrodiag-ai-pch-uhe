@@ -68,6 +68,7 @@ interface MobileFieldPocketViewProps {
   onAddFiles: (files: FileList) => Promise<void>;
   onRemoveAttachment: (id: string) => void;
   onRunDiagnosis: (customQuery?: string) => Promise<void>;
+  onCancelDiagnosis?: () => void;
   onOpenFieldCamera: () => void;
   onOpenPdfPage: (pageNumber: number, attachmentId?: string) => void;
   onRelinkAttachmentBinary?: (
@@ -168,6 +169,7 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
   onAddFiles,
   onRemoveAttachment,
   onRunDiagnosis,
+  onCancelDiagnosis,
   onRelinkAttachmentBinary,
   onSendChatMessage,
   onExitMobileMode,
@@ -348,6 +350,15 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
     }
     prevTurnsCountRef.current = turns.length;
   }, [turns.length]);
+
+  const handleCancelMobileDiagnosis = () => {
+    userRequestedDiagnosisRef.current = false;
+    onCancelDiagnosis?.();
+    setMobileNotice(
+      'Diagnóstico cancelado. Você pode alterar a descrição, trocar a foto ou iniciar novamente quando quiser.'
+    );
+    setTimeout(() => setMobileNotice(null), 4500);
+  };
 
   useEffect(() => {
     const unsub = technicalSpeechEngine.subscribe((st) => {
@@ -705,20 +716,33 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
           </div>
         )}
 
-        {/* Banner de carregamento quando a IA está analisando */}
+        {/* Banner de carregamento quando a IA está analisando (com botão direto de Cancelar) */}
         {(isAnalyzing || isUploading) && (
-          <div className="p-4 rounded-2xl bg-sky-950/90 border-2 border-sky-500/60 shadow-lg flex items-center gap-3">
-            <Loader2 className="w-6 h-6 text-sky-400 animate-spin shrink-0" />
-            <div>
-              <p className="text-sm font-bold text-white">
-                {isUploading
-                  ? 'Carregando arquivo...'
-                  : 'Analisando falha e localizando bornes...'}
-              </p>
-              <p className="text-xs text-sky-200 mt-0.5">
-                {progressStep || 'Aguarde alguns segundos...'}
-              </p>
+          <div className="p-4 rounded-2xl bg-sky-950/90 border-2 border-sky-500/60 shadow-lg flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <Loader2 className="w-6 h-6 text-sky-400 animate-spin shrink-0" />
+              <div className="min-w-0">
+                <p className="text-sm font-bold text-white">
+                  {isUploading
+                    ? 'Carregando arquivo...'
+                    : 'Analisando falha e localizando bornes...'}
+                </p>
+                <p className="text-xs text-sky-200 mt-0.5 truncate">
+                  {progressStep || 'Aguarde alguns segundos...'}
+                </p>
+              </div>
             </div>
+
+            {isAnalyzing && (
+              <button
+                type="button"
+                onClick={handleCancelMobileDiagnosis}
+                className="px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs flex items-center gap-1 shrink-0 shadow cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+                <span>Cancelar</span>
+              </button>
+            )}
           </div>
         )}
 
@@ -1090,26 +1114,35 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
               />
             </div>
 
-            {/* PASSO 3: BOTÃO GIGANTE DE DIAGNOSTICAR */}
-            <button
-              type="button"
-              disabled={
-                isAnalyzing ||
-                isUploading ||
-                (!query.trim() && attachments.length === 0)
-              }
-              onClick={() => {
-                userRequestedDiagnosisRef.current = true;
-                onRunDiagnosis(
-                  query.trim() ||
-                    'Analise a foto/diagrama anexado, identifique a falha e mostre os bornes para testar com o multímetro.'
-                );
-              }}
-              className="w-full py-4 px-5 rounded-2xl bg-sky-500 hover:bg-sky-400 disabled:opacity-40 text-slate-950 font-extrabold text-base flex items-center justify-center gap-2.5 shadow-xl cursor-pointer"
-            >
-              <Sparkles className="w-5 h-5" />
-              <span>3. VER DIAGNÓSTICO E BORNES AGORA</span>
-            </button>
+            {/* PASSO 3: BOTÃO GIGANTE DE DIAGNOSTICAR (OU CANCELAR SE ESTIVER RODANDO) */}
+            {isAnalyzing ? (
+              <button
+                type="button"
+                onClick={handleCancelMobileDiagnosis}
+                className="w-full py-4 px-5 rounded-2xl bg-rose-600 hover:bg-rose-500 text-white font-extrabold text-base flex items-center justify-center gap-2.5 shadow-xl cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+                <span>✕ CANCELAR DIAGNÓSTICO AGORA</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={
+                  isUploading || (!query.trim() && attachments.length === 0)
+                }
+                onClick={() => {
+                  userRequestedDiagnosisRef.current = true;
+                  onRunDiagnosis(
+                    query.trim() ||
+                      'Analise a foto/diagrama anexado, identifique a falha e mostre os bornes para testar com o multímetro.'
+                  );
+                }}
+                className="w-full py-4 px-5 rounded-2xl bg-sky-500 hover:bg-sky-400 disabled:opacity-40 text-slate-950 font-extrabold text-base flex items-center justify-center gap-2.5 shadow-xl cursor-pointer"
+              >
+                <Sparkles className="w-5 h-5" />
+                <span>3. VER DIAGNÓSTICO E BORNES AGORA</span>
+              </button>
+            )}
           </div>
         )}
 
@@ -1118,15 +1151,15 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
            =================================================================== */}
         {screen === 'result' && latestTurn && (
           <div className="space-y-4">
-            {/* Barra de Topo do Resultado: Voltar p/ enviar outra falha ou Ouvir no alto-falante */}
-            <div className="flex items-center justify-between gap-2">
+            {/* Barra de Topo do Resultado: Voltar p/ editar, Ouvir no alto-falante ou Cancelar/Limpar */}
+            <div className="flex items-center justify-between gap-2 flex-wrap">
               <button
                 type="button"
                 onClick={() => setScreen('input')}
                 className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-bold text-slate-200 flex items-center gap-1.5 cursor-pointer"
               >
                 <ArrowLeft className="w-4 h-4 text-sky-400" />
-                <span>Subir Foto / Trocar Falha</span>
+                <span>Voltar / Editar</span>
               </button>
 
               <div className="flex items-center gap-1.5">
@@ -1155,13 +1188,16 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                 <button
                   type="button"
                   onClick={() => {
+                    userRequestedDiagnosisRef.current = false;
+                    onCancelDiagnosis?.();
                     onNewInvestigation();
                     setScreen('input');
                   }}
-                  className="px-2.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs text-slate-300 cursor-pointer"
-                  title="Nova Investigação Limpa"
+                  className="px-3 py-2 rounded-xl bg-rose-600/25 hover:bg-rose-600/40 border border-rose-500/50 text-xs font-bold text-rose-200 flex items-center gap-1 cursor-pointer"
+                  title="Cancelar e limpar este diagnóstico para começar do zero"
                 >
-                  + Nova
+                  <X className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Cancelar / Limpar</span>
                 </button>
               </div>
             </div>
