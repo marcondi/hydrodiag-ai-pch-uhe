@@ -1122,6 +1122,23 @@ export const FieldCameraModal: React.FC<FieldCameraModalProps> = ({
                 </strong>{' '}
                 o borne/LED defeituoso.
               </p>
+
+              {/* Botão imediato logo abaixo da foto para não precisar rolar no celular */}
+              <div className="pt-1 flex flex-col sm:flex-row gap-2">
+                <button
+                  type="button"
+                  disabled={isSubmitting}
+                  onClick={() => handleSubmit('analyze_now')}
+                  className="w-full py-3 px-4 text-xs sm:text-sm font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 disabled:opacity-40 rounded-xl flex items-center justify-center gap-2 cursor-pointer shadow-lg"
+                >
+                  {isSubmitting ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Sparkles className="w-4 h-4" />
+                  )}
+                  <span>✅ Usar Esta Foto e Diagnosticar Agora</span>
+                </button>
+              </div>
             </div>
           )}
 

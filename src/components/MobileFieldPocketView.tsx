@@ -137,8 +137,10 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
     string | undefined
   >(undefined);
 
+  const directCameraInputRef = useRef<HTMLInputElement | null>(null);
   const photoGalleryInputRef = useRef<HTMLInputElement | null>(null);
   const pdfFileInputRef = useRef<HTMLInputElement | null>(null);
+  const chatPhotoInputRef = useRef<HTMLInputElement | null>(null);
   const voiceEngineRef = useRef<UniversalVoiceDictation | null>(null);
   const queryRef = useRef<string>(query);
   queryRef.current = query;
@@ -265,7 +267,20 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
 
   return (
     <div className="min-h-screen bg-[#070B14] text-slate-100 flex flex-col">
-      {/* Hidden File Inputs */}
+      {/* Hidden File Inputs (Direct Native Camera, Gallery & PDF — No blocking modal!) */}
+      <input
+        ref={directCameraInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        onChange={async (e) => {
+          if (e.target.files && e.target.files.length > 0) {
+            await onAddFiles(e.target.files);
+            e.target.value = '';
+          }
+        }}
+        className="hidden"
+      />
       <input
         ref={photoGalleryInputRef}
         type="file"
@@ -289,6 +304,39 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
             await onAddFiles(e.target.files);
             e.target.value = '';
           }
+        }}
+        className="hidden"
+      />
+      <input
+        ref={chatPhotoInputRef}
+        type="file"
+        accept="image/*"
+        onChange={async (e) => {
+          const file = e.target.files?.[0];
+          if (!file || !latestTurn) return;
+          e.target.value = '';
+          const reader = new FileReader();
+          reader.onload = async () => {
+            const dataUrl = String(reader.result || '');
+            const base64 = dataUrl.includes(',')
+              ? dataUrl.split(',')[1]
+              : dataUrl;
+            await onSendChatMessage(
+              latestTurn.id,
+              chatInput.trim() ||
+                `Enviei esta foto (${file.name}) pelo celular. Analise o que aparece nela e me diga o próximo passo.`,
+              {
+                base64,
+                mimeType: file.type || 'image/jpeg',
+                name: file.name,
+                sizeBytes: file.size,
+                categoryTag: 'FOTO CAMPO',
+                previewDataUrl: dataUrl,
+              }
+            );
+            setChatInput('');
+          };
+          reader.readAsDataURL(file);
         }}
         className="hidden"
       />
@@ -439,12 +487,12 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
               <div className="grid grid-cols-2 gap-2.5">
                 <button
                   type="button"
-                  onClick={onOpenFieldCamera}
+                  onClick={() => directCameraInputRef.current?.click()}
                   className="p-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex flex-col items-center justify-center gap-1.5 shadow cursor-pointer"
                 >
                   <Camera className="w-6 h-6" />
                   <span className="text-center leading-tight">
-                    Tirar Foto da Tela / Painel
+                    Tirar Foto Agora (Câmera Direta)
                   </span>
                 </button>
 
@@ -455,7 +503,7 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                 >
                   <ImageIcon className="w-6 h-6 text-emerald-400" />
                   <span className="text-center leading-tight">
-                    Escolher Foto da Galeria
+                    Subir Foto / Print da Galeria
                   </span>
                 </button>
               </div>
@@ -469,37 +517,53 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                 <span>Anexar Diagrama Elétrico em PDF</span>
               </button>
 
-              {/* Lista de arquivos já anexados */}
+              {/* Lista de arquivos/fotos já anexados com miniatura direta */}
               {attachments.length > 0 && (
-                <div className="pt-2 border-t border-slate-800 space-y-1.5">
-                  <p className="text-[11px] font-mono text-emerald-400 font-semibold">
-                    ✓ {attachments.length} arquivo(s) anexado(s):
+                <div className="pt-2 border-t border-slate-800 space-y-2">
+                  <p className="text-xs font-mono text-emerald-400 font-bold">
+                    ✅ {attachments.length} arquivo(s) pronto(s) para análise:
                   </p>
-                  {attachments.map((att) => (
-                    <div
-                      key={att.id}
-                      className="px-2.5 py-2 rounded-lg bg-[#0B111E] border border-slate-800 flex items-center justify-between gap-2 text-xs"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => handleOpenMobilePdfSheet(1, att.id)}
-                        className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
+                  {attachments.map((att) => {
+                    const isImage = att.mimeType.startsWith('image/');
+                    return (
+                      <div
+                        key={att.id}
+                        className="p-2.5 rounded-xl bg-[#0B111E] border border-emerald-500/40 flex items-center justify-between gap-2.5 text-xs"
                       >
-                        <BookOpen className="w-4 h-4 text-sky-400 shrink-0" />
-                        <span className="truncate text-slate-200">
-                          {att.name}
-                        </span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onRemoveAttachment(att.id)}
-                        className="p-1 text-slate-400 hover:text-rose-400 cursor-pointer"
-                        title="Remover arquivo"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  ))}
+                        <button
+                          type="button"
+                          onClick={() => handleOpenMobilePdfSheet(1, att.id)}
+                          className="flex items-center gap-2.5 min-w-0 flex-1 text-left cursor-pointer"
+                        >
+                          {isImage && att.base64Data ? (
+                            <img
+                              src={`data:${att.mimeType};base64,${att.base64Data}`}
+                              alt={att.name}
+                              className="w-12 h-12 rounded-lg object-cover border border-slate-700 shrink-0"
+                            />
+                          ) : (
+                            <BookOpen className="w-5 h-5 text-sky-400 shrink-0" />
+                          )}
+                          <div className="min-w-0">
+                            <span className="font-semibold text-white block truncate">
+                              {att.name}
+                            </span>
+                            <span className="text-[11px] text-emerald-300">
+                              Pronto! Agora vá ao Passo 2 ou clique no botão 3 abaixo
+                            </span>
+                          </div>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onRemoveAttachment(att.id)}
+                          className="p-1.5 text-slate-400 hover:text-rose-400 cursor-pointer shrink-0"
+                          title="Remover arquivo"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -887,9 +951,9 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
               >
                 <button
                   type="button"
-                  onClick={onOpenFieldCamera}
+                  onClick={() => chatPhotoInputRef.current?.click()}
                   className="p-2.5 rounded-xl bg-emerald-600/25 border border-emerald-500/40 text-emerald-300 shrink-0 cursor-pointer"
-                  title="Enviar foto do painel/borne"
+                  title="Enviar foto direto no chat"
                 >
                   <Camera className="w-5 h-5" />
                 </button>

@@ -28,7 +28,7 @@ export const MobileQrHandoffModal: React.FC<MobileQrHandoffModalProps> = ({
   investigationTitle,
 }) => {
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
-  const [openCameraDirectly, setOpenCameraDirectly] = useState<boolean>(true);
+  const [openCameraDirectly, setOpenCameraDirectly] = useState<boolean>(false);
   const [copiedUrl, setCopiedUrl] = useState<boolean>(false);
   const [windowState, setWindowState] = useState<'normal' | 'maximized' | 'minimized'>('normal');
 

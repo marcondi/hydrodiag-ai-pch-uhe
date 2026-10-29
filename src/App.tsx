@@ -361,7 +361,7 @@ export default function App() {
               if (toRestore) {
                 handleLoadInvestigation(toRestore);
               }
-              if (openCamFromUrl) {
+              if (openCamFromUrl && window.innerWidth >= 768 && urlParams.get('mobile') !== '1') {
                 setFieldCameraOpen(true);
               }
             } catch {
