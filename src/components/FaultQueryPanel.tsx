@@ -8,8 +8,13 @@ import {
   RotateCcw,
   Mic,
   MicOff,
+  FileAudio,
+  X,
 } from 'lucide-react';
-import { UniversalVoiceDictation } from '../utils/voiceDictationEngine';
+import {
+  requestAudioTranscription,
+  UniversalVoiceDictation,
+} from '../utils/voiceDictationEngine';
 
 interface FaultQueryPanelProps {
   query: string;
@@ -77,6 +82,14 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
 }) => {
   const [isListeningVoice, setIsListeningVoice] = useState(false);
   const [isTranscribingAudio, setIsTranscribingAudio] = useState(false);
+  const [voiceAudioLevel, setVoiceAudioLevel] = useState(0);
+  const [voiceElapsedSec, setVoiceElapsedSec] = useState(0);
+  const [voiceStatusMessage, setVoiceStatusMessage] = useState<string | null>(
+    null
+  );
+  const audioFileInputRef = useRef<HTMLInputElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
   const queryRef = useRef<string>(query);
   queryRef.current = query;
   const setQueryRef = useRef(setQuery);
@@ -94,6 +107,9 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
       onStateChange: (st) => {
         setIsListeningVoice(st.isRecording);
         setIsTranscribingAudio(st.isTranscribing);
+        setVoiceAudioLevel(st.audioLevel);
+        setVoiceElapsedSec(st.elapsedSeconds);
+        setVoiceStatusMessage(st.statusMessage);
       },
     });
     voiceEngineRef.current = engine;
@@ -107,9 +123,52 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
     if (!engine) return;
     if (engine.getIsRecording()) {
       await engine.stop();
+      setTimeout(() => textareaRef.current?.focus(), 40);
     } else if (!engine.getIsTranscribing()) {
       await engine.start();
     }
+  };
+
+  const handleAudioFileUpload = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    setIsTranscribingAudio(true);
+    setVoiceStatusMessage(`⏳ Transcrevendo arquivo de áudio "${file.name}"...`);
+    try {
+      const transcript = await requestAudioTranscription(
+        file,
+        file.type || 'audio/webm'
+      );
+      if (transcript) {
+        const nextText = [queryRef.current.trim(), transcript]
+          .filter(Boolean)
+          .join(' ')
+          .trim();
+        queryRef.current = nextText;
+        setQuery(nextText);
+        setVoiceStatusMessage('✅ Áudio transcrito com sucesso!');
+        setTimeout(() => setVoiceStatusMessage(null), 3500);
+      } else {
+        setVoiceStatusMessage(
+          '⚠️ Não foi possível identificar fala no arquivo de áudio enviado.'
+        );
+      }
+    } catch {
+      setVoiceStatusMessage(
+        '⚠️ Erro ao transcrever o arquivo de áudio enviado.'
+      );
+    } finally {
+      setIsTranscribingAudio(false);
+    }
+  };
+
+  const formatTimer = (sec: number) => {
+    const m = String(Math.floor(sec / 60)).padStart(2, '0');
+    const s = String(sec % 60).padStart(2, '0');
+    return `${m}:${s}`;
   };
 
   const handleQuickButtonClick = async (btn: QuickSupportButtonConfig) => {
@@ -131,6 +190,9 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isAnalyzing) return;
+    if (voiceEngineRef.current?.getIsRecording()) {
+      await voiceEngineRef.current.stop();
+    }
     await onRunDiagnosis();
   };
 
@@ -139,6 +201,14 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
       aria-label="Caixa de Consulta de Falha ou Alarme"
       className="bg-[#111827] border border-slate-800 rounded-lg p-4 flex flex-col gap-3"
     >
+      <input
+        ref={audioFileInputRef}
+        type="file"
+        accept="audio/*,.ogg,.mp3,.wav,.m4a,.webm"
+        onChange={handleAudioFileUpload}
+        className="hidden"
+      />
+
       <div>
         <h2 className="text-sm font-semibold text-slate-100">
           2. Consulta de Falha / Alarme
@@ -150,42 +220,45 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
       </div>
 
       <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-        <div className="flex flex-col gap-1">
-          <div className="text-xs font-medium text-slate-300 flex items-center justify-between gap-2">
+        <div className="flex flex-col gap-1.5">
+          <div className="text-xs font-medium text-slate-300 flex items-center justify-between gap-2 flex-wrap">
             <label htmlFor="fault-query-input">Alarme ou Sintoma</label>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
               <button
                 type="button"
                 disabled={isTranscribingAudio}
                 onClick={toggleVoiceQuery}
-                className={`px-2 py-0.5 rounded text-[11px] font-medium flex items-center gap-1 cursor-pointer border transition-colors ${
+                className={`px-2.5 py-1 rounded text-[11px] font-semibold flex items-center gap-1.5 cursor-pointer border transition-colors ${
                   isListeningVoice
-                    ? 'bg-rose-600 text-white border-rose-400 animate-pulse'
+                    ? 'bg-rose-600 hover:bg-rose-500 text-white border-rose-400 animate-pulse shadow-sm'
                     : isTranscribingAudio
                       ? 'bg-amber-600/30 text-amber-200 border-amber-500/40 animate-pulse'
                       : 'bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border-sky-500/40'
                 }`}
-                title="Ditar alarme ou sintoma por voz (Português)"
+                title="Ditar alarme ou sintoma por voz no microfone (Português)"
               >
                 {isListeningVoice ? (
                   <>
-                    <MicOff className="w-3 h-3" />
-                    <span>Concluir Voz</span>
+                    <MicOff className="w-3.5 h-3.5" />
+                    <span>Concluir Voz ({formatTimer(voiceElapsedSec)})</span>
                   </>
                 ) : isTranscribingAudio ? (
-                  <span>Transcrevendo...</span>
+                  <span>⏳ Transcrevendo...</span>
                 ) : (
                   <>
-                    <Mic className="w-3 h-3 text-sky-400" />
+                    <Mic className="w-3.5 h-3.5 text-sky-400" />
                     <span>Ditar por Voz</span>
                   </>
                 )}
               </button>
+
               {query && (
                 <button
                   type="button"
                   onClick={() => {
                     setQuery('');
+                    queryRef.current = '';
+                    voiceEngineRef.current?.updateBaseTextFromManualEdit('');
                     setActiveFocusTopic('');
                   }}
                   className="text-[11px] text-slate-400 hover:text-slate-200 flex items-center gap-1 cursor-pointer"
@@ -197,11 +270,92 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
             </div>
           </div>
 
+          {/* Barra Interativa de Status do Microfone / Medidor de Voz no PC */}
+          {(isListeningVoice || isTranscribingAudio || voiceStatusMessage) && (
+            <div
+              className={`p-2.5 rounded-md border text-[11px] flex flex-col gap-2 ${
+                voiceStatusMessage?.startsWith('⚠️')
+                  ? 'bg-amber-950/70 border-amber-500/50 text-amber-200'
+                  : isListeningVoice
+                    ? 'bg-rose-950/60 border-rose-500/50 text-rose-100'
+                    : 'bg-sky-950/60 border-sky-500/40 text-sky-200'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  {isListeningVoice && (
+                    <span className="w-2.5 h-2.5 rounded-full bg-rose-500 animate-ping shrink-0" />
+                  )}
+                  <span className="font-medium leading-snug">
+                    {voiceStatusMessage ||
+                      (isListeningVoice
+                        ? `🎙️ Gravando (${formatTimer(voiceElapsedSec)}) — Fale agora...`
+                        : '⏳ Transcrevendo sua fala...')}
+                  </span>
+                </div>
+
+                {!isListeningVoice && !isTranscribingAudio && (
+                  <button
+                    type="button"
+                    onClick={() => setVoiceStatusMessage(null)}
+                    className="p-0.5 text-slate-400 hover:text-white shrink-0 cursor-pointer"
+                    title="Fechar aviso"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+
+              {isListeningVoice && (
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex-1 h-2 bg-slate-900 rounded-full overflow-hidden border border-slate-700">
+                    <div
+                      className="h-full bg-emerald-400 transition-all duration-75"
+                      style={{
+                        width: `${Math.min(100, Math.max(10, voiceAudioLevel))}%`,
+                      }}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={toggleVoiceQuery}
+                    className="px-2.5 py-1 rounded bg-rose-600 hover:bg-rose-500 text-white font-bold text-[10px] shrink-0 cursor-pointer"
+                  >
+                    Parar e Transcrever
+                  </button>
+                </div>
+              )}
+
+              {voiceStatusMessage?.startsWith('⚠️') && (
+                <div className="flex items-center justify-between gap-2 pt-1 border-t border-amber-500/30">
+                  <span className="text-[10px] text-amber-300/90">
+                    Sem microfone no PC? Você também pode enviar um áudio gravado (ex: WhatsApp):
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => audioFileInputRef.current?.click()}
+                    className="px-2.5 py-1 rounded bg-amber-500/25 hover:bg-amber-500/40 border border-amber-400/50 text-amber-100 font-semibold text-[11px] flex items-center gap-1 shrink-0 cursor-pointer"
+                  >
+                    <FileAudio className="w-3 h-3" />
+                    <span>Enviar Áudio</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           <textarea
+            ref={textareaRef}
             id="fault-query-input"
             rows={2}
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              queryRef.current = e.target.value;
+              voiceEngineRef.current?.updateBaseTextFromManualEdit(
+                e.target.value
+              );
+            }}
             placeholder='Ex: "Baixa pressão de óleo na UHLM", "Falta de tensão 125Vcc no CSG2"...'
             className="w-full bg-[#0B111E] border border-slate-700 focus:border-sky-500 rounded-md p-2.5 text-xs sm:text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none transition-colors resize-y"
           />

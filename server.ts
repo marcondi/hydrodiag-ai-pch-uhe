@@ -1018,13 +1018,18 @@ export function createApiApp() {
           .trim()
           .toLowerCase();
         const cleanMime =
-          rawMime === 'audio/mp4' ||
-          rawMime === 'audio/ogg' ||
-          rawMime === 'audio/wav' ||
-          rawMime === 'audio/mpeg' ||
-          rawMime === 'audio/webm'
-            ? rawMime
-            : 'audio/webm';
+          rawMime === 'audio/mp3'
+            ? 'audio/mpeg'
+            : rawMime === 'audio/x-m4a' || rawMime === 'audio/m4a'
+              ? 'audio/mp4'
+              : rawMime === 'audio/mp4' ||
+                  rawMime === 'audio/ogg' ||
+                  rawMime === 'audio/wav' ||
+                  rawMime === 'audio/mpeg' ||
+                  rawMime === 'audio/aac' ||
+                  rawMime === 'audio/webm'
+                ? rawMime
+                : 'audio/webm';
 
         const result = await callGeminiFast(
           ai,
