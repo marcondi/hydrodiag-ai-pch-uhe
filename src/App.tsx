@@ -299,6 +299,8 @@ export default function App() {
     }
   }, [fieldContrastMode]);
 
+  const hasRestoredInitialSessionRef = useRef<boolean>(false);
+
   const handleSyncHistoryWithCloud = async (
     itemsOverride?: SavedInvestigationSummary[]
   ) => {
@@ -324,6 +326,39 @@ export default function App() {
       }
     }
 
+    const tryInitialSessionRestore = (list: SavedInvestigationSummary[]) => {
+      if (hasRestoredInitialSessionRef.current || itemsOverride || turns.length > 0 || list.length === 0) {
+        return;
+      }
+      hasRestoredInitialSessionRef.current = true;
+      try {
+        const urlParams = new URLSearchParams(window.location.search);
+        const sessionFromUrl = urlParams.get('session');
+        const openCamFromUrl = urlParams.get('camera') === '1';
+        const isMobileDevice =
+          urlParams.get('mobile') === '1' ||
+          (urlParams.get('mobile') !== '0' && window.innerWidth < 768);
+
+        // No celular, abrir SEMPRE na Tela Inicial limpa (só carrega sessão automática se vier link explícito ?session= via QR Code)
+        const targetSessionId = isMobileDevice
+          ? sessionFromUrl
+          : sessionFromUrl || localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
+
+        const toRestore =
+          (targetSessionId &&
+            list.find((i: SavedInvestigationSummary) => i.id === targetSessionId)) ||
+          null;
+        if (toRestore) {
+          handleLoadInvestigation(toRestore);
+        }
+        if (openCamFromUrl && !isMobileDevice) {
+          setFieldCameraOpen(true);
+        }
+      } catch {
+        // Ignore
+      }
+    };
+
     try {
       const res = await fetch('/api/history/sync', {
         method: 'POST',
@@ -344,30 +379,7 @@ export default function App() {
           } catch {
             // Ignore
           }
-          if (!itemsOverride && turns.length === 0 && data.items.length > 0) {
-            try {
-              const urlParams = new URLSearchParams(window.location.search);
-              const sessionFromUrl = urlParams.get('session');
-              const openCamFromUrl = urlParams.get('camera') === '1';
-              const lastActiveId =
-                sessionFromUrl ||
-                localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
-              const toRestore =
-                (lastActiveId &&
-                  data.items.find(
-                    (i: SavedInvestigationSummary) => i.id === lastActiveId
-                  )) ||
-                null;
-              if (toRestore) {
-                handleLoadInvestigation(toRestore);
-              }
-              if (openCamFromUrl && window.innerWidth >= 768 && urlParams.get('mobile') !== '1') {
-                setFieldCameraOpen(true);
-              }
-            } catch {
-              // Ignore
-            }
-          }
+          tryInitialSessionRestore(data.items);
           setIsSyncingCloud(false);
           return;
         }
@@ -378,20 +390,9 @@ export default function App() {
 
     if (localItems.length > 0) {
       setSavedInvestigations(localItems);
-      if (!itemsOverride && turns.length === 0) {
-        try {
-          const lastActiveId = localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
-          const toRestore =
-            (lastActiveId &&
-              localItems.find((i) => i.id === lastActiveId)) ||
-            null;
-          if (toRestore) {
-            handleLoadInvestigation(toRestore);
-          }
-        } catch {
-          // Ignore
-        }
-      }
+      tryInitialSessionRestore(localItems);
+    } else {
+      hasRestoredInitialSessionRef.current = true;
     }
     setIsSyncingCloud(false);
   };

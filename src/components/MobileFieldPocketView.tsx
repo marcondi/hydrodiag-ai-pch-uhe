@@ -172,9 +172,17 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
   onSendChatMessage,
   onExitMobileMode,
 }) => {
-  const [screen, setScreen] = useState<'input' | 'result'>(() =>
-    turns.length > 0 ? 'result' : 'input'
-  );
+  const [screen, setScreen] = useState<'input' | 'result'>(() => {
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      if (urlParams.get('session') && turns.length > 0) {
+        return 'result';
+      }
+    } catch {
+      // Ignore
+    }
+    return 'input';
+  });
   const [showSavedList, setShowSavedList] = useState<boolean>(false);
   const [showFullLaudo, setShowFullLaudo] = useState<boolean>(false);
   const [manualPageInput, setManualPageInput] = useState<string>('1');
@@ -338,11 +346,24 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
 
   const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
   const prevTurnsCountRef = useRef<number>(turns.length);
+  const userRequestedDiagnosisRef = useRef<boolean>(false);
 
-  // Transicionar automaticamente para a tela de resultado quando um novo diagnóstico terminar
+  // Transicionar para a tela de resultado SOMENTE quando o próprio usuário solicitou um diagnóstico no celular (ou abriu via link ?session=)
   useEffect(() => {
     if (turns.length > prevTurnsCountRef.current && turns.length > 0) {
-      setScreen('result');
+      const hasExplicitSessionUrl = (() => {
+        try {
+          return Boolean(
+            new URLSearchParams(window.location.search).get('session')
+          );
+        } catch {
+          return false;
+        }
+      })();
+      if (userRequestedDiagnosisRef.current || hasExplicitSessionUrl) {
+        userRequestedDiagnosisRef.current = false;
+        setScreen('result');
+      }
     }
     prevTurnsCountRef.current = turns.length;
   }, [turns.length]);
@@ -1096,12 +1117,13 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                 isUploading ||
                 (!query.trim() && attachments.length === 0)
               }
-              onClick={() =>
+              onClick={() => {
+                userRequestedDiagnosisRef.current = true;
                 onRunDiagnosis(
                   query.trim() ||
                     'Analise a foto/diagrama anexado, identifique a falha e mostre os bornes para testar com o multímetro.'
-                )
-              }
+                );
+              }}
               className="w-full py-4 px-5 rounded-2xl bg-sky-500 hover:bg-sky-400 disabled:opacity-40 text-slate-950 font-extrabold text-base flex items-center justify-center gap-2.5 shadow-xl cursor-pointer"
             >
               <Sparkles className="w-5 h-5" />
