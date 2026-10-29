@@ -124,6 +124,177 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024).toFixed(1)} KB`;
 }
 
+const CLIENT_CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+
+function clientCrc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) {
+    crc = CLIENT_CRC32_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function buildClientZipBlob(
+  files: Array<{ path: string; content: string }>
+): Blob {
+  const encoder = new TextEncoder();
+  const localParts: Uint8Array[] = [];
+  const centralParts: Uint8Array[] = [];
+  let offset = 0;
+
+  for (const file of files) {
+    const cleanName = file.path.replace(/\\/g, '/').replace(/^\/+/, '');
+    const nameBytes = encoder.encode(cleanName);
+    const dataBytes = encoder.encode(file.content);
+    const crc = clientCrc32(dataBytes);
+
+    // Local file header (30 bytes + name) — Store method (0)
+    const localHeader = new Uint8Array(30 + nameBytes.length);
+    const lv = new DataView(localHeader.buffer);
+    lv.setUint32(0, 0x04034b50, true); // signature
+    lv.setUint16(4, 20, true); // version needed
+    lv.setUint16(6, 0x0800, true); // UTF-8 flag
+    lv.setUint16(8, 0, true); // method: 0 (store)
+    lv.setUint16(10, 0, true); // mod time
+    lv.setUint16(12, 0x5421, true); // mod date
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, dataBytes.length, true);
+    lv.setUint32(22, dataBytes.length, true);
+    lv.setUint16(26, nameBytes.length, true);
+    lv.setUint16(28, 0, true);
+    localHeader.set(nameBytes, 30);
+
+    localParts.push(localHeader, dataBytes);
+
+    // Central directory header (46 bytes + name)
+    const centralHeader = new Uint8Array(46 + nameBytes.length);
+    const cv = new DataView(centralHeader.buffer);
+    cv.setUint32(0, 0x02014b50, true); // signature
+    cv.setUint16(4, 20, true); // version made by
+    cv.setUint16(6, 20, true); // version needed
+    cv.setUint16(8, 0x0800, true); // UTF-8 flag
+    cv.setUint16(10, 0, true); // method: 0 (store)
+    cv.setUint16(12, 0, true); // mod time
+    cv.setUint16(14, 0x5421, true); // mod date
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, dataBytes.length, true);
+    cv.setUint32(24, dataBytes.length, true);
+    cv.setUint16(28, nameBytes.length, true);
+    cv.setUint16(30, 0, true);
+    cv.setUint16(32, 0, true);
+    cv.setUint16(34, 0, true);
+    cv.setUint16(36, 0, true);
+    cv.setUint32(38, 0, true);
+    cv.setUint32(42, offset, true);
+    centralHeader.set(nameBytes, 46);
+
+    centralParts.push(centralHeader);
+    offset += localHeader.length + dataBytes.length;
+  }
+
+  let centralDirLength = 0;
+  for (const part of centralParts) {
+    centralDirLength += part.length;
+  }
+
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(4, 0, true);
+  ev.setUint16(6, 0, true);
+  ev.setUint16(8, files.length, true);
+  ev.setUint16(10, files.length, true);
+  ev.setUint32(12, centralDirLength, true);
+  ev.setUint32(16, offset, true);
+  ev.setUint16(20, 0, true);
+
+  return new Blob(
+    [...localParts, ...centralParts, eocd] as BlobPart[],
+    { type: 'application/zip' }
+  );
+}
+
+export async function downloadVerifiedFullSourceZip(): Promise<void> {
+  const dateTag = new Date().toISOString().slice(0, 10);
+  const filename = `hydrodiag-ai-codigo-completo-backup-${dateTag}.zip`;
+  const bust = Date.now();
+
+  const triggerBlobDownload = (blob: Blob) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 3000);
+  };
+
+  // 1. Try dynamic API endpoint first — only accept if size >= 30 KB (real full ZIP is ~155 KB+)
+  try {
+    const apiRes = await fetch(`/api/backup/download-zip?t=${bust}`);
+    if (apiRes.ok) {
+      const blob = await apiRes.blob();
+      if (blob.size >= 30000) {
+        triggerBlobDownload(blob);
+        return;
+      }
+    }
+  } catch {
+    // Fallback below
+  }
+
+  // 2. Try building ZIP directly in browser from source-bundle JSON (api or static public/)
+  for (const bundleUrl of [
+    `/api/backup/source-bundle?t=${bust}`,
+    `/hydrodiag-source-bundle.json?t=${bust}`,
+  ]) {
+    try {
+      const res = await fetch(bundleUrl);
+      if (res.ok) {
+        const data = (await res.json()) as {
+          files?: Array<{ path: string; content: string }>;
+        };
+        if (Array.isArray(data.files) && data.files.length >= 10) {
+          const zipBlob = buildClientZipBlob(data.files);
+          if (zipBlob.size >= 30000) {
+            triggerBlobDownload(zipBlob);
+            return;
+          }
+        }
+      }
+    } catch {
+      // Continue to static ZIP fallback
+    }
+  }
+
+  // 3. Fallback to static pre-built ZIP in public/
+  try {
+    const staticZipRes = await fetch(
+      `/hydrodiag-ai-backup-completo.zip?t=${bust}`
+    );
+    if (staticZipRes.ok) {
+      const blob = await staticZipRes.blob();
+      if (blob.size >= 10000) {
+        triggerBlobDownload(blob);
+        return;
+      }
+    }
+  } catch {
+    // Ignore
+  }
+}
+
 export const GitHubDeployPanel: React.FC = () => {
   const [githubUsername, setGithubUsername] = useState('marcondi');
   const [repoName, setRepoName] = useState('hydrodiag-ai-pch-uhe');
@@ -781,12 +952,27 @@ git push -u origin main`;
 
         {/* 3 Main Download Buttons */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <a
-            href="/api/backup/download-zip"
-            download
-            className="p-4 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex flex-col justify-between gap-3 transition-colors shadow-sm cursor-pointer"
+          <button
+            type="button"
+            onClick={() => {
+              if (backupBundle && backupBundle.files.length >= 10) {
+                const dateTag = new Date().toISOString().slice(0, 10);
+                const zipBlob = buildClientZipBlob(backupBundle.files);
+                const url = URL.createObjectURL(zipBlob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `hydrodiag-ai-codigo-completo-backup-${dateTag}.zip`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(() => URL.revokeObjectURL(url), 3000);
+              } else {
+                void downloadVerifiedFullSourceZip();
+              }
+            }}
+            className="p-4 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-left text-white font-semibold text-xs flex flex-col justify-between gap-3 transition-colors shadow-sm cursor-pointer"
           >
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between w-full">
               <span className="font-mono text-[11px] uppercase tracking-wider text-emerald-100">
                 RECOMENDADO · PACOTE .ZIP
               </span>
@@ -803,7 +989,7 @@ git push -u origin main`;
                 <code>npm install</code>.
               </p>
             </div>
-          </a>
+          </button>
 
           <button
             type="button"

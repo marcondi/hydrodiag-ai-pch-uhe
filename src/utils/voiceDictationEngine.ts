@@ -28,9 +28,13 @@ async function requestAudioTranscription(
   mimeType: string
 ): Promise<string> {
   const base64Audio = await blobToBase64(blob);
-  if (!base64Audio || base64Audio.length < 120) {
+  if (!base64Audio || base64Audio.length < 100) {
     return '';
   }
+
+  const cleanMimeType =
+    (mimeType || blob.type || 'audio/webm').split(';')[0].trim() ||
+    'audio/webm';
 
   const response = await fetch('/api/serverless-step', {
     method: 'POST',
@@ -38,7 +42,7 @@ async function requestAudioTranscription(
     body: JSON.stringify({
       action: 'transcribe_audio',
       audioBase64: base64Audio,
-      mimeType: mimeType || blob.type || 'audio/webm',
+      mimeType: cleanMimeType,
     }),
   });
 
@@ -149,6 +153,9 @@ export class UniversalVoiceDictation {
             .webkitAudioContext;
         if (AudioCtx) {
           this.audioContext = new AudioCtx();
+          if (this.audioContext.state === 'suspended') {
+            await this.audioContext.resume().catch(() => {});
+          }
           const source = this.audioContext.createMediaStreamSource(stream);
           this.analyser = this.audioContext.createAnalyser();
           this.analyser.fftSize = 256;
@@ -166,7 +173,7 @@ export class UniversalVoiceDictation {
             const rms = Math.sqrt(sumSquares / dataArray.length);
             const scaledLevel = Math.min(100, Math.round(rms * 340));
             this.audioLevel = scaledLevel;
-            if (scaledLevel >= 7) {
+            if (scaledLevel >= 3) {
               this.hadVoiceActivitySinceLastSync = true;
               this.everHadVoiceActivity = true;
             }
@@ -202,6 +209,8 @@ export class UniversalVoiceDictation {
       recorder.ondataavailable = (ev: BlobEvent) => {
         if (ev.data && ev.data.size > 0) {
           this.chunks.push(ev.data);
+          this.hadVoiceActivitySinceLastSync = true;
+          this.everHadVoiceActivity = true;
         }
       };
 
@@ -213,7 +222,7 @@ export class UniversalVoiceDictation {
       this.mediaRecorder = recorder;
       this.isRecording = true;
       this.statusMessage =
-        '🎙️ Gravando sua voz — Fale à vontade e clique em Concluir quando terminar';
+        '🎙️ Gravando sua voz — Fale o sintoma e toque em "Parar Voz" para transcrever';
       this.emitState();
 
       // Request data chunks every 500ms so we always have fresh audio buffered
@@ -249,7 +258,6 @@ export class UniversalVoiceDictation {
       !this.isRecording ||
       this.isTranscribing ||
       this.isLiveSyncInFlight ||
-      !this.hadVoiceActivitySinceLastSync ||
       this.chunks.length <= this.lastSyncedChunkCount ||
       this.chunks.length < 3
     ) {
@@ -264,7 +272,7 @@ export class UniversalVoiceDictation {
       const snapshotBlob = new Blob(this.chunks.slice(0, snapshotCount), {
         type: this.selectedMimeType,
       });
-      if (snapshotBlob.size < 1500) {
+      if (snapshotBlob.size < 1200) {
         return;
       }
 
@@ -307,7 +315,7 @@ export class UniversalVoiceDictation {
     }
 
     const fullBlob = new Blob(this.chunks, { type: this.selectedMimeType });
-    if (fullBlob.size < 800 || !this.everHadVoiceActivity) {
+    if (fullBlob.size < 400) {
       this.isRecording = false;
       this.isTranscribing = false;
       this.statusMessage = null;

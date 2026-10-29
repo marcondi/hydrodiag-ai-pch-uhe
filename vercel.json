@@ -6,7 +6,8 @@
   "functions": {
     "api/index.ts": {
       "maxDuration": 60,
-      "memory": 1024
+      "memory": 1024,
+      "includeFiles": "{src/**,public/hydrodiag-source-bundle.json,public/icon.svg,public/sw.js,public/dev-sw.js,package.json,tsconfig.json,vite.config.ts,index.html,metadata.json,.env.example,.gitignore,supabase_hydrodiag_schema.sql,server.ts}"
     }
   },
   "rewrites": [

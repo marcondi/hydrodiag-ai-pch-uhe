@@ -14,6 +14,7 @@ import {
   Mic,
   MicOff,
   Send,
+  Share2,
   Smartphone,
   Sparkles,
   Sun,
@@ -1105,6 +1106,47 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                 </div>
               )}
 
+              {/* Atalhos Rápidos de Campo em 1 Toque (para uso com luva / sem precisar digitar) */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-mono text-slate-400">
+                    Toque rápido (ou digite abaixo):
+                  </span>
+                  {query.trim() && (
+                    <button
+                      type="button"
+                      onClick={() => setQuery('')}
+                      className="text-[11px] font-mono text-rose-300 hover:text-rose-200 underline cursor-pointer"
+                    >
+                      Limpar texto
+                    </button>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    'Analisar foto do supervisório anexada',
+                    'Disjuntor 52G não fecha',
+                    'Alarme pressão de óleo UHLM',
+                    'Falta 125 Vcc no painel',
+                    'Falha Regulador de Velocidade (RV)',
+                    'Alarme Nível Poço de Drenagem (SASE)',
+                  ].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() =>
+                        setQuery(
+                          query.trim() ? `${query.trim()} — ${preset}` : preset
+                        )
+                      }
+                      className="px-2.5 py-1 rounded-lg bg-[#0B111E] hover:bg-slate-800 border border-slate-700 text-[11px] text-slate-200 cursor-pointer"
+                    >
+                      + {preset}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <textarea
                 rows={3}
                 value={query}
@@ -1232,6 +1274,66 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                   {investigationStatus === 'resolvida'
                     ? '✓ Resolvida'
                     : 'Em Campo'}
+                </button>
+              </div>
+
+              {/* Botão rápido p/ Compartilhar no WhatsApp da Manutenção ou Copiar Resumo */}
+              <div className="pt-1 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const bornesText =
+                      measurementPoints.length > 0
+                        ? measurementPoints
+                            .map(
+                              (pt, idx) =>
+                                `• Ponto #${idx + 1}: Ponta(+) ${pt.terminalOrBorne} | Ponta(-) ${pt.referenceCommon} | Esperado: ${pt.expectedSpec}${pt.pageNumber ? ` (Pág. PDF ${pt.pageNumber})` : ''}`
+                            )
+                            .join('\n')
+                        : 'Ver detalhamento no laudo.';
+                    const pagesText =
+                      citedPages.length > 0
+                        ? citedPages
+                            .map(
+                              (c) =>
+                                `Pág. PDF ${c.pdfPage}${c.folhaSelo ? ` (FL. ${c.folhaSelo})` : ''}`
+                            )
+                            .join(', ')
+                        : 'N/A';
+                    const summaryText = [
+                      `⚡ *HydroDiag AI — Resumo de Campo PCH/UHE*`,
+                      `*Falha:* ${latestTurn.userQuery}`,
+                      `*Status:* ${investigationStatus === 'resolvida' ? 'Resolvida' : 'Em Atendimento'}`,
+                      `*Folhas Citadas:* ${pagesText}`,
+                      `*Bornes p/ Medir com Multímetro:*`,
+                      bornesText,
+                    ].join('\n');
+
+                    try {
+                      if (navigator.share) {
+                        await navigator.share({
+                          title: `Diagnóstico: ${latestTurn.userQuery}`,
+                          text: summaryText,
+                        });
+                        return;
+                      }
+                    } catch {
+                      // Fallback to clipboard
+                    }
+                    try {
+                      await navigator.clipboard.writeText(summaryText);
+                      setMobileNotice(
+                        'Resumo com bornes e páginas copiado! Agora é só colar no WhatsApp da equipe.'
+                      );
+                      setTimeout(() => setMobileNotice(null), 4000);
+                    } catch {
+                      // Ignore
+                    }
+                  }}
+                  className="w-full py-2 px-3 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-200 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Share2 className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Compartilhar / Copiar Resumo p/ WhatsApp</span>
                 </button>
               </div>
 

@@ -2105,6 +2105,9 @@ Responda em Markdown técnico claro, objetivo e direto para auxiliar o operador 
         '.gitignore',
         'supabase_hydrodiag_schema.sql',
         'public/icon.svg',
+        'public/sw.js',
+        'public/dev-sw.js',
+        'public/hydrodiag-source-bundle.json',
         'server.ts',
         'src/main.tsx',
         'src/index.css',
@@ -2121,6 +2124,7 @@ Responda em Markdown técnico claro, objetivo e direto para auxiliar o operador 
         'src/components/PdfDeepLinkDrawer.tsx',
         'src/components/FieldCameraModal.tsx',
         'src/components/MobileQrHandoffModal.tsx',
+        'src/components/MobileFieldPocketView.tsx',
         'src/components/GitHubDeployModal.tsx',
       ];
 
@@ -2535,6 +2539,7 @@ Sistema especialista multimodal para Engenharia Elétrica de Manutenção, Prote
       content: string;
       buffer: Buffer;
     }> = [];
+    const seenPaths = new Set<string>();
 
     const readmeBuf = Buffer.from(BACKUP_README_CONTENT, 'utf-8');
     collected.push({
@@ -2543,18 +2548,40 @@ Sistema especialista multimodal para Engenharia Elétrica de Manutenção, Prote
       content: BACKUP_README_CONTENT,
       buffer: readmeBuf,
     });
+    seenPaths.add('README.md');
+
+    const candidateRoots = Array.from(
+      new Set([
+        __dirname,
+        process.cwd(),
+        path.resolve(__dirname, '..'),
+      ])
+    );
+
+    const resolveExistingFile = (relPath: string): string | null => {
+      for (const root of candidateRoots) {
+        const candidate = path.join(root, relPath);
+        if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+          return candidate;
+        }
+      }
+      return null;
+    };
 
     const scanDirRecursive = (dirRel: string): string[] => {
       const found: string[] = [];
-      const absDir = path.join(__dirname, dirRel);
-      if (!fs.existsSync(absDir)) return found;
-      for (const entry of fs.readdirSync(absDir, { withFileTypes: true })) {
-        const rel = path.posix.join(dirRel.replace(/\\/g, '/'), entry.name);
-        if (entry.isDirectory()) {
-          found.push(...scanDirRecursive(rel));
-        } else if (/\.(ts|tsx|css|json)$/i.test(entry.name)) {
-          found.push(rel);
+      for (const root of candidateRoots) {
+        const absDir = path.join(root, dirRel);
+        if (!fs.existsSync(absDir)) continue;
+        for (const entry of fs.readdirSync(absDir, { withFileTypes: true })) {
+          const rel = path.posix.join(dirRel.replace(/\\/g, '/'), entry.name);
+          if (entry.isDirectory()) {
+            found.push(...scanDirRecursive(rel));
+          } else if (/\.(ts|tsx|css|json)$/i.test(entry.name)) {
+            found.push(rel);
+          }
         }
+        break;
       }
       return found;
     };
@@ -2564,8 +2591,9 @@ Sistema especialista multimodal para Engenharia Elétrica de Manutenção, Prote
     );
 
     for (const relPath of allPaths) {
-      const absPath = path.join(__dirname, relPath);
-      if (fs.existsSync(absPath)) {
+      if (seenPaths.has(relPath)) continue;
+      const absPath = resolveExistingFile(relPath);
+      if (absPath) {
         const rawBuf = fs.readFileSync(absPath);
         collected.push({
           path: relPath,
@@ -2573,10 +2601,47 @@ Sistema especialista multimodal para Engenharia Elétrica de Manutenção, Prote
           content: rawBuf.toString('utf-8'),
           buffer: rawBuf,
         });
+        seenPaths.add(relPath);
       }
     }
 
-    if (fs.existsSync(HISTORY_DB_PATH)) {
+    // Fallback for Vercel Serverless if raw source files were not mounted on disk
+    if (collected.length < 10) {
+      const bundleCandidates = [
+        'public/hydrodiag-source-bundle.json',
+        'dist/hydrodiag-source-bundle.json',
+        'hydrodiag-source-bundle.json',
+      ];
+      for (const cand of bundleCandidates) {
+        const bundleAbs = resolveExistingFile(cand);
+        if (!bundleAbs) continue;
+        try {
+          const parsed = JSON.parse(fs.readFileSync(bundleAbs, 'utf-8')) as {
+            files?: Array<{ path: string; content: string }>;
+          };
+          if (Array.isArray(parsed.files)) {
+            for (const f of parsed.files) {
+              if (!f.path || typeof f.content !== 'string' || seenPaths.has(f.path)) {
+                continue;
+              }
+              const buf = Buffer.from(f.content, 'utf-8');
+              collected.push({
+                path: f.path,
+                sizeBytes: buf.length,
+                content: f.content,
+                buffer: buf,
+              });
+              seenPaths.add(f.path);
+            }
+          }
+          if (collected.length >= 10) break;
+        } catch {
+          // Ignore parse error
+        }
+      }
+    }
+
+    if (fs.existsSync(HISTORY_DB_PATH) && !seenPaths.has('data/fault_history_db.json')) {
       try {
         const histBuf = fs.readFileSync(HISTORY_DB_PATH);
         collected.push({
