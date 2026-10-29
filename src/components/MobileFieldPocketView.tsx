@@ -1,10 +1,11 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
   BookOpen,
   Camera,
   CheckCircle2,
+  Eye,
   FileText,
   FolderOpen,
   Image as ImageIcon,
@@ -19,6 +20,7 @@ import {
   Trash2,
   Volume2,
   VolumeX,
+  X,
 } from 'lucide-react';
 import {
   ChatAttachmentPayload,
@@ -30,6 +32,8 @@ import {
 import {
   extractInteractiveMeasurementsFromMarkdown,
   extractProbeSummaryFromMarkdown,
+  getCachedPdfIndex,
+  loadAttachmentBinaryFromVault,
 } from '../utils/pdfClientEngine';
 import { UniversalVoiceDictation } from '../utils/voiceDictationEngine';
 import { technicalSpeechEngine } from '../utils/speechSynthesisEngine';
@@ -75,6 +79,30 @@ interface MobileFieldPocketViewProps {
   onExitMobileMode: () => void;
 }
 
+/**
+ * Classificação estrita de mídia para garantir que fotos da galeria/câmera
+ * NUNCA sejam tratadas como documentos PDF pelo Inspetor de Folhas PDF.
+ */
+export function isStrictlyPhotoAttachment(att: DiagramAttachment): boolean {
+  const lowerName = (att.name || '').trim().toLowerCase();
+  const lowerMime = (att.mimeType || '').trim().toLowerCase();
+  if (lowerName.endsWith('.pdf') || lowerMime === 'application/pdf') {
+    return false;
+  }
+  if (
+    lowerMime.startsWith('image/') ||
+    /\.(jpg|jpeg|png|webp|gif|bmp|heic|heif)$/i.test(lowerName) ||
+    att.categoryTag === 'FOTO CAMPO'
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export function isStrictlyPdfAttachment(att: DiagramAttachment): boolean {
+  return !isStrictlyPhotoAttachment(att);
+}
+
 function extractCitedPagesFromMarkdown(markdown: string): number[] {
   const pages = new Set<number>();
   const regex =
@@ -111,31 +139,160 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
   onAddFiles,
   onRemoveAttachment,
   onRunDiagnosis,
-  onOpenFieldCamera,
-  onOpenPdfPage,
   onRelinkAttachmentBinary,
   onSendChatMessage,
   onExitMobileMode,
 }) => {
-  // Two simple screens: 'input' (Passo 1, 2, 3 para enviar a falha) or 'result' (Bornes + PDF + Chat)
   const [screen, setScreen] = useState<'input' | 'result'>(() =>
     turns.length > 0 ? 'result' : 'input'
   );
   const [showSavedList, setShowSavedList] = useState<boolean>(false);
   const [showFullLaudo, setShowFullLaudo] = useState<boolean>(false);
-  const [manualPageInput, setManualPageInput] = useState<string>('');
+  const [manualPageInput, setManualPageInput] = useState<string>('1');
   const [chatInput, setChatInput] = useState<string>('');
   const [isDictatingQuery, setIsDictatingQuery] = useState<boolean>(false);
   const [isDictatingChat, setIsDictatingChat] = useState<boolean>(false);
   const [voiceStatus, setVoiceStatus] = useState<string | null>(null);
   const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
+  const [mobileNotice, setMobileNotice] = useState<string | null>(null);
 
-  // Mobile PDF Drawer state
+  // Separar fotos da galeria/câmera dos documentos PDF da sessão atual
+  const photoAttachments = useMemo(
+    () => attachments.filter((a) => isStrictlyPhotoAttachment(a)),
+    [attachments]
+  );
+
+  const sessionPdfAttachments = useMemo(
+    () => attachments.filter((a) => isStrictlyPdfAttachment(a)),
+    [attachments]
+  );
+
+  // Catálogo de PDFs já salvos na Nuvem/Histórico (caso o usuário no celular tenha subido apenas uma foto da galeria e queira abrir uma página do PDF da usina)
+  const [hydratedCloudPdfs, setHydratedCloudPdfs] = useState<
+    Record<string, string>
+  >({});
+
+  const fallbackHistoryPdfAttachments = useMemo(() => {
+    const map = new Map<string, DiagramAttachment>();
+    for (const inv of savedInvestigations) {
+      for (const meta of inv.attachmentMetadata || []) {
+        const lowerName = (meta.name || '').trim().toLowerCase();
+        const isPdf =
+          meta.mimeType === 'application/pdf' || lowerName.endsWith('.pdf');
+        if (!isPdf) continue;
+        const key = lowerName || meta.id;
+        if (!map.has(key)) {
+          map.set(key, {
+            id: meta.id,
+            name: meta.name,
+            mimeType: 'application/pdf',
+            sizeBytes: meta.sizeBytes || 0,
+            base64Data:
+              hydratedCloudPdfs[meta.id] || hydratedCloudPdfs[lowerName] || '',
+            sequenceIndex: meta.sequenceIndex || map.size + 1,
+            categoryTag: meta.categoryTag || '/EL',
+            panelName: meta.panelName,
+            addedAtTimestamp: inv.updatedAt || inv.createdAt,
+            serverUploadStatus: 'synced',
+            uploadProgress: 100,
+          });
+        }
+      }
+    }
+    return Array.from(map.values());
+  }, [savedInvestigations, hydratedCloudPdfs]);
+
+  // Lista unificada APENAS de arquivos PDF (da sessão atual + histórico da usina), NUNCA incluindo fotos da galeria
+  const allAvailablePdfAttachments = useMemo(() => {
+    const combined: DiagramAttachment[] = [];
+    const seenNames = new Set<string>();
+
+    for (const pdf of sessionPdfAttachments) {
+      const norm = pdf.name.trim().toLowerCase();
+      seenNames.add(norm);
+      combined.push({
+        ...pdf,
+        base64Data:
+          pdf.base64Data ||
+          hydratedCloudPdfs[pdf.id] ||
+          hydratedCloudPdfs[norm] ||
+          '',
+      });
+    }
+
+    for (const histPdf of fallbackHistoryPdfAttachments) {
+      const norm = histPdf.name.trim().toLowerCase();
+      if (!seenNames.has(norm)) {
+        seenNames.add(norm);
+        combined.push(histPdf);
+      }
+    }
+
+    return combined;
+  }, [sessionPdfAttachments, fallbackHistoryPdfAttachments, hydratedCloudPdfs]);
+
+  // Seletor de qual PDF está ativo para abrir páginas no celular
+  const [selectedMobilePdfId, setSelectedMobilePdfId] = useState<string>('');
+
+  useEffect(() => {
+    if (allAvailablePdfAttachments.length === 0) {
+      if (selectedMobilePdfId !== '') setSelectedMobilePdfId('');
+      return;
+    }
+    const exists = allAvailablePdfAttachments.some(
+      (p) => p.id === selectedMobilePdfId
+    );
+    if (!exists) {
+      setSelectedMobilePdfId(allAvailablePdfAttachments[0].id);
+    }
+  }, [allAvailablePdfAttachments, selectedMobilePdfId]);
+
+  // Hidratar automaticamente o binário dos PDFs em segundo plano para que abrir página nunca falhe
+  useEffect(() => {
+    let cancelled = false;
+    const hydrateMissingPdfs = async () => {
+      for (const pdf of allAvailablePdfAttachments) {
+        if (cancelled) return;
+        const norm = pdf.name.trim().toLowerCase();
+        if (pdf.base64Data || hydratedCloudPdfs[pdf.id] || hydratedCloudPdfs[norm]) {
+          continue;
+        }
+        try {
+          const b64 = await loadAttachmentBinaryFromVault(pdf);
+          if (b64 && !cancelled) {
+            setHydratedCloudPdfs((prev) => ({
+              ...prev,
+              [pdf.id]: b64,
+              [norm]: b64,
+            }));
+            if (
+              onRelinkAttachmentBinary &&
+              sessionPdfAttachments.some((s) => s.id === pdf.id)
+            ) {
+              onRelinkAttachmentBinary(pdf.id, b64, pdf.name, pdf.sizeBytes);
+            }
+          }
+        } catch {
+          // Ignore background hydration errors
+        }
+      }
+    };
+    hydrateMissingPdfs();
+    return () => {
+      cancelled = true;
+    };
+  }, [allAvailablePdfAttachments.length, sessionId]);
+
+  // Estado exclusivo do Inspetor de Folha PDF (só recebe PDFs)
   const [mobilePdfOpen, setMobilePdfOpen] = useState<boolean>(false);
   const [mobilePdfPage, setMobilePdfPage] = useState<number>(1);
   const [mobilePdfAttachmentId, setMobilePdfAttachmentId] = useState<
     string | undefined
   >(undefined);
+
+  // Estado exclusivo para visualizar Foto da Galeria / Câmera (nunca mistura com PDF)
+  const [previewPhotoItem, setPreviewPhotoItem] =
+    useState<DiagramAttachment | null>(null);
 
   const directCameraInputRef = useRef<HTMLInputElement | null>(null);
   const photoGalleryInputRef = useRef<HTMLInputElement | null>(null);
@@ -150,7 +307,7 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
   const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
   const prevTurnsCountRef = useRef<number>(turns.length);
 
-  // Automatically switch to Result screen when diagnosis completes
+  // Transicionar automaticamente para a tela de resultado quando um novo diagnóstico terminar
   useEffect(() => {
     if (turns.length > prevTurnsCountRef.current && turns.length > 0) {
       setScreen('result');
@@ -223,14 +380,98 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
     await engine.start();
   };
 
+  /**
+   * Resolutor determinístico de PDF para uma página solicitada:
+   * Garante que NUNCA seleciona uma imagem da galeria e escolhe o melhor PDF disponível.
+   */
+  const resolveTargetPdfForPage = (
+    pageNumber: number,
+    explicitPdfId?: string
+  ): DiagramAttachment | null => {
+    if (allAvailablePdfAttachments.length === 0) return null;
+
+    if (explicitPdfId) {
+      const matched = allAvailablePdfAttachments.find(
+        (p) => p.id === explicitPdfId
+      );
+      if (matched) return matched;
+    }
+
+    // Se o usuário selecionou manualmente um PDF no seletor mobile e ele cobre a página (ou não tem índice ainda)
+    if (selectedMobilePdfId) {
+      const selectedPdf = allAvailablePdfAttachments.find(
+        (p) => p.id === selectedMobilePdfId
+      );
+      if (selectedPdf) {
+        const cached = getCachedPdfIndex(selectedPdf);
+        if (!cached || cached.length === 0) {
+          return selectedPdf;
+        }
+        const maxIndexed = Math.max(...cached.map((b) => b.endPage));
+        if (pageNumber <= maxIndexed || maxIndexed <= 1) {
+          return selectedPdf;
+        }
+      }
+    }
+
+    // Se o laudo menciona explicitamente o nome de um dos PDFs disponíveis
+    if (latestTurn?.markdownResponse) {
+      const lowerMd = latestTurn.markdownResponse.toLowerCase();
+      for (const pdf of allAvailablePdfAttachments) {
+        const cleanBaseName = pdf.name
+          .replace(/\.pdf$/i, '')
+          .trim()
+          .toLowerCase();
+        if (cleanBaseName.length > 4 && lowerMd.includes(cleanBaseName)) {
+          return pdf;
+        }
+      }
+    }
+
+    // Preferir PDF cujo índice em cache cubra o número da página
+    for (const pdf of allAvailablePdfAttachments) {
+      const cached = getCachedPdfIndex(pdf);
+      if (cached && cached.length > 0) {
+        const maxIndexed = Math.max(...cached.map((b) => b.endPage));
+        if (pageNumber <= maxIndexed && maxIndexed > 1) {
+          return pdf;
+        }
+      }
+    }
+
+    // Preferir PDF que já tenha base64Data carregado
+    const withB64 = allAvailablePdfAttachments.find((p) =>
+      Boolean(p.base64Data)
+    );
+    if (withB64) return withB64;
+
+    return allAvailablePdfAttachments[0];
+  };
+
+  /**
+   * Abre SEMPRE uma página de PDF no Inspetor de Diagrama Elétrico (nunca abre foto da galeria).
+   */
   const handleOpenMobilePdfSheet = (
     pageNumber: number,
-    attachmentId?: string
+    explicitPdfId?: string
   ) => {
-    setMobilePdfPage(pageNumber);
-    setMobilePdfAttachmentId(attachmentId);
+    const safePage = Math.max(1, Math.floor(pageNumber || 1));
+    const targetPdf = resolveTargetPdfForPage(safePage, explicitPdfId);
+
+    if (!targetPdf) {
+      setMobileNotice(
+        'Nenhum caderno PDF elétrico foi anexado ainda (apenas foto). Toque em "Anexar Diagrama Elétrico em PDF" para abrir as páginas do esquema.'
+      );
+      setTimeout(() => setMobileNotice(null), 6000);
+      pdfFileInputRef.current?.click();
+      return;
+    }
+
+    setMobileNotice(null);
+    setSelectedMobilePdfId(targetPdf.id);
+    setMobilePdfAttachmentId(targetPdf.id);
+    setMobilePdfPage(safePage);
     setMobilePdfOpen(true);
-    onOpenPdfPage(pageNumber, attachmentId);
   };
 
   const handleToggleSpeech = () => {
@@ -265,9 +506,42 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
     await onSendChatMessage(latestTurn.id, text);
   };
 
+  /**
+   * Transforma citações "Página X", "Pág. X", "Folha X" dentro de qualquer texto
+   * em botões clicáveis que abrem diretamente o PDF naquela página.
+   */
+  const renderTextWithClickablePdfPages = (rawText: string) => {
+    if (!rawText) return null;
+    const parts = rawText.split(
+      /(\b(?:P[áa]g(?:ina)?s?\.?|Fl(?:s)?\.?|Folha)\s*#?\s*\d{1,4}\b)/gi
+    );
+    return parts.map((segment, index) => {
+      const m = segment.match(
+        /^(?:P[áa]g(?:ina)?s?\.?|Fl(?:s)?\.?|Folha)\s*#?\s*(\d{1,4})$/i
+      );
+      if (m) {
+        const pg = parseInt(m[1], 10);
+        if (!isNaN(pg) && pg >= 1 && pg <= 2000) {
+          return (
+            <button
+              key={`pg_link_${index}_${pg}`}
+              type="button"
+              onClick={() => handleOpenMobilePdfSheet(pg)}
+              className="inline-flex items-center gap-1 mx-0.5 px-2 py-0.5 rounded-md bg-sky-500/25 hover:bg-sky-500/40 border border-sky-400/50 text-sky-200 font-mono font-bold text-xs cursor-pointer"
+            >
+              <BookOpen className="w-3 h-3 text-sky-300 shrink-0" />
+              <span>{segment}</span>
+            </button>
+          );
+        }
+      }
+      return <React.Fragment key={`txt_${index}`}>{segment}</React.Fragment>;
+    });
+  };
+
   return (
     <div className="min-h-screen bg-[#070B14] text-slate-100 flex flex-col">
-      {/* Hidden File Inputs (Direct Native Camera, Gallery & PDF — No blocking modal!) */}
+      {/* Inputs Nativos Ocultos */}
       <input
         ref={directCameraInputRef}
         type="file"
@@ -297,7 +571,7 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
       <input
         ref={pdfFileInputRef}
         type="file"
-        accept=".pdf,application/pdf,image/*"
+        accept=".pdf,application/pdf"
         multiple
         onChange={async (e) => {
           if (e.target.files && e.target.files.length > 0) {
@@ -353,8 +627,8 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
             </h1>
             <p className="text-[11px] text-slate-400 truncate">
               {screen === 'input'
-                ? '1. Envie a falha para diagnosticar'
-                : '2. Guia de Bornes, Folha PDF e Chat'}
+                ? 'Passo 1 a 3: Informar Falha'
+                : 'Resultado: Bornes, PDF e Chat'}
             </p>
           </div>
         </div>
@@ -386,6 +660,20 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
 
       {/* CORPO PRINCIPAL */}
       <div className="flex-1 p-3.5 max-w-lg w-full mx-auto space-y-4 pb-10">
+        {/* Aviso rápido se tentar abrir PDF sem ter PDF */}
+        {mobileNotice && (
+          <div className="p-3.5 rounded-xl bg-amber-950/90 border border-amber-500/60 text-xs text-amber-200 flex items-start justify-between gap-2">
+            <span>⚠️ {mobileNotice}</span>
+            <button
+              type="button"
+              onClick={() => setMobileNotice(null)}
+              className="text-amber-300 font-bold"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         {/* Banner de carregamento quando a IA está analisando */}
         {(isAnalyzing || isUploading) && (
           <div className="p-4 rounded-2xl bg-sky-950/90 border-2 border-sky-500/60 shadow-lg flex items-center gap-3">
@@ -393,7 +681,7 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
             <div>
               <p className="text-sm font-bold text-white">
                 {isUploading
-                  ? 'Carregando foto / arquivo PDF...'
+                  ? 'Carregando arquivo...'
                   : 'Analisando falha e localizando bornes...'}
               </p>
               <p className="text-xs text-sky-200 mt-0.5">
@@ -411,6 +699,68 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
           </div>
         )}
 
+        {/* BARRA FIXA DE ACESSO DIRETO AO PDF DA USINA (Disponível nas 2 telas!) */}
+        {allAvailablePdfAttachments.length > 0 && (
+          <div className="p-3 rounded-2xl bg-[#111827] border border-sky-500/40 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-mono uppercase tracking-wider text-sky-400 font-bold flex items-center gap-1.5">
+                <BookOpen className="w-3.5 h-3.5" />
+                <span>Abrir Página do Diagrama PDF:</span>
+              </span>
+              <span className="text-[10px] font-mono text-slate-400">
+                {allAvailablePdfAttachments.length} PDF(s) disponível(is)
+              </span>
+            </div>
+
+            {allAvailablePdfAttachments.length > 1 && (
+              <select
+                aria-label="Selecionar Caderno PDF Elétrico"
+                value={selectedMobilePdfId}
+                onChange={(e) => setSelectedMobilePdfId(e.target.value)}
+                className="w-full bg-[#0B111E] border border-slate-700 rounded-xl px-2.5 py-2 text-xs font-mono text-sky-200 focus:outline-none focus:border-sky-500"
+              >
+                {allAvailablePdfAttachments.map((pdf, idx) => (
+                  <option
+                    key={pdf.id}
+                    value={pdf.id}
+                    className="bg-[#0F172A] text-slate-100"
+                  >
+                    PDF #{idx + 1}: {pdf.name}
+                  </option>
+                ))}
+              </select>
+            )}
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                const num = parseInt(manualPageInput, 10);
+                handleOpenMobilePdfSheet(
+                  !isNaN(num) && num >= 1 ? num : 1,
+                  selectedMobilePdfId || undefined
+                );
+              }}
+              className="flex items-center gap-2"
+            >
+              <input
+                type="number"
+                min={1}
+                value={manualPageInput}
+                onChange={(e) => setManualPageInput(e.target.value)}
+                placeholder="Nº pág."
+                className="w-24 bg-[#0B111E] border border-slate-700 focus:border-sky-500 rounded-xl px-3 py-2 text-xs font-mono text-white text-center"
+              />
+              <button
+                type="submit"
+                className="flex-1 py-2 px-3 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow cursor-pointer"
+              >
+                <BookOpen className="w-3.5 h-3.5" />
+                <span>Abrir Pág. {manualPageInput || 1} do PDF</span>
+              </button>
+            </form>
+          </div>
+        )}
+
         {/* ===================================================================
             TELA 1: INFORMAR A FALHA (PASSO 1, PASSO 2 E BOTÃO DE DIAGNÓSTICO)
            =================================================================== */}
@@ -423,8 +773,8 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                 onClick={() => setScreen('result')}
                 className="w-full py-3 px-4 rounded-xl bg-sky-500/20 border border-sky-500/50 text-sky-200 font-bold text-xs flex items-center justify-between cursor-pointer"
               >
-                <span>📋 Você já tem um diagnóstico aberto nesta sessão</span>
-                <span className="underline">Ver Resultado →</span>
+                <span>📋 Ver Diagnóstico Atual Pronto</span>
+                <span className="underline">Abrir Resultado →</span>
               </button>
             )}
 
@@ -517,53 +867,90 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                 <span>Anexar Diagrama Elétrico em PDF</span>
               </button>
 
-              {/* Lista de arquivos/fotos já anexados com miniatura direta */}
-              {attachments.length > 0 && (
+              {/* LISTA SEPARADA 1A: FOTOS DA GALERIA / CÂMERA (Abre no Visualizador de Fotos, nunca no PDF!) */}
+              {photoAttachments.length > 0 && (
                 <div className="pt-2 border-t border-slate-800 space-y-2">
                   <p className="text-xs font-mono text-emerald-400 font-bold">
-                    ✅ {attachments.length} arquivo(s) pronto(s) para análise:
+                    📷 {photoAttachments.length} Foto(s) da Falha anexada(s):
                   </p>
-                  {attachments.map((att) => {
-                    const isImage = att.mimeType.startsWith('image/');
-                    return (
-                      <div
-                        key={att.id}
-                        className="p-2.5 rounded-xl bg-[#0B111E] border border-emerald-500/40 flex items-center justify-between gap-2.5 text-xs"
+                  {photoAttachments.map((photo) => (
+                    <div
+                      key={photo.id}
+                      className="p-2.5 rounded-xl bg-[#0B111E] border border-emerald-500/40 flex items-center justify-between gap-2.5 text-xs"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setPreviewPhotoItem(photo)}
+                        className="flex items-center gap-2.5 min-w-0 flex-1 text-left cursor-pointer"
                       >
-                        <button
-                          type="button"
-                          onClick={() => handleOpenMobilePdfSheet(1, att.id)}
-                          className="flex items-center gap-2.5 min-w-0 flex-1 text-left cursor-pointer"
-                        >
-                          {isImage && att.base64Data ? (
-                            <img
-                              src={`data:${att.mimeType};base64,${att.base64Data}`}
-                              alt={att.name}
-                              className="w-12 h-12 rounded-lg object-cover border border-slate-700 shrink-0"
-                            />
-                          ) : (
-                            <BookOpen className="w-5 h-5 text-sky-400 shrink-0" />
-                          )}
-                          <div className="min-w-0">
-                            <span className="font-semibold text-white block truncate">
-                              {att.name}
-                            </span>
-                            <span className="text-[11px] text-emerald-300">
-                              Pronto! Agora vá ao Passo 2 ou clique no botão 3 abaixo
-                            </span>
-                          </div>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onRemoveAttachment(att.id)}
-                          className="p-1.5 text-slate-400 hover:text-rose-400 cursor-pointer shrink-0"
-                          title="Remover arquivo"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    );
-                  })}
+                        {photo.base64Data ? (
+                          <img
+                            src={`data:${photo.mimeType};base64,${photo.base64Data}`}
+                            alt={photo.name}
+                            className="w-12 h-12 rounded-lg object-cover border border-slate-700 shrink-0"
+                          />
+                        ) : (
+                          <ImageIcon className="w-5 h-5 text-emerald-400 shrink-0" />
+                        )}
+                        <div className="min-w-0">
+                          <span className="font-semibold text-white block truncate">
+                            {photo.name}
+                          </span>
+                          <span className="text-[11px] text-emerald-300 flex items-center gap-1">
+                            <Eye className="w-3 h-3" />
+                            <span>Toque para ampliar a foto</span>
+                          </span>
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onRemoveAttachment(photo.id)}
+                        className="p-1.5 text-slate-400 hover:text-rose-400 cursor-pointer shrink-0"
+                        title="Remover foto"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* LISTA SEPARADA 1B: CADERNOS PDF ANEXADOS (Abre no Inspetor de PDF!) */}
+              {sessionPdfAttachments.length > 0 && (
+                <div className="pt-2 border-t border-slate-800 space-y-2">
+                  <p className="text-xs font-mono text-sky-400 font-bold">
+                    📐 {sessionPdfAttachments.length} Caderno(s) PDF anexado(s):
+                  </p>
+                  {sessionPdfAttachments.map((pdf) => (
+                    <div
+                      key={pdf.id}
+                      className="p-2.5 rounded-xl bg-[#0B111E] border border-sky-500/40 flex items-center justify-between gap-2.5 text-xs"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => handleOpenMobilePdfSheet(1, pdf.id)}
+                        className="flex items-center gap-2.5 min-w-0 flex-1 text-left cursor-pointer"
+                      >
+                        <BookOpen className="w-5 h-5 text-sky-400 shrink-0" />
+                        <div className="min-w-0">
+                          <span className="font-semibold text-white block truncate">
+                            {pdf.name}
+                          </span>
+                          <span className="text-[11px] text-sky-300">
+                            Toque para abrir páginas deste PDF
+                          </span>
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onRemoveAttachment(pdf.id)}
+                        className="p-1.5 text-slate-400 hover:text-rose-400 cursor-pointer shrink-0"
+                        title="Remover PDF"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
@@ -693,36 +1080,56 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
               </div>
             </div>
 
-            {/* Resumo da Falha Atual + Status */}
-            <div className="p-3.5 rounded-2xl bg-[#111827] border border-slate-800 flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <span className="text-[10px] font-mono uppercase text-sky-400 block">
-                  Falha em Atendimento
-                </span>
-                <h2 className="text-sm font-bold text-white truncate">
-                  {latestTurn.userQuery}
-                </h2>
+            {/* Resumo da Falha Atual + Miniaturas das Fotos da Galeria (se houver) */}
+            <div className="p-3.5 rounded-2xl bg-[#111827] border border-slate-800 space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <span className="text-[10px] font-mono uppercase text-sky-400 block">
+                    Falha em Atendimento
+                  </span>
+                  <h2 className="text-sm font-bold text-white truncate">
+                    {latestTurn.userQuery}
+                  </h2>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    onUpdateStatus(
+                      investigationStatus === 'resolvida'
+                        ? 'em_investigacao'
+                        : 'resolvida'
+                    )
+                  }
+                  className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border shrink-0 cursor-pointer ${
+                    investigationStatus === 'resolvida'
+                      ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
+                      : 'bg-amber-500/20 border-amber-500/50 text-amber-300'
+                  }`}
+                >
+                  {investigationStatus === 'resolvida'
+                    ? '✓ Resolvida'
+                    : 'Em Campo'}
+                </button>
               </div>
 
-              <button
-                type="button"
-                onClick={() =>
-                  onUpdateStatus(
-                    investigationStatus === 'resolvida'
-                      ? 'em_investigacao'
-                      : 'resolvida'
-                  )
-                }
-                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border shrink-0 cursor-pointer ${
-                  investigationStatus === 'resolvida'
-                    ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
-                    : 'bg-amber-500/20 border-amber-500/50 text-amber-300'
-                }`}
-              >
-                {investigationStatus === 'resolvida'
-                  ? '✓ Resolvida'
-                  : 'Em Campo'}
-              </button>
+              {photoAttachments.length > 0 && (
+                <div className="pt-2 border-t border-slate-800 flex items-center gap-2 overflow-x-auto">
+                  {photoAttachments.map((photo) => (
+                    <button
+                      key={photo.id}
+                      type="button"
+                      onClick={() => setPreviewPhotoItem(photo)}
+                      className="px-2.5 py-1.5 rounded-lg bg-[#0B111E] border border-emerald-500/40 text-emerald-200 text-xs flex items-center gap-1.5 shrink-0 cursor-pointer"
+                    >
+                      <ImageIcon className="w-3.5 h-3.5 text-emerald-400" />
+                      <span className="truncate max-w-[150px]">
+                        Ver Foto: {photo.name}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* BLOCO 1: BORNES PARA MEDIR COM MULTÍMETRO + BOTÃO DIRETO DA PÁGINA DO PDF */}
@@ -740,7 +1147,7 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                     className="px-2.5 py-1 rounded-lg bg-sky-600 text-white font-mono font-bold text-xs flex items-center gap-1 cursor-pointer"
                   >
                     <BookOpen className="w-3.5 h-3.5" />
-                    <span>Ver Pág. {probeSummary.locationPage}</span>
+                    <span>Abrir Pág. {probeSummary.locationPage}</span>
                   </button>
                 )}
               </div>
@@ -784,17 +1191,18 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                 </div>
               ) : (
                 <p className="text-xs text-slate-300">
-                  Veja os detalhes de medição no laudo abaixo ou abra a folha do
-                  PDF.
+                  Veja os detalhes de medição no laudo abaixo ou toque em uma
+                  página do PDF.
                 </p>
               )}
 
               {/* Botões grandes para abrir qualquer folha citada do PDF */}
-              {(citedPages.length > 0 || attachments.length > 0) && (
-                <div className="pt-2 border-t border-slate-800 space-y-2">
-                  <span className="text-xs font-bold text-sky-300 block">
-                    📐 Toque para abrir o Desenho PDF (Zoom e Anotações):
-                  </span>
+              <div className="pt-2 border-t border-slate-800 space-y-2">
+                <span className="text-xs font-bold text-sky-300 block">
+                  📐 Folhas do Diagrama PDF citadas neste diagnóstico:
+                </span>
+
+                {citedPages.length > 0 ? (
                   <div className="flex flex-wrap gap-2">
                     {citedPages.map((pg) => (
                       <button
@@ -804,56 +1212,38 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                         className="px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-mono font-bold text-xs flex items-center gap-1.5 shadow cursor-pointer"
                       >
                         <BookOpen className="w-3.5 h-3.5" />
-                        <span>Abrir Pág. {pg}</span>
+                        <span>Abrir Pág. {pg} no PDF</span>
                       </button>
                     ))}
-                    {citedPages.length === 0 &&
-                      attachments.map((att) => (
-                        <button
-                          key={att.id}
-                          type="button"
-                          onClick={() => handleOpenMobilePdfSheet(1, att.id)}
-                          className="px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-mono font-bold text-xs flex items-center gap-1.5 shadow cursor-pointer"
-                        >
-                          <BookOpen className="w-3.5 h-3.5" />
-                          <span>Abrir PDF #{att.sequenceIndex}</span>
-                        </button>
-                      ))}
                   </div>
-
-                  {/* Digitar nº de página direto se quiser outra folha */}
-                  {attachments.length > 0 && (
-                    <form
-                      onSubmit={(e) => {
-                        e.preventDefault();
-                        const n = parseInt(manualPageInput, 10);
-                        if (!isNaN(n) && n >= 1) {
-                          handleOpenMobilePdfSheet(n);
-                        }
-                      }}
-                      className="flex items-center gap-2 pt-1"
-                    >
-                      <input
-                        type="number"
-                        min={1}
-                        value={manualPageInput}
-                        onChange={(e) => setManualPageInput(e.target.value)}
-                        placeholder="Ir p/ pág. nº..."
-                        className="w-32 bg-[#0B111E] border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-white"
-                      />
+                ) : allAvailablePdfAttachments.length > 0 ? (
+                  <div className="flex flex-wrap gap-2">
+                    {allAvailablePdfAttachments.map((pdf, idx) => (
                       <button
-                        type="submit"
-                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-sky-300 font-semibold cursor-pointer"
+                        key={pdf.id}
+                        type="button"
+                        onClick={() => handleOpenMobilePdfSheet(1, pdf.id)}
+                        className="px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-mono font-bold text-xs flex items-center gap-1.5 shadow cursor-pointer"
                       >
-                        Abrir Folha
+                        <BookOpen className="w-3.5 h-3.5" />
+                        <span>Abrir PDF #{idx + 1}</span>
                       </button>
-                    </form>
-                  )}
-                </div>
-              )}
+                    ))}
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => pdfFileInputRef.current?.click()}
+                    className="w-full py-2.5 px-3 rounded-xl bg-sky-500/20 border border-sky-500/40 text-sky-200 font-bold text-xs flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <FileText className="w-4 h-4 text-sky-400" />
+                    <span>+ Anexar Diagrama PDF para abrir as páginas</span>
+                  </button>
+                )}
+              </div>
             </div>
 
-            {/* BLOCO 2: LAUDO TÉCNICO COMPLETO (EXPANSÍVEL COM 1 TOQUE) */}
+            {/* BLOCO 2: LAUDO TÉCNICO COMPLETO (COM PÁGINAS CLICÁVEIS) */}
             <div className="p-4 rounded-2xl bg-[#111827] border border-slate-800 space-y-2.5">
               <button
                 type="button"
@@ -870,7 +1260,7 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
 
               {showFullLaudo && (
                 <div className="pt-2.5 border-t border-slate-800 text-xs text-slate-200 leading-relaxed whitespace-pre-wrap">
-                  {latestTurn.markdownResponse}
+                  {renderTextWithClickablePdfPages(latestTurn.markdownResponse)}
                 </div>
               )}
             </div>
@@ -914,9 +1304,9 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                 </button>
               </div>
 
-              {/* Histórico de mensagens do Chat */}
+              {/* Histórico de mensagens do Chat (com páginas clicáveis!) */}
               {(latestTurn.chatMessages || []).length > 0 && (
-                <div className="max-h-64 overflow-y-auto space-y-2 pt-2 border-t border-slate-800">
+                <div className="max-h-72 overflow-y-auto space-y-2 pt-2 border-t border-slate-800">
                   {(latestTurn.chatMessages || []).map((msg) => (
                     <div
                       key={msg.id}
@@ -929,7 +1319,7 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                       <div className="text-[10px] font-mono text-slate-400 mb-1">
                         {msg.role === 'user' ? '👷 Você' : '⚡ Engenheiro IA'}
                       </div>
-                      {msg.content}
+                      {renderTextWithClickablePdfPages(msg.content)}
                     </div>
                   ))}
                 </div>
@@ -996,11 +1386,48 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
         )}
       </div>
 
-      {/* Inspetor de Folha PDF com Zoom, Desenho, Caixa de Texto e Print p/ Campo */}
+      {/* MODAL DEDICADO PARA VER FOTO DA GALERIA / CÂMERA (Separado do PDF!) */}
+      {previewPhotoItem && (
+        <div className="fixed inset-0 z-50 bg-black/90 flex flex-col p-3">
+          <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+            <div className="min-w-0">
+              <span className="text-[10px] font-mono uppercase text-emerald-400 block">
+                Foto da Galeria / Câmera
+              </span>
+              <h3 className="text-xs font-bold text-white truncate">
+                {previewPhotoItem.name}
+              </h3>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPreviewPhotoItem(null)}
+              className="px-3 py-1.5 rounded-lg bg-rose-600 text-white text-xs font-bold flex items-center gap-1 cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+              <span>Fechar Foto</span>
+            </button>
+          </div>
+          <div className="flex-1 flex items-center justify-center overflow-auto p-2">
+            {previewPhotoItem.base64Data ? (
+              <img
+                src={`data:${previewPhotoItem.mimeType};base64,${previewPhotoItem.base64Data}`}
+                alt={previewPhotoItem.name}
+                className="max-w-full max-h-full object-contain rounded-lg"
+              />
+            ) : (
+              <p className="text-xs text-slate-400">
+                Imagem sem pré-visualização local.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* INSPETOR DE FOLHA PDF (Recebe EXCLUSIVAMENTE allAvailablePdfAttachments — Zero Fotos da Galeria!) */}
       <PdfDeepLinkDrawer
         isOpen={mobilePdfOpen}
         onClose={() => setMobilePdfOpen(false)}
-        attachments={attachments}
+        attachments={allAvailablePdfAttachments}
         initialPage={mobilePdfPage}
         initialAttachmentId={mobilePdfAttachmentId}
         reportMarkdown={latestTurn?.markdownResponse}
@@ -1018,7 +1445,7 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
         }
         onRequestReupload={() => {
           setMobilePdfOpen(false);
-          setScreen('input');
+          pdfFileInputRef.current?.click();
         }}
         onRelinkAttachmentBinary={onRelinkAttachmentBinary}
       />
