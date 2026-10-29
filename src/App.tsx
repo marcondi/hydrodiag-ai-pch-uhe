@@ -299,8 +299,6 @@ export default function App() {
     }
   }, [fieldContrastMode]);
 
-  const hasRestoredInitialSessionRef = useRef<boolean>(false);
-
   const handleSyncHistoryWithCloud = async (
     itemsOverride?: SavedInvestigationSummary[]
   ) => {
@@ -326,39 +324,6 @@ export default function App() {
       }
     }
 
-    const tryInitialSessionRestore = (list: SavedInvestigationSummary[]) => {
-      if (hasRestoredInitialSessionRef.current || itemsOverride || turns.length > 0 || list.length === 0) {
-        return;
-      }
-      hasRestoredInitialSessionRef.current = true;
-      try {
-        const urlParams = new URLSearchParams(window.location.search);
-        const sessionFromUrl = urlParams.get('session');
-        const openCamFromUrl = urlParams.get('camera') === '1';
-        const isMobileDevice =
-          urlParams.get('mobile') === '1' ||
-          (urlParams.get('mobile') !== '0' && window.innerWidth < 768);
-
-        // No celular, abrir SEMPRE na Tela Inicial limpa (só carrega sessão automática se vier link explícito ?session= via QR Code)
-        const targetSessionId = isMobileDevice
-          ? sessionFromUrl
-          : sessionFromUrl || localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
-
-        const toRestore =
-          (targetSessionId &&
-            list.find((i: SavedInvestigationSummary) => i.id === targetSessionId)) ||
-          null;
-        if (toRestore) {
-          handleLoadInvestigation(toRestore);
-        }
-        if (openCamFromUrl && !isMobileDevice) {
-          setFieldCameraOpen(true);
-        }
-      } catch {
-        // Ignore
-      }
-    };
-
     try {
       const res = await fetch('/api/history/sync', {
         method: 'POST',
@@ -379,7 +344,6 @@ export default function App() {
           } catch {
             // Ignore
           }
-          tryInitialSessionRestore(data.items);
           setIsSyncingCloud(false);
           return;
         }
@@ -390,15 +354,24 @@ export default function App() {
 
     if (localItems.length > 0) {
       setSavedInvestigations(localItems);
-      tryInitialSessionRestore(localItems);
-    } else {
-      hasRestoredInitialSessionRef.current = true;
     }
     setIsSyncingCloud(false);
   };
 
-  // Load and sync saved investigations between LocalStorage and Supabase Cloud ("Agenda Financeira youware") on mount and when switching from mobile to notebook (window focus)
+  // Load and sync saved investigations list in background on mount (NEVER auto-opens old diagnosis over initial screen)
   useEffect(() => {
+    try {
+      localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
+      const url = new URL(window.location.href);
+      if (url.searchParams.has('session') || url.searchParams.has('camera')) {
+        url.searchParams.delete('session');
+        url.searchParams.delete('camera');
+        window.history.replaceState({}, '', url.toString());
+      }
+    } catch {
+      // Ignore URL cleanup errors
+    }
+
     handleSyncHistoryWithCloud();
 
     const onWindowFocus = () => {

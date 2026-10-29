@@ -34,15 +34,8 @@ export const MobileQrHandoffModal: React.FC<MobileQrHandoffModalProps> = ({
 
   const buildHandoffUrl = () => {
     if (typeof window === 'undefined') return '';
-    const url = new URL(window.location.href);
-    url.searchParams.set('session', sessionId);
+    const url = new URL(window.location.origin + window.location.pathname);
     url.searchParams.set('mobile', '1');
-    if (openCameraDirectly) {
-      url.searchParams.set('camera', '1');
-    } else {
-      url.searchParams.delete('camera');
-    }
-    url.hash = 'bancada';
     return url.toString();
   };
 

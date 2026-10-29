@@ -172,17 +172,7 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
   onSendChatMessage,
   onExitMobileMode,
 }) => {
-  const [screen, setScreen] = useState<'input' | 'result'>(() => {
-    try {
-      const urlParams = new URLSearchParams(window.location.search);
-      if (urlParams.get('session') && turns.length > 0) {
-        return 'result';
-      }
-    } catch {
-      // Ignore
-    }
-    return 'input';
-  });
+  const [screen, setScreen] = useState<'input' | 'result'>('input');
   const [showSavedList, setShowSavedList] = useState<boolean>(false);
   const [showFullLaudo, setShowFullLaudo] = useState<boolean>(false);
   const [manualPageInput, setManualPageInput] = useState<string>('1');
@@ -348,19 +338,10 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
   const prevTurnsCountRef = useRef<number>(turns.length);
   const userRequestedDiagnosisRef = useRef<boolean>(false);
 
-  // Transicionar para a tela de resultado SOMENTE quando o próprio usuário solicitou um diagnóstico no celular (ou abriu via link ?session=)
+  // Transicionar para a tela de resultado EXCLUSIVAMENTE quando o usuário clicou no botão "3. VER DIAGNÓSTICO E BORNES AGORA"
   useEffect(() => {
     if (turns.length > prevTurnsCountRef.current && turns.length > 0) {
-      const hasExplicitSessionUrl = (() => {
-        try {
-          return Boolean(
-            new URLSearchParams(window.location.search).get('session')
-          );
-        } catch {
-          return false;
-        }
-      })();
-      if (userRequestedDiagnosisRef.current || hasExplicitSessionUrl) {
+      if (userRequestedDiagnosisRef.current) {
         userRequestedDiagnosisRef.current = false;
         setScreen('result');
       }

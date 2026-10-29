@@ -8,7 +8,7 @@ if (typeof window !== 'undefined') {
       .keys()
       .then((keys) => {
         for (const key of keys) {
-          if (key.includes('workbox-precache') || key.includes('v1') || key.includes('v2')) {
+          if (!key.includes('pdf_binary_cache')) {
             caches.delete(key).catch(() => {});
           }
         }
