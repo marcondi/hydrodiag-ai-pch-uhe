@@ -67,6 +67,13 @@ interface DiagnosticReportViewProps {
   onUpdateStatus: (status: InvestigationStatus) => void;
   fieldResolutionNote: string;
   onUpdateResolutionNote: (note: string) => void;
+  onUpdateBorneStatus?: (
+    turnId: string,
+    pointId: string,
+    status: 'ok' | 'fault' | null,
+    measuredValue?: string,
+    terminalOrBorne?: string
+  ) => void;
   isLeftSidebarCollapsed?: boolean;
   onToggleLeftSidebar?: () => void;
   onRelinkAttachmentBinary?: (
@@ -98,6 +105,7 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
   onUpdateStatus,
   fieldResolutionNote,
   onUpdateResolutionNote,
+  onUpdateBorneStatus,
   isLeftSidebarCollapsed = false,
   onToggleLeftSidebar,
   onRelinkAttachmentBinary,
@@ -177,14 +185,18 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
     const allCachedBatches = attachments.flatMap(
       (a) => getCachedPdfIndex(a) || []
     );
-    const probeSummary = extractProbeSummaryFromMarkdown(turn.markdownResponse);
+    const probeSummary = extractProbeSummaryFromMarkdown(
+      turn.markdownResponse,
+      allCachedBatches
+    );
     const signalChain = extractSignalChainFromContext(
       attachments,
       turn.markdownResponse
     );
     const autoPoints = extractInteractiveMeasurementsFromMarkdown(
       turn.markdownResponse,
-      probeSummary
+      probeSummary,
+      allCachedBatches
     );
     const customPoints = customPointsByTurn[turn.id] || [];
     const allMeasurementPoints = [...autoPoints, ...customPoints];
@@ -193,16 +205,22 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
       const filledRows = allMeasurementPoints
         .map((pt) => {
           const valKey = `${turn.id}_${pt.id}`;
-          const rawVal = (measuredValues[valKey] || '').trim();
+          const savedBorne = turn.borneStatuses?.[pt.id];
+          const rawVal = (
+            measuredValues[valKey] ??
+            savedBorne?.measuredValue ??
+            ''
+          ).trim();
           if (!rawVal) return null;
           const evalRes = evaluateFieldMeasurementStatus(
             pt.expectedSpec,
             rawVal
           );
           const statusTag =
-            evalRes.status === 'ok'
+            evalRes.status === 'ok' || savedBorne?.status === 'ok'
               ? 'DENTRO DA FAIXA (OK)'
-              : evalRes.status === 'out_of_range'
+              : evalRes.status === 'out_of_range' ||
+                  savedBorne?.status === 'fault'
                 ? 'FORA DE FAIXA / ANOMALIA'
                 : 'MEDIDO';
           return `- **${pt.stepLabel} (${pt.terminalOrBorne})**: Medido = \`${rawVal}\` (Esperado: \`${pt.expectedSpec}\`) ➔ **[${statusTag}: ${evalRes.reason}]**`;
@@ -658,11 +676,21 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
                     <tbody className="divide-y divide-slate-800/80 font-mono tabular-nums">
                       {allMeasurementPoints.map((pt) => {
                         const valKey = `${turn.id}_${pt.id}`;
-                        const currentVal = measuredValues[valKey] || '';
+                        const savedBorne = turn.borneStatuses?.[pt.id];
+                        const currentVal =
+                          measuredValues[valKey] !== undefined
+                            ? measuredValues[valKey]
+                            : savedBorne?.measuredValue || '';
                         const evaluation = evaluateFieldMeasurementStatus(
                           pt.expectedSpec,
                           currentVal
                         );
+                        const effectiveOk =
+                          evaluation.status === 'ok' ||
+                          savedBorne?.status === 'ok';
+                        const effectiveFault =
+                          evaluation.status === 'out_of_range' ||
+                          savedBorne?.status === 'fault';
                         return (
                           <tr
                             key={pt.id}
@@ -694,33 +722,94 @@ export const DiagnosticReportView: React.FC<DiagnosticReportViewProps> = ({
                               {pt.expectedSpec}
                             </td>
                             <td className="px-2.5 py-2 border-r border-slate-800">
-                              <input
-                                type="text"
-                                aria-label={`Valor medido em ${pt.stepLabel}`}
-                                value={currentVal}
-                                onChange={(e) =>
-                                  setMeasuredValues((prev) => ({
-                                    ...prev,
-                                    [valKey]: e.target.value,
-                                  }))
-                                }
-                                placeholder={`Ex: 0 ou ${pt.expectedSpec}`}
-                                className="w-full bg-[#0B111E] border border-slate-700 focus:border-sky-500 rounded px-2 py-1 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none"
-                              />
+                              <div className="flex items-center gap-1">
+                                <input
+                                  type="text"
+                                  aria-label={`Valor medido em ${pt.stepLabel}`}
+                                  value={currentVal}
+                                  onChange={(e) => {
+                                    const nextVal = e.target.value;
+                                    setMeasuredValues((prev) => ({
+                                      ...prev,
+                                      [valKey]: nextVal,
+                                    }));
+                                    const nextEval =
+                                      evaluateFieldMeasurementStatus(
+                                        pt.expectedSpec,
+                                        nextVal
+                                      );
+                                    onUpdateBorneStatus?.(
+                                      turn.id,
+                                      pt.id,
+                                      nextEval.status === 'ok'
+                                        ? 'ok'
+                                        : nextEval.status === 'out_of_range'
+                                          ? 'fault'
+                                          : null,
+                                      nextVal,
+                                      pt.terminalOrBorne
+                                    );
+                                  }}
+                                  placeholder={`Ex: 0 ou ${pt.expectedSpec}`}
+                                  className="w-full bg-[#0B111E] border border-slate-700 focus:border-sky-500 rounded px-2 py-1 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setMeasuredValues((prev) => ({
+                                      ...prev,
+                                      [valKey]: pt.expectedSpec,
+                                    }));
+                                    onUpdateBorneStatus?.(
+                                      turn.id,
+                                      pt.id,
+                                      'ok',
+                                      pt.expectedSpec,
+                                      pt.terminalOrBorne
+                                    );
+                                  }}
+                                  className="px-1.5 py-1 rounded bg-emerald-500/20 hover:bg-emerald-500/35 border border-emerald-500/40 text-emerald-300 text-[10px] font-bold cursor-pointer no-print shrink-0"
+                                  title="Marcar borne como OK (Dentro da faixa)"
+                                >
+                                  ✓
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setMeasuredValues((prev) => ({
+                                      ...prev,
+                                      [valKey]: '0 Vcc',
+                                    }));
+                                    onUpdateBorneStatus?.(
+                                      turn.id,
+                                      pt.id,
+                                      'fault',
+                                      '0 Vcc',
+                                      pt.terminalOrBorne
+                                    );
+                                  }}
+                                  className="px-1.5 py-1 rounded bg-rose-500/20 hover:bg-rose-500/35 border border-rose-500/40 text-rose-300 text-[10px] font-bold cursor-pointer no-print shrink-0"
+                                  title="Marcar borne como 0V / Falha"
+                                >
+                                  0V
+                                </button>
+                              </div>
                             </td>
                             <td className="px-2.5 py-2">
-                              {evaluation.status === 'ok' ? (
+                              {effectiveOk ? (
                                 <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-[11px] font-semibold">
                                   <span>🟢 OK</span>
                                   <span className="text-[10px] font-normal text-emerald-200/90 hidden sm:inline">
-                                    · {evaluation.reason}
+                                    ·{' '}
+                                    {evaluation.reason ||
+                                      'Confirmado em campo'}
                                   </span>
                                 </span>
-                              ) : evaluation.status === 'out_of_range' ? (
+                              ) : effectiveFault ? (
                                 <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-rose-500/20 border border-rose-500/50 text-rose-300 text-[11px] font-semibold">
                                   <span>🔴 FORA DE FAIXA</span>
                                   <span className="text-[10px] font-normal text-rose-200/90 hidden sm:inline">
-                                    · {evaluation.reason}
+                                    · {evaluation.reason || 'Sem tensão / 0V'}
                                   </span>
                                 </span>
                               ) : (

@@ -42,6 +42,13 @@ export interface FaultChatMessage {
   attachedPreviewDataUrl?: string;
 }
 
+export interface BorneCheckStatus {
+  status: 'ok' | 'fault';
+  measuredValue?: string;
+  terminalOrBorne?: string;
+  updatedAt: string;
+}
+
 export interface DiagnosticTurn {
   id: string;
   timestamp: string;
@@ -52,6 +59,7 @@ export interface DiagnosticTurn {
   markdownResponse: string;
   requiresNextDrawing: boolean;
   chatMessages?: FaultChatMessage[];
+  borneStatuses?: Record<string, BorneCheckStatus>;
 }
 
 export interface SafetyChecklistItem {

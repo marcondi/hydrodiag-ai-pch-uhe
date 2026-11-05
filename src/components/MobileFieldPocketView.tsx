@@ -13,6 +13,7 @@ import {
   Loader2,
   Mic,
   MicOff,
+  Search,
   Send,
   Share2,
   Smartphone,
@@ -21,9 +22,11 @@ import {
   Trash2,
   Volume2,
   VolumeX,
+  Wrench,
   X,
 } from 'lucide-react';
 import {
+  BorneCheckStatus,
   ChatAttachmentPayload,
   DiagramAttachment,
   DiagnosticTurn,
@@ -31,12 +34,14 @@ import {
   SavedInvestigationSummary,
 } from '../types';
 import {
+  ensureSmallPdfIndexedInBackground,
   extractInteractiveMeasurementsFromMarkdown,
   extractProbeSummaryFromMarkdown,
   getCachedPdfIndex,
   loadAttachmentBinaryFromVault,
   PageBatchIndex,
   resolveCitationToPdfPage,
+  searchTagAcrossPdfAttachments,
 } from '../utils/pdfClientEngine';
 import { UniversalVoiceDictation } from '../utils/voiceDictationEngine';
 import { technicalSpeechEngine } from '../utils/speechSynthesisEngine';
@@ -60,6 +65,15 @@ interface MobileFieldPocketViewProps {
   sessionId: string;
   investigationStatus: InvestigationStatus;
   onUpdateStatus: (status: InvestigationStatus) => void;
+  fieldResolutionNote?: string;
+  onUpdateResolutionNote?: (note: string) => void;
+  onUpdateBorneStatus?: (
+    turnId: string,
+    pointId: string,
+    status: 'ok' | 'fault' | null,
+    measuredValue?: string,
+    terminalOrBorne?: string
+  ) => void;
   fieldContrastMode: boolean;
   onToggleFieldContrast: () => void;
   isSyncingCloud: boolean;
@@ -163,6 +177,9 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
   sessionId,
   investigationStatus,
   onUpdateStatus,
+  fieldResolutionNote = '',
+  onUpdateResolutionNote,
+  onUpdateBorneStatus,
   fieldContrastMode,
   onToggleFieldContrast,
   onLoadInvestigation,
@@ -182,12 +199,17 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
   const [manualInputMode, setManualInputMode] = useState<'page' | 'folha'>(
     'page'
   );
+  const [tagSearchQuery, setTagSearchQuery] = useState<string>('');
   const [chatInput, setChatInput] = useState<string>('');
   const [isDictatingQuery, setIsDictatingQuery] = useState<boolean>(false);
   const [isDictatingChat, setIsDictatingChat] = useState<boolean>(false);
+  const [isDictatingResolution, setIsDictatingResolution] =
+    useState<boolean>(false);
   const [voiceStatus, setVoiceStatus] = useState<string | null>(null);
   const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
   const [mobileNotice, setMobileNotice] = useState<string | null>(null);
+  const [resolutionSavedFeedback, setResolutionSavedFeedback] =
+    useState<boolean>(false);
 
   // Separar fotos da galeria/câmera dos documentos PDF da sessão atual
   const photoAttachments = useMemo(
@@ -288,11 +310,15 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
         if (cancelled) return;
         const norm = pdf.name.trim().toLowerCase();
         if (pdf.base64Data || hydratedCloudPdfs[pdf.id] || hydratedCloudPdfs[norm]) {
+          if (pdf.base64Data) {
+            ensureSmallPdfIndexedInBackground(pdf);
+          }
           continue;
         }
         try {
           const b64 = await loadAttachmentBinaryFromVault(pdf);
           if (b64 && !cancelled) {
+            ensureSmallPdfIndexedInBackground({ ...pdf, base64Data: b64 });
             setHydratedCloudPdfs((prev) => ({
               ...prev,
               [pdf.id]: b64,
@@ -336,6 +362,8 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
   queryRef.current = query;
   const chatInputRef = useRef<string>(chatInput);
   chatInputRef.current = chatInput;
+  const resolutionNoteRef = useRef<string>(fieldResolutionNote);
+  resolutionNoteRef.current = fieldResolutionNote;
 
   const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
   const prevTurnsCountRef = useRef<number>(turns.length);
@@ -379,6 +407,7 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
     }
     setIsDictatingQuery(false);
     setIsDictatingChat(false);
+    setIsDictatingResolution(false);
     setVoiceStatus(null);
   };
 
@@ -419,6 +448,30 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
       },
       onStateChange: (st) => {
         setIsDictatingChat(st.isRecording || st.isTranscribing);
+        setVoiceStatus(st.statusMessage);
+      },
+    });
+    voiceEngineRef.current = engine;
+    await engine.start();
+  };
+
+  const toggleVoiceForResolution = async () => {
+    if (isDictatingResolution) {
+      await voiceEngineRef.current?.stop();
+      stopVoice();
+      return;
+    }
+    stopVoice();
+    const engine = new UniversalVoiceDictation({
+      getInitialText: () => resolutionNoteRef.current,
+      onTextUpdate: (fullText) => {
+        resolutionNoteRef.current = fullText;
+        onUpdateResolutionNote?.(fullText);
+        setResolutionSavedFeedback(true);
+        setTimeout(() => setResolutionSavedFeedback(false), 1800);
+      },
+      onStateChange: (st) => {
+        setIsDictatingResolution(st.isRecording || st.isTranscribing);
         setVoiceStatus(st.statusMessage);
       },
     });
@@ -505,13 +558,17 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
   );
 
   const probeSummary = latestTurn
-    ? extractProbeSummaryFromMarkdown(latestTurn.markdownResponse)
+    ? extractProbeSummaryFromMarkdown(
+        latestTurn.markdownResponse,
+        combinedMobileCachedBatches
+      )
     : null;
 
   const measurementPoints = latestTurn
     ? extractInteractiveMeasurementsFromMarkdown(
         latestTurn.markdownResponse,
-        probeSummary
+        probeSummary,
+        combinedMobileCachedBatches
       )
     : [];
 
@@ -521,6 +578,17 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
         combinedMobileCachedBatches
       )
     : [];
+
+  // Improvement 4: Resultados em milissegundos da Busca Instantânea de TAG / Borne ("Caça-TAG")
+  const tagSearchResults = useMemo(
+    () =>
+      searchTagAcrossPdfAttachments(
+        tagSearchQuery,
+        allAvailablePdfAttachments,
+        turns
+      ),
+    [tagSearchQuery, allAvailablePdfAttachments, turns]
+  );
 
   const handleSendMobileChat = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -538,21 +606,24 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
    */
   const renderTextWithClickablePdfPages = (rawText: string) => {
     if (!rawText) return null;
+    // Limpar asteriscos/crases residuais de markdown inline
+    const cleanedInline = rawText.replace(/\*\*/g, '').replace(/`/g, '');
     const contextMd = latestTurn?.markdownResponse
-      ? `${latestTurn.markdownResponse}\n${rawText}`
-      : rawText;
-    const parts = rawText.split(
-      /(\b(?:P[áa]g(?:ina)?s?\.?|Folha(?:\s+do\s+Selo|\s+Selo)?(?:\s+FL\.?)?|Fl(?:s)?\.?)\s*(?:do\s+PDF\s*)?#?\s*\d{1,4}\b)/gi
+      ? `${latestTurn.markdownResponse}\n${cleanedInline}`
+      : cleanedInline;
+    const parts = cleanedInline.split(
+      /((?:\b(?:P[áa]g(?:ina)?s?\.?|Folha(?:\s+El[ée]trica|\s+do\s+Selo|\s+Selo|\s+Funcional)?(?:\s*\/?(?:EL|RB|ME|RM)\.?)?(?:\s+FL\.?)?|Fl(?:s)?\.?)\s*(?:do\s+PDF\s*)?[:\-–]?\s*#?\s*\d{1,4}\b)|(?:\/(?:EL|RB|ME|RM)\.\d{1,4}\b))/gi
     );
     return parts.map((segment, index) => {
       const m = segment.match(
-        /^(P[áa]g(?:ina)?s?\.?|Folha(?:\s+do\s+Selo|\s+Selo)?(?:\s+FL\.?)?|Fl(?:s)?\.?)\s*(?:do\s+PDF\s*)?#?\s*(\d{1,4})$/i
+        /^(?:(P[áa]g(?:ina)?s?\.?|Folha(?:\s+El[ée]trica|\s+do\s+Selo|\s+Selo|\s+Funcional)?(?:\s*\/?(?:EL|RB|ME|RM)\.?)?(?:\s+FL\.?)?|Fl(?:s)?\.?)\s*(?:do\s+PDF\s*)?[:\-–]?\s*#?\s*(\d{1,4})|(\/(?:EL|RB|ME|RM)\.)(\d{1,4}))$/i
       );
       if (m) {
-        const label = m[1].trim();
-        const citedNum = parseInt(m[2], 10);
+        const label = (m[1] || m[3] || '').trim();
+        const citedNum = parseInt(m[2] || m[4], 10);
         if (!isNaN(citedNum) && citedNum >= 1 && citedNum <= 2000) {
-          const isFolha = /^(?:Folha|Fl)/i.test(label);
+          const isFolha =
+            Boolean(m[3]) || /^(?:Folha|Fl|\/(?:EL|RB|ME|RM))/i.test(label);
           const resolved = resolveCitationToPdfPage(
             citedNum,
             isFolha,
@@ -580,6 +651,92 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
       }
       return <React.Fragment key={`txt_${index}`}>{segment}</React.Fragment>;
     });
+  };
+
+  /**
+   * Improvement 5: Renderizador limpo de Laudo Técnico para Celular
+   * Remove caracteres brutos de Markdown (###, **, |---|) e formata títulos,
+   * tópicos e tabelas em cartões de leitura rápida mantendo os botões de página clicáveis.
+   */
+  const renderFormattedMobileReport = (rawMarkdown: string) => {
+    if (!rawMarkdown) return null;
+    const lines = rawMarkdown.split(/\r?\n/);
+    const elements: React.ReactNode[] = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const rawLine = lines[i].trim();
+      if (!rawLine) continue;
+
+      // Ignorar linhas divisórias de tabelas markdown (ex: |---|---| ou ---)
+      if (/^[\s|:\-*_]+$/.test(rawLine)) continue;
+
+      // Títulos ### ou ## ou #
+      const headingMatch = rawLine.match(/^(#{1,4})\s+(.+)$/);
+      if (headingMatch) {
+        const cleanTitle = headingMatch[2].replace(/\*\*/g, '').trim();
+        elements.push(
+          <div
+            key={`mh_${i}`}
+            className="mt-3 mb-1.5 px-3 py-2 rounded-xl bg-slate-900 border border-sky-500/40 text-xs font-bold text-sky-300 uppercase tracking-wide"
+          >
+            {renderTextWithClickablePdfPages(cleanTitle)}
+          </div>
+        );
+        continue;
+      }
+
+      // Linhas de Tabela Markdown (| Col 1 | Col 2 | ...)
+      if (rawLine.startsWith('|') && rawLine.endsWith('|')) {
+        const cells = rawLine
+          .split('|')
+          .map((c) => c.trim())
+          .filter(Boolean);
+        if (cells.length === 0) continue;
+        elements.push(
+          <div
+            key={`mtbl_${i}`}
+            className="p-2.5 rounded-xl bg-[#0B111E] border border-slate-800 text-xs space-y-1"
+          >
+            {cells.map((cell, cIdx) => (
+              <div
+                key={`mcell_${i}_${cIdx}`}
+                className={
+                  cIdx === 0
+                    ? 'font-mono font-bold text-amber-300'
+                    : 'text-slate-200 pl-2 border-l border-slate-700'
+                }
+              >
+                {renderTextWithClickablePdfPages(cell)}
+              </div>
+            ))}
+          </div>
+        );
+        continue;
+      }
+
+      // Itens de Lista (- , * , • ou 1. )
+      const bulletMatch = rawLine.match(/^(?:[-*•]|\d+\.)\s+(.+)$/);
+      if (bulletMatch) {
+        elements.push(
+          <div
+            key={`mbul_${i}`}
+            className="pl-2.5 border-l-2 border-sky-500/40 py-0.5 text-xs text-slate-200 leading-relaxed"
+          >
+            {renderTextWithClickablePdfPages(bulletMatch[1])}
+          </div>
+        );
+        continue;
+      }
+
+      // Parágrafo comum
+      elements.push(
+        <p key={`mp_${i}`} className="text-xs text-slate-200 leading-relaxed">
+          {renderTextWithClickablePdfPages(rawLine)}
+        </p>
+      );
+    }
+
+    return <div className="space-y-2">{elements}</div>;
   };
 
   return (
@@ -868,6 +1025,82 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                 </button>
               </div>
             </form>
+
+            {/* Improvement 4: Busca Instantânea de TAG / Borne no PDF ("Caça-TAG") */}
+            <div className="pt-2 border-t border-slate-800/90 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-mono text-amber-300 font-bold flex items-center gap-1.5">
+                  <Search className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Caça-TAG / Borne Instantâneo no PDF:</span>
+                </span>
+                {tagSearchQuery.trim() && (
+                  <button
+                    type="button"
+                    onClick={() => setTagSearchQuery('')}
+                    className="text-[10px] font-mono text-slate-400 hover:text-white underline cursor-pointer"
+                  >
+                    Limpar
+                  </button>
+                )}
+              </div>
+
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={tagSearchQuery}
+                  onChange={(e) => setTagSearchQuery(e.target.value)}
+                  placeholder="Digite TAG, relé ou borne (ex: XED, KA12, A70.4, IN29, 52G)..."
+                  className="w-full bg-[#0B111E] border border-slate-700 focus:border-amber-400 rounded-xl pl-8 pr-3 py-2 text-xs font-mono text-white placeholder-slate-500 focus:outline-none"
+                />
+              </div>
+
+              {tagSearchQuery.trim().length >= 2 && (
+                <div className="space-y-1.5 max-h-48 overflow-y-auto pt-0.5">
+                  {tagSearchResults.length > 0 ? (
+                    tagSearchResults.map((res) => (
+                      <button
+                        key={`${res.attachmentId}_${res.pdfPage}`}
+                        type="button"
+                        onClick={() =>
+                          handleOpenMobilePdfSheet(
+                            res.pdfPage,
+                            res.attachmentId
+                          )
+                        }
+                        className="w-full text-left p-2.5 rounded-xl bg-[#0B111E] hover:bg-slate-800 border border-amber-500/40 flex items-center justify-between gap-2 cursor-pointer"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className="px-1.5 py-0.5 rounded bg-sky-500/20 border border-sky-500/40 text-[10px] font-mono font-bold text-sky-300">
+                              Pág. PDF {res.pdfPage}
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-[10px] font-mono font-bold text-amber-300">
+                              {res.folhaSelo}
+                            </span>
+                            <span className="text-[11px] font-semibold text-white truncate">
+                              {res.titulo}
+                            </span>
+                          </div>
+                          <p className="text-[11px] font-mono text-slate-300 truncate mt-1">
+                            {res.matchedContext}
+                          </p>
+                        </div>
+                        <span className="px-2.5 py-1.5 rounded-lg bg-sky-600 text-white font-mono font-bold text-[11px] shrink-0">
+                          Abrir →
+                        </span>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="p-2 rounded-lg bg-[#0B111E] border border-slate-800 text-[11px] text-slate-400">
+                      Nenhuma folha indexada com &quot;{tagSearchQuery}&quot;
+                      ainda. Execute o diagnóstico para indexar todas as TAGs do
+                      desenho.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -1285,10 +1518,17 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                     const bornesText =
                       measurementPoints.length > 0
                         ? measurementPoints
-                            .map(
-                              (pt, idx) =>
-                                `• Ponto #${idx + 1}: Ponta(+) ${pt.terminalOrBorne} | Ponta(-) ${pt.referenceCommon} | Esperado: ${pt.expectedSpec}${pt.pageNumber ? ` (Pág. PDF ${pt.pageNumber})` : ''}`
-                            )
+                            .map((pt, idx) => {
+                              const st: BorneCheckStatus | undefined =
+                                latestTurn.borneStatuses?.[pt.id];
+                              const checkBadge =
+                                st?.status === 'ok'
+                                  ? ' [✅ MEDIDO OK]'
+                                  : st?.status === 'fault'
+                                    ? ' [❌ DEU 0V / FALHA]'
+                                    : '';
+                              return `• Ponto #${idx + 1}${checkBadge}: Ponta(+) ${pt.terminalOrBorne} | Ponta(-) ${pt.referenceCommon} | Esperado: ${pt.expectedSpec}${pt.pageNumber ? ` (Pág. PDF ${pt.pageNumber})` : ''}`;
+                            })
                             .join('\n')
                         : 'Ver detalhamento no laudo.';
                     const pagesText =
@@ -1300,14 +1540,18 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                             )
                             .join(', ')
                         : 'N/A';
-                    const summaryText = [
+                    const summaryLines = [
                       `⚡ *HydroDiag AI — Resumo de Campo PCH/UHE*`,
                       `*Falha:* ${latestTurn.userQuery}`,
-                      `*Status:* ${investigationStatus === 'resolvida' ? 'Resolvida' : 'Em Atendimento'}`,
+                      `*Status:* ${investigationStatus === 'resolvida' ? 'Resolvida em Campo ✅' : 'Em Atendimento'}`,
+                      ...(fieldResolutionNote.trim()
+                        ? [`*Causa Raiz / O que resolveu:* ${fieldResolutionNote.trim()}`]
+                        : []),
                       `*Folhas Citadas:* ${pagesText}`,
                       `*Bornes p/ Medir com Multímetro:*`,
                       bornesText,
-                    ].join('\n');
+                    ];
+                    const summaryText = summaryLines.join('\n');
 
                     try {
                       if (navigator.share) {
@@ -1323,7 +1567,7 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                     try {
                       await navigator.clipboard.writeText(summaryText);
                       setMobileNotice(
-                        'Resumo com bornes e páginas copiado! Agora é só colar no WhatsApp da equipe.'
+                        'Resumo com bornes, status e causa raiz copiado! Agora é só colar no WhatsApp da equipe.'
                       );
                       setTimeout(() => setMobileNotice(null), 4000);
                     } catch {
@@ -1356,11 +1600,11 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
               )}
             </div>
 
-            {/* BLOCO 1: BORNES PARA MEDIR COM MULTÍMETRO + BOTÃO DIRETO DA PÁGINA DO PDF */}
+            {/* BLOCO 1: BORNES PARA MEDIR COM MULTÍMETRO + CHECK RÁPIDO POR BORNE (Improvement 2) */}
             <div className="p-4 rounded-2xl bg-[#111827] border-2 border-amber-500/40 space-y-3">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <h3 className="text-xs font-mono uppercase tracking-wider text-amber-400 font-bold">
-                  📟 1. Onde Medir com o Multímetro (Bornes)
+                  📟 1. Onde Medir com o Multímetro (Checklist de Bornes)
                 </h3>
                 {probeSummary?.locationPage && (
                   <button
@@ -1368,7 +1612,7 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                     onClick={() =>
                       handleOpenMobilePdfSheet(probeSummary.locationPage!)
                     }
-                    className="px-2.5 py-1 rounded-lg bg-sky-600 text-white font-mono font-bold text-xs flex items-center gap-1 cursor-pointer"
+                    className="px-2.5 py-1 rounded-lg bg-sky-600 text-white font-mono font-bold text-xs flex items-center gap-1 cursor-pointer shrink-0"
                   >
                     <BookOpen className="w-3.5 h-3.5" />
                     <span>Abrir Pág. {probeSummary.locationPage}</span>
@@ -1377,41 +1621,134 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
               </div>
 
               {measurementPoints.length > 0 ? (
-                <div className="space-y-2">
-                  {measurementPoints.map((pt, idx) => (
-                    <div
-                      key={pt.id}
-                      className="p-3 rounded-xl bg-[#0B111E] border border-slate-800 flex items-center justify-between gap-2.5"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <span className="text-[11px] font-mono font-bold text-sky-400 block">
-                          PONTO #{idx + 1} — {pt.stepLabel}
-                        </span>
-                        <p className="text-xs font-mono text-amber-300 mt-0.5">
-                          🔴 Ponta (+): {pt.terminalOrBorne}
-                        </p>
-                        <p className="text-xs text-slate-300 mt-0.5">
-                          ⚫ Ponta (-): {pt.referenceCommon}
-                        </p>
-                        <p className="text-xs text-emerald-300 font-mono font-bold mt-1">
-                          Esperado: {pt.expectedSpec}
-                        </p>
-                      </div>
+                <div className="space-y-2.5">
+                  {measurementPoints.map((pt, idx) => {
+                    const borneCheck = latestTurn.borneStatuses?.[pt.id];
+                    const isOk = borneCheck?.status === 'ok';
+                    const isFault = borneCheck?.status === 'fault';
+                    return (
+                      <div
+                        key={pt.id}
+                        className={`p-3 rounded-xl border transition-colors space-y-2.5 ${
+                          isOk
+                            ? 'bg-emerald-950/30 border-emerald-500/60'
+                            : isFault
+                              ? 'bg-rose-950/35 border-rose-500/60'
+                              : 'bg-[#0B111E] border-slate-800'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-2.5">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="text-[11px] font-mono font-bold text-sky-400">
+                                PONTO #{idx + 1} — {pt.stepLabel}
+                              </span>
+                              {isOk && (
+                                <span className="px-2 py-0.5 rounded-md bg-emerald-500/25 border border-emerald-400/50 text-[10px] font-mono font-bold text-emerald-200">
+                                  ✅ MEDIDO OK
+                                </span>
+                              )}
+                              {isFault && (
+                                <span className="px-2 py-0.5 rounded-md bg-rose-500/25 border border-rose-400/50 text-[10px] font-mono font-bold text-rose-200">
+                                  ❌ DEU 0V / FALHA
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-xs font-mono text-amber-300 mt-1">
+                              🔴 Ponta (+): {pt.terminalOrBorne}
+                            </p>
+                            <p className="text-xs text-slate-300 mt-0.5">
+                              ⚫ Ponta (-): {pt.referenceCommon}
+                            </p>
+                            <p className="text-xs text-emerald-300 font-mono font-bold mt-1">
+                              Esperado: {pt.expectedSpec}
+                            </p>
+                          </div>
 
-                      {pt.pageNumber && (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleOpenMobilePdfSheet(pt.pageNumber!)
-                          }
-                          className="px-3 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-mono font-bold text-xs flex flex-col items-center justify-center shrink-0 shadow cursor-pointer"
-                        >
-                          <BookOpen className="w-4 h-4 mb-0.5" />
-                          <span>Pág. {pt.pageNumber}</span>
-                        </button>
-                      )}
-                    </div>
-                  ))}
+                          {pt.pageNumber && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleOpenMobilePdfSheet(pt.pageNumber!)
+                              }
+                              className="px-3 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-mono font-bold text-xs flex flex-col items-center justify-center shrink-0 shadow cursor-pointer"
+                            >
+                              <BookOpen className="w-4 h-4 mb-0.5" />
+                              <span>Pág. {pt.pageNumber}</span>
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Improvement 2: Botões de Check Rápido Individual por Borne */}
+                        <div className="grid grid-cols-2 gap-2 pt-1.5 border-t border-slate-800/80">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const nextStatus = isOk ? null : 'ok';
+                              onUpdateBorneStatus?.(
+                                latestTurn.id,
+                                pt.id,
+                                nextStatus,
+                                pt.expectedSpec,
+                                pt.terminalOrBorne
+                              );
+                            }}
+                            className={`py-2 px-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 border cursor-pointer ${
+                              isOk
+                                ? 'bg-emerald-600 text-white border-emerald-400 shadow'
+                                : 'bg-emerald-600/15 hover:bg-emerald-600/25 text-emerald-200 border-emerald-500/40'
+                            }`}
+                          >
+                            <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                            <span>{isOk ? '✓ Borne OK' : '✅ Medido OK'}</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const nextStatus = isFault ? null : 'fault';
+                              onUpdateBorneStatus?.(
+                                latestTurn.id,
+                                pt.id,
+                                nextStatus,
+                                '0 Vcc',
+                                pt.terminalOrBorne
+                              );
+                            }}
+                            className={`py-2 px-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 border cursor-pointer ${
+                              isFault
+                                ? 'bg-rose-600 text-white border-rose-400 shadow'
+                                : 'bg-rose-600/15 hover:bg-rose-600/25 text-rose-200 border-rose-500/40'
+                            }`}
+                          >
+                            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                            <span>
+                              {isFault ? '✗ Com Falha (0V)' : '❌ Deu 0V / Falha'}
+                            </span>
+                          </button>
+                        </div>
+
+                        {isFault && (
+                          <button
+                            type="button"
+                            disabled={isChatSending}
+                            onClick={() =>
+                              onSendChatMessage(
+                                latestTurn.id,
+                                `Medi 0V / Falha no PONTO #${idx + 1} (${pt.stepLabel} — Borne: ${pt.terminalOrBorne}, onde era esperado ${pt.expectedSpec}). Qual contato NA/NF, relé ou fusível exatamente antes deste borne está aberto e onde devo medir agora?`
+                              )
+                            }
+                            className="w-full py-2 px-3 rounded-xl bg-rose-500/25 hover:bg-rose-500/35 border border-rose-400/50 text-rose-100 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                          >
+                            <Sparkles className="w-3.5 h-3.5 text-rose-300 shrink-0" />
+                            <span>
+                              Perguntar à IA: O que abriu antes deste borne?
+                            </span>
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               ) : (
                 <p className="text-xs text-slate-300">
@@ -1472,7 +1809,7 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
               </div>
             </div>
 
-            {/* BLOCO 2: LAUDO TÉCNICO COMPLETO (COM PÁGINAS CLICÁVEIS) */}
+            {/* BLOCO 2: LAUDO TÉCNICO COMPLETO FORMATADO SEM POLUIÇÃO DE MARKDOWN (Improvement 5) */}
             <div className="p-4 rounded-2xl bg-[#111827] border border-slate-800 space-y-2.5">
               <button
                 type="button"
@@ -1488,8 +1825,8 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
               </button>
 
               {showFullLaudo && (
-                <div className="pt-2.5 border-t border-slate-800 text-xs text-slate-200 leading-relaxed whitespace-pre-wrap">
-                  {renderTextWithClickablePdfPages(latestTurn.markdownResponse)}
+                <div className="pt-2.5 border-t border-slate-800">
+                  {renderFormattedMobileReport(latestTurn.markdownResponse)}
                 </div>
               )}
             </div>
@@ -1508,13 +1845,13 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                   onClick={() =>
                     onSendChatMessage(
                       latestTurn.id,
-                      'Medi 125 Vcc (tensão normal) neste borne. Qual o próximo borne a jusante devo medir agora?'
+                      'Medi tensão normal (OK) neste borne. Qual o próximo borne a jusante devo medir agora?'
                     )
                   }
                   className="py-2.5 px-3 rounded-xl bg-emerald-600/25 hover:bg-emerald-600/35 border border-emerald-500/50 text-emerald-200 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
                 >
                   <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                  <span>Tem 125 Vcc (OK)</span>
+                  <span>Tensão Normal (OK)</span>
                 </button>
 
                 <button
@@ -1533,7 +1870,7 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                 </button>
               </div>
 
-              {/* Histórico de mensagens do Chat (com páginas clicáveis!) */}
+              {/* Histórico de mensagens do Chat (com páginas clicáveis e formatação limpa!) */}
               {(latestTurn.chatMessages || []).length > 0 && (
                 <div className="max-h-72 overflow-y-auto space-y-2 pt-2 border-t border-slate-800">
                   {(latestTurn.chatMessages || []).map((msg) => (
@@ -1542,13 +1879,15 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                       className={`p-3 rounded-xl text-xs leading-relaxed ${
                         msg.role === 'user'
                           ? 'bg-sky-600/25 border border-sky-500/40 text-sky-100 ml-6'
-                          : 'bg-[#0B111E] border border-slate-800 text-slate-200 mr-2 whitespace-pre-wrap'
+                          : 'bg-[#0B111E] border border-slate-800 text-slate-200 mr-2'
                       }`}
                     >
                       <div className="text-[10px] font-mono text-slate-400 mb-1">
                         {msg.role === 'user' ? '👷 Você' : '⚡ Engenheiro IA'}
                       </div>
-                      {renderTextWithClickablePdfPages(msg.content)}
+                      {msg.role === 'assistant'
+                        ? renderFormattedMobileReport(msg.content)
+                        : renderTextWithClickablePdfPages(msg.content)}
                     </div>
                   ))}
                 </div>
@@ -1610,6 +1949,95 @@ export const MobileFieldPocketView: React.FC<MobileFieldPocketViewProps> = ({
                   <Send className="w-5 h-5" />
                 </button>
               </form>
+            </div>
+
+            {/* BLOCO 4: REGISTRO DE CAUSA RAIZ / O QUE RESOLVEU EM CAMPO COM MICROFONE (Improvement 3) */}
+            <div className="p-4 rounded-2xl bg-[#111827] border border-emerald-500/40 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-xs font-mono uppercase tracking-wider text-emerald-400 font-bold flex items-center gap-1.5">
+                  <Wrench className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span>4. Causa Raiz / O que resolveu? (Salva na OS)</span>
+                </h3>
+
+                <button
+                  type="button"
+                  onClick={toggleVoiceForResolution}
+                  className={`px-2.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 border cursor-pointer ${
+                    isDictatingResolution
+                      ? 'bg-rose-600 text-white border-rose-400 animate-pulse'
+                      : 'bg-emerald-500/20 text-emerald-200 border-emerald-500/40'
+                  }`}
+                >
+                  {isDictatingResolution ? (
+                    <>
+                      <MicOff className="w-3.5 h-3.5" />
+                      <span>Parar Voz</span>
+                    </>
+                  ) : (
+                    <>
+                      <Mic className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>Ditar Solução</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  'Reaperto de borne mal conectado / oxidado',
+                  'Substituído fusível de comando aberto',
+                  'Substituído relé auxiliar KA com contato colado',
+                  'Rearmado disjuntor de proteção / motor',
+                  'Normalizada boia / sensor de nível em campo',
+                ].map((chip) => (
+                  <button
+                    key={chip}
+                    type="button"
+                    onClick={() => {
+                      const next = fieldResolutionNote.trim()
+                        ? `${fieldResolutionNote.trim()}; ${chip}`
+                        : chip;
+                      onUpdateResolutionNote?.(next);
+                      setResolutionSavedFeedback(true);
+                      setTimeout(() => setResolutionSavedFeedback(false), 1800);
+                    }}
+                    className="px-2 py-1 rounded-lg bg-[#0B111E] hover:bg-slate-800 border border-slate-700 text-[11px] text-slate-200 cursor-pointer"
+                  >
+                    + {chip}
+                  </button>
+                ))}
+              </div>
+
+              <input
+                type="text"
+                value={fieldResolutionNote}
+                onChange={(e) => {
+                  onUpdateResolutionNote?.(e.target.value);
+                  setResolutionSavedFeedback(true);
+                  setTimeout(() => setResolutionSavedFeedback(false), 1800);
+                }}
+                placeholder="Ex: Trocado relé KA12 / Normalizado borne XED 245..."
+                className="w-full bg-[#0B111E] border border-slate-700 focus:border-emerald-500 rounded-xl px-3 py-2.5 text-xs text-white placeholder-slate-400 focus:outline-none"
+              />
+
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-mono text-emerald-400">
+                  {resolutionSavedFeedback
+                    ? '✓ Salvo automaticamente no Histórico e Nuvem!'
+                    : 'Fica gravado para toda a equipe consultar no futuro'}
+                </span>
+
+                {investigationStatus !== 'resolvida' &&
+                  fieldResolutionNote.trim().length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => onUpdateStatus('resolvida')}
+                      className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shrink-0 cursor-pointer"
+                    >
+                      ✓ Marcar Resolvida
+                    </button>
+                  )}
+              </div>
             </div>
           </div>
         )}

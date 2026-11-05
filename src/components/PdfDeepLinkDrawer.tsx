@@ -585,7 +585,13 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
     useState<boolean>(false);
   const [windowState, setWindowState] = useState<
     'normal' | 'maximized' | 'minimized'
-  >('normal');
+  >(() =>
+    typeof window !== 'undefined' && window.innerWidth < 768
+      ? 'maximized'
+      : 'normal'
+  );
+  const [isMobileToolbarExpanded, setIsMobileToolbarExpanded] =
+    useState<boolean>(false);
   const [sheetFitMode, setSheetFitMode] = useState<'contain' | 'width'>(
     'contain'
   );
@@ -1157,7 +1163,13 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
 
   useEffect(() => {
     if (isOpen) {
-      setWindowState((prev) => (prev === 'minimized' ? 'normal' : prev));
+      setWindowState((prev) => {
+        if (typeof window !== 'undefined' && window.innerWidth < 768) {
+          return 'maximized';
+        }
+        return prev === 'minimized' ? 'normal' : prev;
+      });
+      setIsMobileToolbarExpanded(false);
       const targetPage = Math.max(1, initialPage || 1);
       setCurrentPage(targetPage);
       setPageInput(String(targetPage));
@@ -2521,14 +2533,113 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
               : 'w-[94vw] max-w-7xl h-[90vh] rounded-xl bg-[#0B111E] border border-slate-700 flex flex-col shadow-2xl overflow-hidden focus:outline-none no-print-when-sheet'
         }
       >
-        {/* Top Control Bar (Double-click toggles Maximize/Restore) */}
+        {/* Compact Single-Row Mobile Clean-Screen Header (< 768px) — Frees ~88% of Vertical Screen for the Schematic */}
+        <div
+          data-no-pan="true"
+          className="md:hidden px-2.5 py-2 bg-[#111827] border-b border-slate-800 flex items-center justify-between gap-1.5 shrink-0 select-none"
+        >
+          <div className="flex items-center gap-1 bg-[#0B111E] border border-slate-700 rounded-lg p-0.5 shrink-0">
+            <button
+              type="button"
+              disabled={currentPage <= 1 || isLoadingPage}
+              onClick={() => handleGoToPage(currentPage - 1)}
+              className="p-1.5 text-slate-200 hover:text-white disabled:opacity-40 rounded cursor-pointer"
+              title="Página Anterior"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+            <div className="px-1.5 text-center leading-tight">
+              <span className="text-[11px] font-mono font-bold text-sky-300 block">
+                Pág. {currentPage}/{effectiveTotalPages}
+              </span>
+              <span className="text-[9px] font-mono text-amber-300 block">
+                {reconstructedSheet.folhaSelo.startsWith('FL')
+                  ? reconstructedSheet.folhaSelo
+                  : `FL. ${reconstructedSheet.folhaSelo}`}
+              </span>
+            </div>
+            <button
+              type="button"
+              disabled={currentPage >= effectiveTotalPages || isLoadingPage}
+              onClick={() => handleGoToPage(currentPage + 1)}
+              className="p-1.5 text-slate-200 hover:text-white disabled:opacity-40 rounded cursor-pointer"
+              title="Próxima Página"
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="flex items-center bg-[#0B111E] border border-slate-700 rounded-lg p-0.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => applyZoomStep(1 / 1.25)}
+              className="p-1.5 text-slate-200 hover:text-white rounded cursor-pointer"
+              title="Diminuir Zoom"
+            >
+              <ZoomOut className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={handleResetView}
+              className="px-1.5 py-0.5 text-[11px] font-mono font-bold text-sky-300 cursor-pointer"
+              title="Resetar Zoom (100%)"
+            >
+              {zoomPercent}%
+            </button>
+            <button
+              type="button"
+              onClick={() => applyZoomStep(1.25)}
+              className="p-1.5 text-slate-200 hover:text-white rounded cursor-pointer"
+              title="Aumentar Zoom"
+            >
+              <ZoomIn className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              onClick={() => setIsMobileToolbarExpanded((prev) => !prev)}
+              className={`px-2.5 py-1.5 rounded-lg text-[11px] font-mono font-bold border flex items-center gap-1 cursor-pointer ${
+                isMobileToolbarExpanded ||
+                interactionMode !== 'pan' ||
+                currentPageShapes.length > 0
+                  ? 'bg-amber-500/25 border-amber-400 text-amber-200'
+                  : 'bg-[#0B111E] border-slate-700 text-slate-200'
+              }`}
+              title="Expandir ou recolher ferramentas de anotação, seleção de arquivo e impressão"
+            >
+              <Pencil className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span>
+                {isMobileToolbarExpanded ? 'Ocultar' : 'Ferramentas'}
+                {currentPageShapes.length > 0
+                  ? ` (${currentPageShapes.length})`
+                  : ''}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-mono font-bold flex items-center gap-1 shadow cursor-pointer"
+              title="Fechar Diagrama PDF"
+            >
+              <X className="w-4 h-4" />
+              <span>Fechar</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Top Control Bar (Double-click toggles Maximize/Restore; collapsible on mobile) */}
         <div
           onDoubleClick={(e) => {
             const target = e.target as HTMLElement;
             if (target.closest('button, a, input, select, form')) return;
             toggleMaximizeWindow();
           }}
-          className="px-4 py-2 bg-[#111827] border-b border-slate-800 flex flex-col gap-2 shrink-0 select-none"
+          className={`${
+            isMobileToolbarExpanded ? 'flex' : 'hidden md:flex'
+          } px-4 py-2 bg-[#111827] border-b border-slate-800 flex-col gap-2 shrink-0 select-none`}
         >
           {/* Row 1: Window Title on Left + Pinned Minimizar / Maximizar / Fechar on Top-Right */}
           <div className="flex items-center justify-between gap-3 min-w-0">
@@ -2663,7 +2774,11 @@ export const PdfDeepLinkDrawer: React.FC<PdfDeepLinkDrawerProps> = ({
         </div>
 
         {/* Interactive CAD Pan ("Mãozinha"), Grouped Annotation Menu & Field Print Control Bar */}
-        <div className="px-4 py-2 bg-[#0D1526] border-b border-slate-800 flex flex-wrap items-center justify-between gap-2 shrink-0">
+        <div
+          className={`${
+            isMobileToolbarExpanded ? 'flex' : 'hidden md:flex'
+          } px-4 py-2 bg-[#0D1526] border-b border-slate-800 flex-wrap items-center justify-between gap-2 shrink-0`}
+        >
           <div className="flex flex-wrap items-center gap-1.5">
             {/* 1. Mãozinha (Pan) */}
             <button

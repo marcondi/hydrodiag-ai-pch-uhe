@@ -628,13 +628,15 @@ export default function App() {
               typeof p === 'object' &&
               !('inlineData' in (p as Record<string, unknown>))
           );
+          const retryParts =
+            lightParts.length > 1 ? lightParts : preparedParts;
           const retryResp = await fetch('/api/serverless-step', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             signal: abortController.signal,
             body: JSON.stringify({
               action: 'diagnose',
-              preparedParts: lightParts,
+              preparedParts: retryParts,
               query: queryToUse,
               focusTopic: focusToUse,
               hasAttachments: attachmentsToUse.length > 0,
@@ -1705,6 +1707,35 @@ export default function App() {
     })
     .slice(0, 6);
 
+  const handleUpdateBorneStatus = (
+    turnId: string,
+    pointId: string,
+    status: 'ok' | 'fault' | null,
+    measuredValue?: string,
+    terminalOrBorne?: string
+  ) => {
+    setTurns((prev) =>
+      prev.map((t) => {
+        if (t.id !== turnId) return t;
+        const currentMap = { ...(t.borneStatuses || {}) };
+        if (status === null) {
+          delete currentMap[pointId];
+        } else {
+          currentMap[pointId] = {
+            status,
+            measuredValue,
+            terminalOrBorne,
+            updatedAt: new Date().toISOString(),
+          };
+        }
+        return {
+          ...t,
+          borneStatuses: currentMap,
+        };
+      })
+    );
+  };
+
   return (
     <div className="min-h-screen bg-[#0B111E] text-slate-100 flex flex-col">
       {isMobilePocketMode ? (
@@ -1723,6 +1754,9 @@ export default function App() {
           sessionId={sessionId}
           investigationStatus={investigationStatus}
           onUpdateStatus={setInvestigationStatus}
+          fieldResolutionNote={fieldResolutionNote}
+          onUpdateResolutionNote={setFieldResolutionNote}
+          onUpdateBorneStatus={handleUpdateBorneStatus}
           fieldContrastMode={fieldContrastMode}
           onToggleFieldContrast={() => setFieldContrastMode((prev) => !prev)}
           isSyncingCloud={isSyncingCloud}
@@ -2320,6 +2354,15 @@ export default function App() {
                   onRunDiagnosis={handleRunDiagnosis}
                   isAnalyzing={isAnalyzing}
                   hasPreviousTurns={turns.length > 0}
+                  attachments={attachments}
+                  turns={turns}
+                  onOpenPdfPage={(pageNumber, attachmentId) =>
+                    setExternalPdfInspectRequest({
+                      attachmentId,
+                      page: pageNumber,
+                      timestamp: Date.now(),
+                    })
+                  }
                 />
               </div>
 
@@ -2354,6 +2397,7 @@ export default function App() {
                   onUpdateStatus={setInvestigationStatus}
                   fieldResolutionNote={fieldResolutionNote}
                   onUpdateResolutionNote={setFieldResolutionNote}
+                  onUpdateBorneStatus={handleUpdateBorneStatus}
                   isLeftSidebarCollapsed={isLeftSidebarCollapsed}
                   onToggleLeftSidebar={() =>
                     setIsLeftSidebarCollapsed((prev) => !prev)

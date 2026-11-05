@@ -9,8 +9,15 @@ import {
   Mic,
   MicOff,
   FileAudio,
+  BookOpen,
+  Search,
   X,
 } from 'lucide-react';
+import { DiagramAttachment, DiagnosticTurn } from '../types';
+import {
+  ensureSmallPdfIndexedInBackground,
+  searchTagAcrossPdfAttachments,
+} from '../utils/pdfClientEngine';
 import {
   requestAudioTranscription,
   UniversalVoiceDictation,
@@ -24,6 +31,9 @@ interface FaultQueryPanelProps {
   onRunDiagnosis: (overrideFocus?: string) => Promise<void>;
   isAnalyzing: boolean;
   hasPreviousTurns: boolean;
+  attachments?: DiagramAttachment[];
+  turns?: DiagnosticTurn[];
+  onOpenPdfPage?: (pageNumber: number, attachmentId?: string) => void;
 }
 
 export interface QuickSupportButtonConfig {
@@ -79,6 +89,9 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
   onRunDiagnosis,
   isAnalyzing,
   hasPreviousTurns,
+  attachments = [],
+  turns = [],
+  onOpenPdfPage,
 }) => {
   const [isListeningVoice, setIsListeningVoice] = useState(false);
   const [isTranscribingAudio, setIsTranscribingAudio] = useState(false);
@@ -87,8 +100,22 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
   const [voiceStatusMessage, setVoiceStatusMessage] = useState<string | null>(
     null
   );
+  const [pcTagSearch, setPcTagSearch] = useState<string>('');
   const audioFileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    for (const att of attachments) {
+      if (att.mimeType === 'application/pdf' && att.base64Data) {
+        ensureSmallPdfIndexedInBackground(att);
+      }
+    }
+  }, [attachments]);
+
+  const pcTagResults = React.useMemo(
+    () => searchTagAcrossPdfAttachments(pcTagSearch, attachments, turns),
+    [pcTagSearch, attachments, turns]
+  );
 
   const queryRef = useRef<string>(query);
   queryRef.current = query;
@@ -424,6 +451,84 @@ export const FaultQueryPanel: React.FC<FaultQueryPanelProps> = ({
                 : 'Executar Diagnóstico Eletromecânico'}
           </span>
         </button>
+
+        {/* Improvement 4 on PC: Instant Caça-TAG / Borne Search in Attached PDFs */}
+        {attachments.some(
+          (a) =>
+            a.mimeType === 'application/pdf' ||
+            a.name.trim().toLowerCase().endsWith('.pdf')
+        ) && (
+          <div className="pt-2.5 border-t border-slate-800/90 flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-mono font-semibold text-amber-300 flex items-center gap-1.5">
+                <Search className="w-3.5 h-3.5 text-amber-400" />
+                <span>Caça-TAG / Borne Instantâneo no PDF:</span>
+              </span>
+              {pcTagSearch.trim() && (
+                <button
+                  type="button"
+                  onClick={() => setPcTagSearch('')}
+                  className="text-[10px] font-mono text-slate-400 hover:text-white underline cursor-pointer"
+                >
+                  Limpar
+                </button>
+              )}
+            </div>
+
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={pcTagSearch}
+                onChange={(e) => setPcTagSearch(e.target.value)}
+                placeholder="Ex: XED, KA12, A70.4, IN29, 52G, FL. 51..."
+                className="w-full bg-[#0B111E] border border-slate-700 focus:border-amber-400 rounded-md pl-8 pr-3 py-1.5 text-xs font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none"
+              />
+            </div>
+
+            {pcTagSearch.trim().length >= 2 && (
+              <div className="space-y-1.5 max-h-44 overflow-y-auto">
+                {pcTagResults.length > 0 ? (
+                  pcTagResults.map((res) => (
+                    <button
+                      key={`${res.attachmentId}_${res.pdfPage}`}
+                      type="button"
+                      onClick={() =>
+                        onOpenPdfPage?.(res.pdfPage, res.attachmentId)
+                      }
+                      className="w-full text-left p-2 rounded-md bg-[#0B111E] hover:bg-slate-800 border border-amber-500/40 flex items-center justify-between gap-2 cursor-pointer"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <span className="px-1.5 py-0.5 rounded bg-sky-500/20 border border-sky-500/40 text-[10px] font-mono font-bold text-sky-300">
+                            Pág. {res.pdfPage}
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-[10px] font-mono font-bold text-amber-300">
+                            {res.folhaSelo}
+                          </span>
+                          <span className="text-[11px] font-medium text-slate-200 truncate">
+                            {res.titulo}
+                          </span>
+                        </div>
+                        <p className="text-[10px] font-mono text-slate-400 truncate mt-0.5">
+                          {res.matchedContext}
+                        </p>
+                      </div>
+                      <span className="px-2 py-1 rounded bg-sky-600 text-white font-mono font-bold text-[10px] flex items-center gap-1 shrink-0">
+                        <BookOpen className="w-3 h-3" />
+                        <span>Abrir</span>
+                      </span>
+                    </button>
+                  ))
+                ) : (
+                  <div className="p-2 rounded bg-[#0B111E] border border-slate-800 text-[11px] text-slate-400">
+                    Nenhuma folha indexada com &quot;{pcTagSearch}&quot; ainda.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </form>
     </section>
   );

@@ -582,13 +582,13 @@ async function callGeminiFast(
       ];
 
   let lastError: unknown = null;
-  const perAttemptTimeoutMs = preferUltraFastLite ? 18000 : 25000;
+  const perAttemptTimeoutMs = preferUltraFastLite ? 38000 : 48000;
 
   for (const modelName of candidateModels) {
     try {
       const config: Record<string, unknown> = { temperature: 0.2 };
       if (systemPrompt) config.systemInstruction = systemPrompt;
-      if (modelName.startsWith('gemini-3')) {
+      if (modelName === 'gemini-3-flash-preview') {
         config.thinkingConfig = {
           thinkingLevel: thinkingLevel || ThinkingLevel.MINIMAL,
         };
@@ -1137,7 +1137,7 @@ app.post('/api/serverless-step', async (req, res) => {
             ThinkingLevel.MINIMAL,
             false
           ),
-          36000,
+          75000,
           'diagnose-multimodal'
         );
       } catch {
@@ -1148,9 +1148,11 @@ app.post('/api/serverless-step', async (req, res) => {
             typeof p === 'object' &&
             !('inlineData' in (p as Record<string, unknown>))
         );
+        const fallbackParts =
+          textOnlyParts.length > 1 ? textOnlyParts : parts;
         result = await callGeminiFast(
           ai,
-          textOnlyParts,
+          fallbackParts,
           SYSTEM_INSTRUCTION,
           ThinkingLevel.MINIMAL,
           true
@@ -1242,7 +1244,7 @@ app.post('/api/serverless-step', async (req, res) => {
             ThinkingLevel.MINIMAL,
             false
           ),
-          36000,
+          75000,
           'chat-multimodal'
         );
       } catch {
@@ -1252,9 +1254,11 @@ app.post('/api/serverless-step', async (req, res) => {
             typeof p === 'object' &&
             !('inlineData' in (p as Record<string, unknown>))
         );
+        const fallbackParts =
+          textOnlyParts.length > 1 ? textOnlyParts : parts;
         result = await callGeminiFast(
           ai,
-          textOnlyParts,
+          fallbackParts,
           CHAT_SYSTEM_INSTRUCTION,
           ThinkingLevel.MINIMAL,
           true

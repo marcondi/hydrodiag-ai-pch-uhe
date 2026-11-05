@@ -639,7 +639,7 @@ async function callGeminiFast(
       ];
 
   let lastError: unknown = null;
-  const perAttemptTimeoutMs = preferUltraFastLite ? 18000 : 25000;
+  const perAttemptTimeoutMs = preferUltraFastLite ? 38000 : 48000;
 
   for (const modelName of candidateModels) {
     try {
@@ -649,7 +649,7 @@ async function callGeminiFast(
       if (systemPrompt) {
         config.systemInstruction = systemPrompt;
       }
-      if (modelName.startsWith('gemini-3')) {
+      if (modelName === 'gemini-3-flash-preview') {
         config.thinkingConfig = {
           thinkingLevel: thinkingLevel || ThinkingLevel.MINIMAL,
         };
@@ -1138,7 +1138,7 @@ Retorne APENAS os números das páginas do PDF separados por vírgula (exemplo: 
               ThinkingLevel.MINIMAL,
               false
             ),
-            36000,
+            75000,
             'diagnose-multimodal'
           );
         } catch {
@@ -1148,9 +1148,11 @@ Retorne APENAS os números das páginas do PDF separados por vírgula (exemplo: 
               typeof p === 'object' &&
               !('inlineData' in (p as Record<string, unknown>))
           );
+          const fallbackParts =
+            textOnlyParts.length > 1 ? textOnlyParts : parts;
           result = await callGeminiFast(
             ai,
-            textOnlyParts,
+            fallbackParts,
             SYSTEM_INSTRUCTION,
             ThinkingLevel.MINIMAL,
             true
@@ -1260,7 +1262,7 @@ Responda em Markdown técnico claro, objetivo e direto, analisando integralmente
               ThinkingLevel.MINIMAL,
               false
             ),
-            36000,
+            75000,
             'chat-multimodal'
           );
         } catch {
@@ -1270,9 +1272,11 @@ Responda em Markdown técnico claro, objetivo e direto, analisando integralmente
               typeof p === 'object' &&
               !('inlineData' in (p as Record<string, unknown>))
           );
+          const fallbackParts =
+            textOnlyParts.length > 1 ? textOnlyParts : parts;
           result = await callGeminiFast(
             ai,
-            textOnlyParts,
+            fallbackParts,
             CHAT_SYSTEM_INSTRUCTION,
             ThinkingLevel.MINIMAL,
             true
